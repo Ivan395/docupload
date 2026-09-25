@@ -1,0 +1,535 @@
+import { AppData, AppLogic } from "models.slint";
+
+export component ResultsPanel inherits Rectangle {
+    background: #ffffff;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 20px;
+
+        // Cabecera del Resumen
+        HorizontalLayout {
+            alignment: space-between;
+
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: center;
+
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: 16px;
+                    background: #dcfce7;
+                    Text {
+                        text: "✓";
+                        font-size: 16px;
+                        font-weight: 800;
+                        color: #15803d;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: "Resumen de Procesamiento y Validación";
+                        font-size: 18px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+                    Text {
+                        text: "Se analizaron los documentos y se generaron los reportes solicitados.";
+                        font-size: 12px;
+                        color: #64748b;
+                    }
+                }
+            }
+
+            // Botones abrir carpeta descargada
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: center;
+
+                if AppData.summary.has-nominas_excel : Rectangle {
+                    height: 38px;
+                    background: folder_nom_touch.has-hover ? #dbeafe : #eff6ff;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #bfdbfe;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text { text: "📁"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Carpeta Nóminas";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #1e40af;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    folder_nom_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.open_nominas_folder(); }
+                    }
+                }
+
+                if AppData.summary.has-cedulas_excel : Rectangle {
+                    height: 38px;
+                    background: folder_ced_touch.has-hover ? #ccfbf1 : #f0fdfa;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #99f6e4;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text { text: "📁"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Carpeta Cédulas";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #0f766e;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    folder_ced_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.open_cedulas_folder(); }
+                    }
+                }
+            }
+        }
+
+        // Tarjetas de Métricas (Nóminas y Cédulas)
+        HorizontalLayout {
+            width: 100%;
+            spacing: 20px;
+
+            // Métrica Nóminas
+            Rectangle {
+                width: (parent.width - 20px) / 2;
+                background: #f8fafc;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "NÓMINAS (CFDI 1.2)";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #1e40af;
+                        }
+                        Rectangle {
+                            background: AppData.summary.has-nominas_excel ? #dcfce7 : #f1f5f9;
+                            border-radius: 6px;
+                            height: 22px;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                Text {
+                                    text: AppData.summary.has-nominas_excel ? "Excel Generado" : "Sin procesar";
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    color: AppData.summary.has-nominas_excel ? #15803d : #64748b;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 16px;
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "Total analizadas:"; font-size: 11px; color: #64748b; }
+                            Text {
+                                text: AppData.summary.nominas_total + "";
+                                font-size: 20px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "Válidas (Vigentes SAT):"; font-size: 11px; color: #16a34a; font-weight: 600; }
+                            Text {
+                                text: AppData.summary.nominas_valid + "";
+                                font-size: 20px;
+                                font-weight: 800;
+                                color: #16a34a;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "No procesadas / Rechazadas:"; font-size: 11px; color: #dc2626; font-weight: 600; }
+                            Text {
+                                text: AppData.summary.nominas_invalid + "";
+                                font-size: 20px;
+                                font-weight: 800;
+                                color: #dc2626;
+                            }
+                        }
+                    }
+
+                    if AppData.summary.has-nominas_excel : HorizontalLayout {
+                        spacing: 8px;
+
+                        Rectangle {
+                            height: 36px;
+                            horizontal-stretch: 1;
+                            background: dl_nom_touch.has-hover ? #1e40af : #2563eb;
+                            border-radius: 6px;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 6px;
+                                Text { text: "📥"; font-size: 13px; color: #ffffff; vertical-alignment: center; }
+                                Text {
+                                    text: "Guardar Excel...";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #ffffff;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            dl_nom_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.download_nominas_excel(); }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 36px;
+                            horizontal-stretch: 1;
+                            background: open_nom_res_touch.has-hover ? #e2e8f0 : #ffffff;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 6px;
+                                Text { text: "📁"; font-size: 12px; vertical-alignment: center; }
+                                Text {
+                                    text: "Abrir carpeta";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #1e293b;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            open_nom_res_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.open_nominas_folder(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Métrica Cédulas
+            Rectangle {
+                width: (parent.width - 20px) / 2;
+                background: #f8fafc;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "CÉDULAS DE CUOTAS (SUA)";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #0f766e;
+                        }
+                        Rectangle {
+                            background: AppData.summary.has-cedulas_excel ? #dcfce7 : #f1f5f9;
+                            border-radius: 6px;
+                            height: 22px;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                Text {
+                                    text: AppData.summary.has-cedulas_excel ? "Excel Generado" : "Sin procesar";
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    color: AppData.summary.has-cedulas_excel ? #15803d : #64748b;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 16px;
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "Total analizadas:"; font-size: 11px; color: #64748b; }
+                            Text {
+                                text: AppData.summary.cedulas_total + "";
+                                font-size: 20px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "Válidas (Formato SUA):"; font-size: 11px; color: #0f766e; font-weight: 600; }
+                            Text {
+                                text: AppData.summary.cedulas_valid + "";
+                                font-size: 20px;
+                                font-weight: 800;
+                                color: #0f766e;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "No procesadas / Rechazadas:"; font-size: 11px; color: #dc2626; font-weight: 600; }
+                            Text {
+                                text: AppData.summary.cedulas_invalid + "";
+                                font-size: 20px;
+                                font-weight: 800;
+                                color: #dc2626;
+                            }
+                        }
+                    }
+
+                    if AppData.summary.has-cedulas_excel : HorizontalLayout {
+                        spacing: 8px;
+
+                        Rectangle {
+                            height: 36px;
+                            horizontal-stretch: 1;
+                            background: dl_ced_touch.has-hover ? #0f766e : #0d9488;
+                            border-radius: 6px;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 6px;
+                                Text { text: "📥"; font-size: 13px; color: #ffffff; vertical-alignment: center; }
+                                Text {
+                                    text: "Guardar Excel...";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #ffffff;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            dl_ced_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.download_cedulas_excel(); }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 36px;
+                            horizontal-stretch: 1;
+                            background: open_ced_res_touch.has-hover ? #e2e8f0 : #ffffff;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 6px;
+                                Text { text: "📁"; font-size: 12px; vertical-alignment: center; }
+                                Text {
+                                    text: "Abrir carpeta";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #1e293b;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            open_ced_res_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.open_cedulas_folder(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Detalle de Archivos No Procesados / Rechazados
+        if AppData.unprocessed_items.length > 0 : VerticalLayout {
+            spacing: 12px;
+
+            Rectangle {
+                height: 1px;
+                background: #f1f5f9;
+            }
+
+            HorizontalLayout {
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+
+                    Rectangle {
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 10px;
+                        background: #fee2e2;
+                        Text {
+                            text: "!";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #dc2626;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Archivos No Procesados o Rechazados (" + AppData.unprocessed_items.length + ")";
+                        font-size: 15px;
+                        font-weight: 800;
+                        color: #991b1b;
+                    }
+                }
+
+                Text {
+                    text: "Puedes copiar el motivo de error para reportarlo a soporte técnico";
+                    font-size: 11px;
+                    color: #64748b;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Lista de no procesados
+            VerticalLayout {
+                spacing: 8px;
+
+                for item[idx] in AppData.unprocessed_items : Rectangle {
+                    background: #fffaf0;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #fed7aa;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 6px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: center;
+
+                                Rectangle {
+                                    background: item.category == "NÓMINA" ? #dbeafe : #ccfbf1;
+                                    border-radius: 4px;
+                                    height: 22px;
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        Text {
+                                            text: item.category;
+                                            font-size: 10px;
+                                            font-weight: 800;
+                                            color: item.category == "NÓMINA" ? #1e40af : #0f766e;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: item.filename;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    color: #1e293b;
+                                }
+
+                                if item.uuid != "" : Text {
+                                    text: "UUID: " + item.uuid;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #475569;
+                                }
+                            }
+
+                            // Botón copiar error
+                            Rectangle {
+                                height: 26px;
+                                background: copy_touch.has-hover ? #fed7aa : #ffedd5;
+                                border-radius: 4px;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 4px;
+                                    alignment: center;
+
+                                    Text { text: "📋"; font-size: 11px; vertical-alignment: center; }
+                                    Text {
+                                        text: "Copiar detalle";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #9a3412;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                copy_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        AppLogic.copy_text_to_clipboard(
+                                            "[" + item.category + "] Archivo: " + item.filename +
+                                            (item.uuid != "" ? " | UUID: " + item.uuid : "") +
+                                            " | Motivo: " + item.reason
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Motivo: " + item.reason;
+                            font-size: 12px;
+                            color: #b45309;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

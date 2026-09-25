@@ -1,0 +1,154 @@
+// Pastilla/Etiqueta para extensiones de archivos (.PDF, .XML, etc.)
+export component FormatBadge inherits Rectangle {
+    in property <string> text;
+    background: #e8eef8;
+    border-radius: 4px;
+    height: 22px;
+    width: 48px;
+
+    Text {
+        text: root.text;
+        font-size: 11px;
+        font-weight: 700;
+        color: #1e40af;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Pastilla con punto indicador de estado
+export component StatusPill inherits Rectangle {
+    in property <string> text;
+    in property <color> dot-color: #10b981;
+    in property <color> text-color: #065f46;
+    in property <color> pill-background: #d1fae5;
+
+    height: 30px;
+    background: root.pill-background;
+    border-radius: 15px;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 6px;
+        alignment: center;
+
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: root.dot-color;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            font-size: 11px;
+            font-weight: 700;
+            color: root.text-color;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Fila de archivo cargado con botón de eliminación interactivo
+export component ClickableFileItem inherits Rectangle {
+    in property <string> filename;
+    in property <string> filesize;
+    in property <string> extension;
+    in property <bool> is_archive;
+    callback remove();
+
+    background: #f8fafc;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    height: 52px;
+    horizontal-stretch: 1;
+
+    Rectangle {
+        y: parent.height - 3px;
+        x: 10px;
+        width: parent.width - 20px;
+        height: 3px;
+        background: #10b981;
+        border-radius: 2px;
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 14px;
+        alignment: space-between;
+
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+            horizontal-stretch: 1;
+
+            Rectangle {
+                width: 34px;
+                height: 34px;
+                border-radius: 6px;
+                background: root.is_archive ? #fef3c7 : (root.extension == "pdf" ? #fee2e2 : #dbeafe);
+                y: (parent.height - self.height) / 2;
+
+                Text {
+                    text: root.is_archive ? "📦" : (root.extension == "pdf" ? "📄" : "🗎");
+                    font-size: 16px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                horizontal-stretch: 1;
+
+                Text {
+                    text: root.filename;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: #1e293b;
+                    overflow: elide;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: root.filesize;
+                        font-size: 10px;
+                        color: #64748b;
+                    }
+                    Text {
+                        text: "• Listo para procesar";
+                        font-size: 10px;
+                        font-weight: 600;
+                        color: #059669;
+                    }
+                }
+            }
+        }
+
+        // Botón de eliminar
+        Rectangle {
+            width: 28px;
+            height: 28px;
+            border-radius: 14px;
+            background: delete_touch.has-hover ? #fee2e2 : transparent;
+            y: (parent.height - self.height) / 2;
+
+            Text {
+                text: "✕";
+                font-size: 13px;
+                font-weight: 700;
+                color: delete_touch.has-hover ? #dc2626 : #94a3b8;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            delete_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove(); }
+            }
+        }
+    }
+}

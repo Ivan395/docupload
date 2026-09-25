@@ -1,0 +1,493 @@
+import { AppData, AppLogic } from "models.slint";
+
+export component ActionPanel inherits Rectangle {
+    background: #ffffff;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+
+    property <bool> can-process: (AppData.nominas_files.length > 0 || AppData.cedulas_files.length > 0) && !AppData.is_processing;
+
+    property <string> mode-description:
+        (AppData.nominas_files.length > 0 && AppData.cedulas_files.length > 0) ?
+            "Modo Dual: Se generarán 2 reportes Excel independientes (Nóminas SAT y Cédulas SUA)" :
+            (AppData.nominas_files.length > 0 ?
+                "Modo Nóminas: Se generará 1 reporte Excel de Nóminas validadas ante el SAT" :
+                (AppData.cedulas_files.length > 0 ?
+                    "Modo Cédulas: Se generará 1 reporte Excel de Liquidaciones IMSS SUA" :
+                    "Carga archivos en el Paso 1 (Nóminas) y/o Paso 2 (Cédulas) para comenzar"));
+
+    VerticalLayout {
+        padding: 22px;
+        spacing: 18px;
+
+        HorizontalLayout {
+            alignment: space-between;
+
+            // Modo y descripción
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: center;
+
+                Rectangle {
+                    width: 24px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: root.can-process ? #dbeafe : #f1f5f9;
+
+                    Text {
+                        text: (AppData.nominas_files.length > 0 && AppData.cedulas_files.length > 0) ? "⚡" : (root.can-process ? "✓" : "ℹ");
+                        font-size: 13px;
+                        color: root.can-process ? #1d4ed8 : #94a3b8;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+
+                    Text {
+                        text: root.mode-description;
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: root.can-process ? #0f172a : #64748b;
+                    }
+                    Text {
+                        text: "Validación automática de UUID ante el SAT (SOAP) y extracción de layout SUA";
+                        font-size: 11px;
+                        color: #64748b;
+                    }
+                }
+            }
+
+            // Botones de acción
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: center;
+
+                // Limpiar todo
+                Rectangle {
+                    height: 42px;
+                    background: clear_touch.has-hover ? #e2e8f0 : #f1f5f9;
+                    border-radius: 8px;
+
+                    animate background { duration: 150ms; }
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 6px;
+                        alignment: center;
+                        Text { text: "🗑"; font-size: 12px; vertical-alignment: center; }
+                        Text {
+                            text: "Limpiar todo";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #334155;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    clear_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.clear_all(); }
+                    }
+                }
+
+                // Botón Procesar Nóminas (Independiente)
+                if AppData.nominas_files.length > 0 : Rectangle {
+                    height: 42px;
+                    background: AppData.nominas_is_processing ? #93c5fd : (proc_nom_touch.has-hover ? #1e40af : #2563eb);
+                    border-radius: 8px;
+
+                    animate background { duration: 150ms; }
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text {
+                            text: AppData.nominas_is_processing ? "⏳" : "⚡";
+                            font-size: 13px;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: AppData.nominas_is_processing ? "Procesando Nóminas..." : "Procesar Nóminas (" + AppData.nominas_files.length + ")";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    proc_nom_touch := TouchArea {
+                        mouse-cursor: AppData.nominas_is_processing ? default : pointer;
+                        clicked => {
+                            if (!AppData.nominas_is_processing) {
+                                AppLogic.process_nominas();
+                            }
+                        }
+                    }
+                }
+
+                // Botón Procesar Cédulas (Independiente)
+                if AppData.cedulas_files.length > 0 : Rectangle {
+                    height: 42px;
+                    background: AppData.cedulas_is_processing ? #99f6e4 : (proc_ced_touch.has-hover ? #0f766e : #0d9488);
+                    border-radius: 8px;
+
+                    animate background { duration: 150ms; }
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text {
+                            text: AppData.cedulas_is_processing ? "⏳" : "⚡";
+                            font-size: 13px;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: AppData.cedulas_is_processing ? "Procesando Cédulas..." : "Procesar Cédulas (" + AppData.cedulas_files.length + ")";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    proc_ced_touch := TouchArea {
+                        mouse-cursor: AppData.cedulas_is_processing ? default : pointer;
+                        clicked => {
+                            if (!AppData.cedulas_is_processing) {
+                                AppLogic.process_cedulas();
+                            }
+                        }
+                    }
+                }
+
+                // Botón Procesar Ambos (cuando ambos tienen archivos y ninguno está en proceso)
+                if AppData.nominas_files.length > 0 && AppData.cedulas_files.length > 0 && !AppData.nominas_is_processing && !AppData.cedulas_is_processing : Rectangle {
+                    height: 42px;
+                    background: proc_both_touch.has-hover ? #0f172a : #1e293b;
+                    border-radius: 8px;
+
+                    animate background { duration: 150ms; }
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text { text: "➔"; font-size: 13px; color: #ffffff; vertical-alignment: center; }
+                        Text {
+                            text: "Procesar Ambos";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    proc_both_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            AppLogic.process_files();
+                        }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // BARRAS DE ESTADO INDEPENDIENTES (NÓMINAS Y CÉDULAS) CON DESCARGA INMEDIATA
+        // =========================================================================
+        if AppData.nominas_is_processing || AppData.nominas_ready_to_download || AppData.cedulas_is_processing || AppData.cedulas_ready_to_download : VerticalLayout {
+            spacing: 10px;
+
+            // 1. Barra de estado para Nóminas
+            if AppData.nominas_is_processing || AppData.nominas_ready_to_download : Rectangle {
+                background: #f8fafc;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: center;
+                            Rectangle {
+                                width: 22px;
+                                height: 22px;
+                                border-radius: 11px;
+                                background: #e0e7ff;
+                                Text { text: "1"; font-size: 11px; font-weight: 800; color: #1d4ed8; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Text {
+                                text: "Nóminas SAT: " + AppData.nominas_progress_text;
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: center;
+
+                            Text {
+                                text: Math.round(AppData.nominas_progress_fraction * 100) + "%";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+
+                            if AppData.nominas_ready_to_download : HorizontalLayout {
+                                spacing: 6px;
+                                alignment: center;
+
+                                Rectangle {
+                                    height: 32px;
+                                    background: open_nom_act_btn.has-hover ? #e2e8f0 : #f1f5f9;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: #cbd5e1;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 4px;
+                                        alignment: center;
+                                        Text { text: "📁"; font-size: 11px; vertical-alignment: center; }
+                                        Text {
+                                            text: "Abrir carpeta";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #1e293b;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    open_nom_act_btn := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.open_nominas_folder(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 32px;
+                                    background: dl_nom_act_btn.has-hover ? #1e40af : #2563eb;
+                                    border-radius: 6px;
+
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 6px;
+                                        alignment: center;
+                                        Text { text: "📥"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                                        Text {
+                                            text: "Descargar Excel Nóminas";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #ffffff;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    dl_nom_act_btn := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.download_nominas_excel(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 7px;
+                        background: #e2e8f0;
+                        border-radius: 4px;
+
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            height: parent.height;
+                            width: parent.width * Math.clamp(AppData.nominas_progress_fraction, 0.0, 1.0);
+                            background: AppData.nominas_ready_to_download ? #10b981 : #2563eb;
+                            border-radius: 4px;
+                            animate width { duration: 150ms; }
+                        }
+                    }
+                }
+            }
+
+            // 2. Barra de estado para Cédulas
+            if AppData.cedulas_is_processing || AppData.cedulas_ready_to_download : Rectangle {
+                background: #f8fafc;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: center;
+                            Rectangle {
+                                width: 22px;
+                                height: 22px;
+                                border-radius: 11px;
+                                background: #ccfbf1;
+                                Text { text: "2"; font-size: 11px; font-weight: 800; color: #0f766e; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Text {
+                                text: "Cédulas SUA: " + AppData.cedulas_progress_text;
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: center;
+
+                            Text {
+                                text: Math.round(AppData.cedulas_progress_fraction * 100) + "%";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #0f766e;
+                                vertical-alignment: center;
+                            }
+
+                            if AppData.cedulas_ready_to_download : HorizontalLayout {
+                                spacing: 6px;
+                                alignment: center;
+
+                                Rectangle {
+                                    height: 32px;
+                                    background: open_ced_act_btn.has-hover ? #e2e8f0 : #f1f5f9;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: #cbd5e1;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 4px;
+                                        alignment: center;
+                                        Text { text: "📁"; font-size: 11px; vertical-alignment: center; }
+                                        Text {
+                                            text: "Abrir carpeta";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #1e293b;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    open_ced_act_btn := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.open_cedulas_folder(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 32px;
+                                    background: dl_ced_act_btn.has-hover ? #0f766e : #0d9488;
+                                    border-radius: 6px;
+
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 6px;
+                                        alignment: center;
+                                        Text { text: "📥"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                                        Text {
+                                            text: "Descargar Excel Cédulas";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #ffffff;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    dl_ced_act_btn := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.download_cedulas_excel(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 7px;
+                        background: #e2e8f0;
+                        border-radius: 4px;
+
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            height: parent.height;
+                            width: parent.width * Math.clamp(AppData.cedulas_progress_fraction, 0.0, 1.0);
+                            background: AppData.cedulas_ready_to_download ? #10b981 : #0d9488;
+                            border-radius: 4px;
+                            animate width { duration: 150ms; }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #f1f5f9;
+        }
+
+        // Info de cifrado y seguridad
+        HorizontalLayout {
+            alignment: space-between;
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "🔒"; font-size: 13px; color: #059669; }
+                Text {
+                    text: "Conexión directa SOAP con el SAT (ConsultaCFDIService) • Procesamiento de PDFs 100% local";
+                    font-size: 11px;
+                    color: #64748b;
+                }
+            }
+
+            Text {
+                text: "Servicio SAT Oficial  •  Integridad Verificada";
+                font-size: 11px;
+                font-weight: 700;
+                color: #047857;
+            }
+        }
+    }
+}

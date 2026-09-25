@@ -1,0 +1,112 @@
+import { StatusPill } from "common.slint";
+import { AppData } from "models.slint";
+
+export component NavBar inherits Rectangle {
+    height: 70px;
+    background: #ffffff;
+    border-width: 1px;
+    border-color: #e2e8f0;
+
+    HorizontalLayout {
+        padding-left: 32px;
+        padding-right: 32px;
+        alignment: space-between;
+
+        // Izquierda: Logo y Título
+        HorizontalLayout {
+            spacing: 16px;
+            alignment: center;
+
+            HorizontalLayout {
+                spacing: 10px;
+
+                VerticalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 6px;
+                        background: #1e40af;
+
+                        Text {
+                            text: "📊";
+                            font-size: 15px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: "DocuUpload Fiscal & Nóminas";
+                        font-size: 17px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+                    Text {
+                        text: "Validación SAT SOAP y Procesamiento SUA IMSS";
+                        font-size: 11px;
+                        color: #64748b;
+                    }
+                }
+            }
+        }
+
+        // Centro: Estado actual
+        VerticalLayout {
+            alignment: center;
+            StatusPill {
+                text: AppData.status_message;
+                dot-color: AppData.is_processing ? #3b82f6 : (AppData.has_results ? #10b981 : #64748b);
+                text-color: AppData.is_processing ? #1e40af : (AppData.has_results ? #065f46 : #334155);
+                pill-background: AppData.is_processing ? #dbeafe : (AppData.has_results ? #d1fae5 : #f1f5f9);
+            }
+        }
+
+        // Derecha: Badge de Usuario
+        VerticalLayout {
+            alignment: center;
+
+            Rectangle {
+                height: 40px;
+                background: #f8fafc;
+                border-radius: 20px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 6px;
+                    spacing: 10px;
+                    alignment: center;
+
+                    Text {
+                        text: "Firma Fiscal ACD";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #1e293b;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: #1d4ed8;
+                        Text {
+                            text: "👤";
+                            color: #ffffff;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

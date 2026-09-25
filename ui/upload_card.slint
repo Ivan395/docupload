@@ -1,0 +1,466 @@
+import { FormatBadge, ClickableFileItem } from "common.slint";
+import { FileItemData } from "models.slint";
+
+export component UploadCard inherits Rectangle {
+    in property <string> step-number: "1";
+    in property <color> step-color-bg: #e0e7ff;
+    in property <color> step-color-fg: #1d4ed8;
+    in property <string> title: "Título de Sección";
+    in property <string> subtitle: "Descripción del tipo de documentos a ingresar.";
+    in property <string> drop-icon: "☁";
+    in property <color> drop-icon-bg: #e0e7ff;
+    in property <color> drop-icon-fg: #2563eb;
+    in property <string> drop-action-text: "haz clic para explorar";
+    in property <string> drop-info-text: "Detecta automáticamente archivos del periodo";
+    in property <string> primary-format: ".XML";
+    in property <string> total-badge: "0 KB TOTALES";
+    in property <string> count-label: "0 archivos listos";
+    in property <[FileItemData]> files: [];
+    in property <bool> is_processing: false;
+    in property <float> progress_fraction: 0.0;
+    in property <string> progress_text: "";
+    in property <bool> ready_to_download: false;
+    in property <string> download_button_text: "Descargar Excel";
+    in property <string> process_button_text: "Procesar Archivos";
+
+    callback add-files();
+    callback clear-files();
+    callback remove-file(int);
+    callback download();
+    callback process();
+    callback open-folder();
+
+    horizontal-stretch: 1;
+    min-width: 380px;
+
+    background: #ffffff;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+
+    VerticalLayout {
+        padding: 22px;
+        spacing: 16px;
+
+        // Cabecera de la tarjeta
+        HorizontalLayout {
+            alignment: space-between;
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: center;
+                Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 13px;
+                    background: root.step-color-bg;
+                    Text {
+                        text: root.step-number;
+                        font-size: 13px;
+                        font-weight: 800;
+                        color: root.step-color-fg;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: root.title;
+                    font-size: 16px;
+                    font-weight: 800;
+                    color: #0f172a;
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: center;
+
+                if root.files.length > 0 : Rectangle {
+                    height: 24px;
+                    background: head_clear_touch.has-hover ? #fee2e2 : #fef2f2;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: #fca5a5;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        alignment: center;
+                        Text { text: "🗑"; font-size: 11px; vertical-alignment: center; }
+                        Text {
+                            text: "Eliminar todo";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #dc2626;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    head_clear_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.clear-files(); }
+                    }
+                }
+
+                Rectangle {
+                    background: #eff6ff;
+                    border-radius: 10px;
+                    height: 24px;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        Text {
+                            text: "Múltiples archivos o .ZIP / .RAR";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #1d4ed8;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: root.subtitle;
+            font-size: 12px;
+            color: #64748b;
+        }
+
+        // Zona Dropzone interactiva
+        Rectangle {
+            height: 145px;
+            background: drop_touch.has-hover ? #f1f5f9 : #f8fafc;
+            border-radius: 10px;
+            border-width: 2px;
+            border-color: drop_touch.has-hover ? root.step-color-fg : #cbd5e1;
+
+            animate background { duration: 150ms; }
+            animate border-color { duration: 150ms; }
+
+            drop_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.add-files(); }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 8px;
+
+                Rectangle {
+                    width: 40px;
+                    height: 40px;
+                    border-radius: 20px;
+                    background: root.drop-icon-bg;
+                    x: (parent.width - self.width) / 2;
+                    Text {
+                        text: root.drop-icon;
+                        font-size: 18px;
+                        color: root.drop-icon-fg;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Arrastra tus archivos aquí o ";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: #1e293b;
+                    }
+                    Text {
+                        text: root.drop-action-text;
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: root.drop-icon-fg;
+                    }
+                }
+
+                Text {
+                    text: root.drop-info-text;
+                    font-size: 11px;
+                    color: #64748b;
+                    horizontal-alignment: center;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+                    FormatBadge { text: root.primary-format; }
+                    FormatBadge { text: ".ZIP"; }
+                    FormatBadge { text: ".RAR"; }
+                }
+            }
+        }
+
+        // Barra de progreso específica para este módulo
+        if root.is_processing : VerticalLayout {
+            spacing: 6px;
+
+            HorizontalLayout {
+                alignment: space-between;
+                Text {
+                    text: root.progress_text;
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: root.step-color-fg;
+                }
+                Text {
+                    text: Math.round(root.progress_fraction * 100) + "%";
+                    font-size: 11px;
+                    font-weight: 800;
+                    color: root.step-color-fg;
+                }
+            }
+
+            Rectangle {
+                height: 6px;
+                background: #e2e8f0;
+                border-radius: 3px;
+
+                Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    height: parent.height;
+                    width: parent.width * Math.clamp(root.progress_fraction, 0.0, 1.0);
+                    background: root.step-color-fg;
+                    border-radius: 3px;
+                    animate width { duration: 150ms; }
+                }
+            }
+        }
+
+        // Botón de procesamiento individual para este módulo
+        if root.files.length > 0 && !root.is_processing && !root.ready_to_download : Rectangle {
+            height: 38px;
+            background: proc_card_touch.has-hover ? root.step-color-fg.darker(15%) : root.step-color-fg;
+            border-radius: 8px;
+
+            animate background { duration: 150ms; }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 8px;
+                Text { text: "⚡"; font-size: 13px; color: #ffffff; vertical-alignment: center; }
+                Text {
+                    text: root.process_button_text;
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #ffffff;
+                    vertical-alignment: center;
+                }
+            }
+
+            proc_card_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.process(); }
+            }
+        }
+
+        // Botón de descarga inmediata y abrir carpeta cuando este módulo termina de procesarse
+        if root.ready_to_download : Rectangle {
+            height: 48px;
+            background: #ecfdf5;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #a7f3d0;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    Text { text: "✓"; font-size: 14px; font-weight: 800; color: #16a34a; vertical-alignment: center; }
+                    Text { text: "¡Excel procesado y listo!"; font-size: 12px; font-weight: 700; color: #15803d; vertical-alignment: center; }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+
+                    // Abrir carpeta donde se descargó
+                    Rectangle {
+                        height: 34px;
+                        background: card_open_touch.has-hover ? #e2e8f0 : #f1f5f9;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 5px;
+                            alignment: center;
+
+                            Text { text: "📁"; font-size: 12px; vertical-alignment: center; }
+                            Text {
+                                text: "Abrir carpeta";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        card_open_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.open-folder(); }
+                        }
+                    }
+
+                    // Descargar Excel
+                    Rectangle {
+                        height: 34px;
+                        background: card_dl_touch.has-hover ? #15803d : #16a34a;
+                        border-radius: 6px;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text { text: "📥"; font-size: 13px; color: #ffffff; vertical-alignment: center; }
+                            Text {
+                                text: root.download_button_text;
+                                font-size: 11px;
+                                font-weight: 800;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        card_dl_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.download(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Encabezado de lista de archivos
+        HorizontalLayout {
+            alignment: space-between;
+            Text {
+                text: "ARCHIVOS CARGADOS (" + root.files.length + ")";
+                font-size: 11px;
+                font-weight: 700;
+                color: #475569;
+            }
+            Text {
+                text: root.total-badge;
+                font-size: 11px;
+                font-weight: 700;
+                color: #059669;
+            }
+        }
+
+        // Lista de archivos
+        if root.files.length == 0 : Rectangle {
+            height: 70px;
+            background: #f8fafc;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #f1f5f9;
+
+            Text {
+                text: "Ningún archivo seleccionado todavía.\nHaz clic en la zona superior para agregar.";
+                font-size: 12px;
+                color: #94a3b8;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.files.length > 0 : VerticalLayout {
+            spacing: 6px;
+
+            for file[idx] in root.files : ClickableFileItem {
+                filename: file.filename;
+                filesize: file.filesize;
+                extension: file.extension;
+                is_archive: file.is_archive;
+                remove => { root.remove-file(file.id); }
+            }
+        }
+
+        // Pie de tarjeta con acciones
+        HorizontalLayout {
+            alignment: space-between;
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: root.files.length > 0 ? #10b981 : #94a3b8;
+                }
+                Text {
+                    text: root.count-label;
+                    font-size: 11px;
+                    color: #475569;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 14px;
+                if root.files.length > 0 : Rectangle {
+                    height: 28px;
+                    background: clear_btn_touch.has-hover ? #fee2e2 : #fef2f2;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: #fca5a5;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text { text: "🗑"; font-size: 11px; vertical-alignment: center; }
+                        Text {
+                            text: "Eliminar todo";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #dc2626;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    clear_btn_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.clear-files(); }
+                    }
+                }
+
+                Rectangle {
+                    height: 26px;
+                    background: add_touch.has-hover ? #f1f5f9 : transparent;
+                    border-radius: 4px;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        Text {
+                            text: "+ Agregar más";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: root.step-color-fg;
+                            vertical-alignment: center;
+                        }
+                    }
+                    add_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.add-files(); }
+                    }
+                }
+            }
+        }
+    }
+}

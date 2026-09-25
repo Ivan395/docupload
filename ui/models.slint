@@ -1,0 +1,90 @@
+export struct FileItemData {
+    id: int,
+    filename: string,
+    filesize: string,
+    extension: string,
+    is_archive: bool,
+}
+
+export struct UnprocessedItemData {
+    category: string,     // "NÓMINA" o "CÉDULA"
+    filename: string,
+    uuid: string,
+    reason: string,
+    is_sat_error: bool,
+}
+
+export struct ProcessingSummary {
+    nominas_total: int,
+    nominas_valid: int,
+    nominas_invalid: int,
+    cedulas_total: int,
+    cedulas_valid: int,
+    cedulas_invalid: int,
+    has_nominas_excel: bool,
+    has_cedulas_excel: bool,
+    nominas_excel_path: string,
+    cedulas_excel_path: string,
+}
+
+export global AppData {
+    in-out property <[FileItemData]> nominas_files: [];
+    in-out property <[FileItemData]> cedulas_files: [];
+    in-out property <string> nominas_total_size: "0 KB";
+    in-out property <string> cedulas_total_size: "0 KB";
+
+    in-out property <bool> is_processing: false;
+    in-out property <string> status_message: "Listo para procesar";
+    in-out property <float> progress_fraction: 0.0;
+    in-out property <string> progress_text: "";
+
+    // Estados independientes para Nóminas (Barra de estado 1)
+    in-out property <bool> nominas_is_processing: false;
+    in-out property <float> nominas_progress_fraction: 0.0;
+    in-out property <string> nominas_progress_text: "";
+    in-out property <bool> nominas_ready_to_download: false;
+    in-out property <bool> nominas_has_downloaded: false;
+
+    // Estados independientes para Cédulas (Barra de estado 2)
+    in-out property <bool> cedulas_is_processing: false;
+    in-out property <float> cedulas_progress_fraction: 0.0;
+    in-out property <string> cedulas_progress_text: "";
+    in-out property <bool> cedulas_ready_to_download: false;
+    in-out property <bool> cedulas_has_downloaded: false;
+
+    in-out property <bool> has_results: false;
+    in-out property <ProcessingSummary> summary: {
+        nominas_total: 0,
+        nominas_valid: 0,
+        nominas_invalid: 0,
+        cedulas_total: 0,
+        cedulas_valid: 0,
+        cedulas_invalid: 0,
+        has_nominas_excel: false,
+        has_cedulas_excel: false,
+        nominas_excel_path: "",
+        cedulas_excel_path: "",
+    };
+    in-out property <[UnprocessedItemData]> unprocessed_items: [];
+    in-out property <string> toast_message: "";
+    in-out property <bool> show_toast: false;
+}
+
+export global AppLogic {
+    callback select_nominas_files();
+    callback select_cedulas_files();
+    callback remove_nomina_file(int);
+    callback remove_cedula_file(int);
+    callback clear_nominas();
+    callback clear_cedulas();
+    callback clear_all();
+    callback process_files();
+    callback process_nominas();
+    callback process_cedulas();
+    callback download_nominas_excel();
+    callback download_cedulas_excel();
+    callback open_nominas_folder();
+    callback open_cedulas_folder();
+    callback open_output_folder();
+    callback copy_text_to_clipboard(string);
+}
