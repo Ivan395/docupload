@@ -168,7 +168,11 @@ fn extract_page_layout_native(page: &mupdf::Page) -> Result<String, String> {
 
 /// Native in-process PDF layout extraction using MuPDF crate
 pub fn extract_with_mupdf_native(pdf_path: &Path) -> Result<String, String> {
-    let doc = Document::open(pdf_path)
+    let path_str = pdf_path
+        .to_str()
+        .ok_or_else(|| "La ruta del archivo PDF contiene caracteres inválidos (no UTF-8)".to_string())?;
+
+    let doc = Document::open(path_str)
         .map_err(|e| format!("MuPDF no pudo abrir el archivo PDF: {}", e))?;
 
     let page_count = doc
