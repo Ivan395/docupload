@@ -192,51 +192,77 @@ pub fn extract_with_mupdf_native(pdf_path: &Path) -> Result<String, String> {
 
 /// Fallback extraction using pymupdf CLI if needed
 fn extract_with_pymupdf_cli(pdf_path: &Path) -> Result<String, String> {
-    let custom_bin = Path::new("/home/ivan395/.local/bin/pymupdf");
-    let cmd_name = if custom_bin.exists() {
-        "/home/ivan395/.local/bin/pymupdf"
-    } else {
-        "pymupdf"
-    };
+    let temp_file = tempfile::NamedTempFile::new()
+        .map_err(|e| format!("Error creando archivo temporal para pymupdf: {}", e))?;
+    let temp_path = temp_file.path();
 
-    let mut output = Command::new(cmd_name)
-        .env("PYTHONIOENCODING", "utf-8")
-        .arg("gettext")
-        .arg("-mode")
-        .arg("layout")
-        .arg("-output")
-        .arg("/dev/stdout")
-        .arg(pdf_path)
-        .output();
+    // Candidatos para invocar la CLI de forma multiplataforma
+    let mut candidate_commands: Vec<(String, Vec<String>)> = Vec::new();
 
-    if output.is_err() {
-        output = Command::new("python3")
-            .env("PYTHONIOENCODING", "utf-8")
-            .arg("-m")
-            .arg("fitz")
-            .arg("gettext")
+    // 1. Binario directo de pymupdf (o ruta en ~/.local/bin en Unix)
+    #[cfg(unix)]
+    if let Ok(home) = std::env::var("HOME") {
+        let local_bin = std::path::PathBuf::from(home).join(".local/bin/pymupdf");
+        if local_bin.exists() {
+            candidate_commands.push((local_bin.to_string_lossy().to_string(), vec![]));
+        }
+    }
+    candidate_commands.push(("pymupdf".to_string(), vec![]));
+
+    // 2. Invocación mediante módulo Python (`python -m fitz gettext ...`)
+    #[cfg(windows)]
+    {
+        candidate_commands.push(("python".to_string(), vec!["-m".to_string(), "fitz".to_string()]));
+        candidate_commands.push(("py".to_string(), vec!["-m".to_string(), "fitz".to_string()]));
+    }
+    #[cfg(not(windows))]
+    {
+        candidate_commands.push(("python3".to_string(), vec!["-m".to_string(), "fitz".to_string()]));
+        candidate_commands.push(("python".to_string(), vec!["-m".to_string(), "fitz".to_string()]));
+    }
+
+    let mut last_error = String::new();
+
+    for (bin, prefix_args) in candidate_commands {
+        let mut cmd = Command::new(&bin);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        cmd.env("PYTHONIOENCODING", "utf-8");
+        for arg in &prefix_args {
+            cmd.arg(arg);
+        }
+        cmd.arg("gettext")
             .arg("-mode")
             .arg("layout")
             .arg("-output")
-            .arg("/dev/stdout")
-            .arg(pdf_path)
-            .output();
-    }
+            .arg(temp_path)
+            .arg(pdf_path);
 
-    match output {
-        Ok(out) => {
-            if out.status.success() {
-                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-            } else {
-                let err_msg = String::from_utf8_lossy(&out.stderr);
-                Err(format!("PyMuPDF falló al procesar el archivo: {}", err_msg))
+        match cmd.output() {
+            Ok(out) => {
+                if out.status.success() {
+                    let content = std::fs::read_to_string(temp_path).map_err(|e| {
+                        format!("Error leyendo archivo temporal generado por PyMuPDF: {}", e)
+                    })?;
+                    return Ok(content);
+                } else {
+                    let err_msg = String::from_utf8_lossy(&out.stderr);
+                    last_error = format!("PyMuPDF falló ({bin}): {}", err_msg.trim());
+                }
+            }
+            Err(e) => {
+                last_error = format!("No se pudo ejecutar {bin}: {e}");
             }
         }
-        Err(e) => Err(format!(
-            "No se pudo ejecutar pymupdf CLI de respaldo: {}",
-            e
-        )),
     }
+
+    Err(format!(
+        "No se pudo ejecutar pymupdf CLI de respaldo. Último error: {}",
+        last_error
+    ))
 }
 
 /// Primary extraction function:

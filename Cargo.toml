@@ -21,7 +21,7 @@ rfd = "0.15"
 tempfile = "3"
 anyhow = "1.0"
 arboard = "3"
-mupdf = "0.8.0"
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
 
 [build-dependencies]
 slint-build = "1.18.1"

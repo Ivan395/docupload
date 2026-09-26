@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 pub mod archives;
 pub mod cedulas;
 pub mod nominas;
@@ -127,7 +129,14 @@ fn open_folder_in_os(path: &Path) {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("explorer").arg(path).spawn();
+        let abs_path = if path.is_relative() {
+            std::env::current_dir().unwrap_or_default().join(path)
+        } else {
+            path.to_path_buf()
+        };
+        let path_str = abs_path.to_string_lossy().to_string();
+        let clean_path = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str);
+        let _ = std::process::Command::new("explorer").arg(clean_path).spawn();
     }
     #[cfg(target_os = "macos")]
     {
@@ -440,6 +449,7 @@ fn spawn_cedulas_worker(
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    let _ = slint::set_xdg_app_id("docu_ffacd");
     let main_window = MainWindow::new()?;
 
     let nominas_list = Rc::new(RefCell::new(Vec::<SelectedFileEntry>::new()));

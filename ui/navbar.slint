@@ -23,18 +23,10 @@ export component NavBar inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
 
-                    Rectangle {
-                        width: 28px;
-                        height: 28px;
-                        border-radius: 6px;
-                        background: #1e40af;
-
-                        Text {
-                            text: "📊";
-                            font-size: 15px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                    Image {
+                        source: @image-url("assets/app_icon.png");
+                        width: 32px;
+                        height: 32px;
                     }
                 }
 

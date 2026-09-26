@@ -150,6 +150,55 @@ fn extract_zip(
     Ok(extracted_paths)
 }
 
+fn get_7z_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    #[cfg(windows)]
+    {
+        for p in &[
+            r"C:\Program Files\7-Zip\7z.exe",
+            r"C:\Program Files (x86)\7-Zip\7z.exe",
+        ] {
+            let path = Path::new(p);
+            if path.exists() {
+                candidates.push(path.to_path_buf());
+            }
+        }
+    }
+    candidates.push(PathBuf::from("7z"));
+    candidates
+}
+
+fn get_unrar_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    #[cfg(windows)]
+    {
+        for p in &[
+            r"C:\Program Files\WinRAR\UnRAR.exe",
+            r"C:\Program Files\WinRAR\WinRAR.exe",
+            r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
+            r"C:\Program Files (x86)\WinRAR\WinRAR.exe",
+        ] {
+            let path = Path::new(p);
+            if path.exists() {
+                candidates.push(path.to_path_buf());
+            }
+        }
+    }
+    candidates.push(PathBuf::from("unrar"));
+    candidates
+}
+
+fn create_archive_cmd(bin: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(bin);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 fn extract_rar(
     rar_path: &Path,
     target_extension: &str,
@@ -163,41 +212,62 @@ fn extract_rar(
     fs::create_dir_all(&dest_folder)
         .map_err(|e| format!("Error creando carpeta temporal: {}", e))?;
 
-    // Try 7z first
-    let output_7z = Command::new("7z")
-        .arg("x")
-        .arg("-y")
-        .arg(format!("-o{}", dest_folder.display()))
-        .arg(rar_path)
-        .output();
+    let mut success = false;
+    let mut executed_any = false;
+    let mut last_error = String::new();
 
-    let success = match output_7z {
-        Ok(out) => out.status.success(),
-        Err(_) => {
-            // Fallback to unrar command
-            let output_unrar = Command::new("unrar")
-                .arg("x")
+    // 1. Probar 7z (PATH o carpetas estándar en Windows)
+    for bin in get_7z_candidates() {
+        let mut cmd = create_archive_cmd(&bin);
+        cmd.arg("x")
+            .arg("-y")
+            .arg(format!("-o{}", dest_folder.display()))
+            .arg(rar_path);
+
+        if let Ok(out) = cmd.output() {
+            executed_any = true;
+            if out.status.success() {
+                success = true;
+                break;
+            } else {
+                last_error = String::from_utf8_lossy(&out.stderr).to_string();
+            }
+        }
+    }
+
+    // 2. Si falló 7z, probar unrar (PATH o WinRAR en Windows)
+    if !success {
+        for bin in get_unrar_candidates() {
+            let mut cmd = create_archive_cmd(&bin);
+            cmd.arg("x")
                 .arg("-y")
                 .arg(rar_path)
-                .arg(&dest_folder)
-                .output();
-            match output_unrar {
-                Ok(out) => out.status.success(),
-                Err(e) => {
-                    return Err(format!(
-                        "No se encontró '7z' ni 'unrar' en el sistema para descomprimir RAR {:?}: {}",
-                        rar_path.file_name().unwrap_or_default(),
-                        e
-                    ));
+                .arg(&dest_folder);
+
+            if let Ok(out) = cmd.output() {
+                executed_any = true;
+                if out.status.success() {
+                    success = true;
+                    break;
+                } else {
+                    last_error = String::from_utf8_lossy(&out.stderr).to_string();
                 }
             }
         }
-    };
+    }
+
+    if !executed_any {
+        return Err(format!(
+            "No se encontró '7z' ni 'unrar' en el sistema (ni en PATH ni en directorios comunes de instalación) para descomprimir RAR {:?}",
+            rar_path.file_name().unwrap_or_default()
+        ));
+    }
 
     if !success {
         return Err(format!(
-            "Falló la descompresión del archivo RAR {:?}",
-            rar_path.file_name().unwrap_or_default()
+            "Falló la descompresión del archivo RAR {:?}. {}",
+            rar_path.file_name().unwrap_or_default(),
+            last_error.trim()
         ));
     }
 

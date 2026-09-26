@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a8a" />
+      <stop offset="45%" stop-color="#1d4ed8" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+
+    <!-- Subtle Border Highlight -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#93c5fd" stop-opacity="0.6" />
+      <stop offset="50%" stop-color="#3b82f6" stop-opacity="0.2" />
+      <stop offset="100%" stop-color="#1e40af" stop-opacity="0.4" />
+    </linearGradient>
+
+    <!-- Inner Radial Glow -->
+    <radialGradient id="glowGrad" cx="50%" cy="25%" r="65%">
+      <stop offset="0%" stop-color="#60a5fa" stop-opacity="0.35" />
+      <stop offset="60%" stop-color="#2563eb" stop-opacity="0.0" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.25" />
+    </radialGradient>
+
+    <!-- Document Gradient -->
+    <linearGradient id="docGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#f1f5f9" />
+    </linearGradient>
+
+    <!-- Document Fold Gradient -->
+    <linearGradient id="foldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#cbd5e1" />
+      <stop offset="50%" stop-color="#94a3b8" />
+      <stop offset="100%" stop-color="#64748b" />
+    </linearGradient>
+
+    <!-- Chart Bar 1 Gradient (Sky Blue) -->
+    <linearGradient id="bar1Grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <!-- Chart Bar 2 Gradient (Royal Blue) -->
+    <linearGradient id="bar2Grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+
+    <!-- Chart Bar 3 Gradient (Emerald / SAT Verified) -->
+    <linearGradient id="bar3Grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+
+    <!-- Badge Gradient (Emerald Check) -->
+    <linearGradient id="badgeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#047857" />
+    </linearGradient>
+
+    <!-- Drop Shadows -->
+    <filter id="docShadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#020617" flood-opacity="0.45" />
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#020617" flood-opacity="0.25" />
+    </filter>
+
+    <filter id="badgeShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#020617" flood-opacity="0.5" />
+    </filter>
+
+    <filter id="foldShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="-3" dy="4" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- Base Squircle -->
+  <rect x="32" y="32" width="448" height="448" rx="108" ry="108" fill="url(#bgGrad)" />
+  <rect x="32" y="32" width="448" height="448" rx="108" ry="108" fill="url(#glowGrad)" />
+  <rect x="32" y="32" width="448" height="448" rx="108" ry="108" fill="none" stroke="url(#borderGrad)" stroke-width="4" />
+
+  <!-- Central Document with Fold -->
+  <g filter="url(#docShadow)">
+    <!-- Document Body Shape -->
+    <!-- Dimensions: Left 120, Right 360, Top 96, Bottom 390. Fold starts at X=296, Y=160 -->
+    <path d="M 148 96
+             L 296 96
+             L 364 164
+             L 364 366
+             A 24 24 0 0 1 340 390
+             L 144 390
+             A 24 24 0 0 1 120 366
+             L 120 124
+             A 28 28 0 0 1 148 96 Z"
+          fill="url(#docGrad)" />
+
+    <!-- Document Corner Fold -->
+    <path d="M 296 96
+             L 296 142
+             A 22 22 0 0 0 318 164
+             L 364 164 Z"
+          fill="url(#foldGrad)"
+          filter="url(#foldShadow)" />
+    <path d="M 296 96
+             L 296 142
+             A 22 22 0 0 0 318 164
+             L 364 164 Z"
+          fill="none" stroke="#cbd5e1" stroke-width="1.5" />
+
+    <!-- Document Content: Header placeholder lines -->
+    <rect x="154" y="140" width="116" height="14" rx="7" fill="#cbd5e1" />
+    <rect x="154" y="165" width="76" height="10" rx="5" fill="#e2e8f0" />
+
+    <!-- Document Content: Payroll / Fiscal Analytics Bars -->
+    <!-- Baseline guide: Y=345 -->
+    <rect x="162" y="270" width="38" height="75" rx="8" fill="url(#bar1Grad)" />
+    <rect x="220" y="225" width="38" height="120" rx="8" fill="url(#bar2Grad)" />
+    <rect x="278" y="180" width="38" height="165" rx="8" fill="url(#bar3Grad)" />
+
+    <!-- Trend line over bars -->
+    <path d="M 181 262 L 239 217 L 297 172"
+          fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="181" cy="262" r="5" fill="#ffffff" stroke="#0284c7" stroke-width="2.5" />
+    <circle cx="239" cy="217" r="5" fill="#ffffff" stroke="#1d4ed8" stroke-width="2.5" />
+    <circle cx="297" cy="172" r="5" fill="#ffffff" stroke="#059669" stroke-width="2.5" />
+  </g>
+
+  <!-- Verification / Upload Seal Badge (Bottom-Right) -->
+  <g filter="url(#badgeShadow)">
+    <circle cx="368" cy="368" r="64" fill="url(#badgeGrad)" stroke="#ffffff" stroke-width="7" />
+    <!-- White Checkmark -->
+    <path d="M 342 368 L 360 386 L 396 348"
+          fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+</svg>
