@@ -77,7 +77,13 @@ impl Excel {
     }
 
     pub fn create_excel(&mut self, business_data: &Business, lang: &str) -> Result<(), XlsxError> {
-        self.create_excel_multi(&[("Cedula".to_string(), business_data.clone())], lang)
+        let stats = crate::cedulas::processor::CedulasStats {
+            total_files: 1,
+            valid_files: 1,
+            valid_workers: business_data.employees.len(),
+            ..Default::default()
+        };
+        self.create_excel_full(&[("Cedula".to_string(), business_data.clone())], &[], &stats, lang)
     }
 
     pub fn create_excel_multi(
@@ -85,9 +91,43 @@ impl Excel {
         sheets: &[(String, Business)],
         lang: &str,
     ) -> Result<(), XlsxError> {
+        let stats = crate::cedulas::processor::CedulasStats {
+            total_files: sheets.len(),
+            valid_files: sheets.len(),
+            valid_workers: sheets.iter().map(|(_, b)| b.employees.len()).sum(),
+            ..Default::default()
+        };
+        self.create_excel_full(sheets, &[], &stats, lang)
+    }
+
+    pub fn create_excel_full(
+        &mut self,
+        sheets: &[(String, Business)],
+        invalid_items: &[crate::cedulas::processor::UnprocessedCedula],
+        stats: &crate::cedulas::processor::CedulasStats,
+        lang: &str,
+    ) -> Result<(), XlsxError> {
+        // 1. Sheet 1: Estadisticas
+        let ws_stats = self.workbook.add_worksheet();
+        Self::write_estadisticas_sheet(ws_stats, stats, sheets)?;
+
+        // 2. Sheet 2: No_Procesadas_Omitidas
+        let ws_unproc = self.workbook.add_worksheet();
+        Self::write_no_procesadas_sheet(ws_unproc, invalid_items)?;
+
+        // 3. Sheet 3+: Concentrados Válidos
         if sheets.is_empty() {
             let worksheet = self.workbook.add_worksheet();
-            worksheet.set_name("Cedulas")?;
+            worksheet.set_name("Concentrado_Sin_Datos")?;
+            let warn_format = Format::new()
+                .set_bold()
+                .set_font_color(Color::RGB(0xB91C1C));
+            worksheet.write_string_with_format(
+                0,
+                0,
+                "No se encontraron cédulas SUA válidas para concentrar. Revisa la pestaña 'No_Procesadas_Omitidas'.",
+                &warn_format,
+            )?;
         } else {
             for (sheet_name, business_data) in sheets {
                 let worksheet = self.workbook.add_worksheet();
@@ -97,6 +137,231 @@ impl Excel {
         }
 
         self.workbook.save(&self.filename)?;
+        Ok(())
+    }
+
+    fn write_estadisticas_sheet(
+        worksheet: &mut Worksheet,
+        stats: &crate::cedulas::processor::CedulasStats,
+        sheets: &[(String, Business)],
+    ) -> Result<(), XlsxError> {
+        worksheet.set_name("Estadisticas")?;
+
+        let title_format = Format::new()
+            .set_bold()
+            .set_font_size(14)
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x0F766E))
+            .set_align(rust_xlsxwriter::FormatAlign::Center);
+
+        let kpi_label_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_background_color(Color::RGB(0xF0FDFA))
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xCCFBF1));
+
+        let kpi_val_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xCCFBF1))
+            .set_num_format("#,##0");
+
+        let kpi_green_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::RGB(0x0F766E))
+            .set_background_color(Color::RGB(0xCCFBF1))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x99F6E4))
+            .set_num_format("#,##0");
+
+        let kpi_orange_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::RGB(0xC2410C))
+            .set_background_color(Color::RGB(0xFFEDD5))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xFDBA74))
+            .set_num_format("#,##0");
+
+        let kpi_red_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::RGB(0xB91C1C))
+            .set_background_color(Color::RGB(0xFEE2E2))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xFCA5A5))
+            .set_num_format("#,##0");
+
+        let currency_kpi_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::RGB(0x0F766E))
+            .set_background_color(Color::RGB(0xCCFBF1))
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x99F6E4))
+            .set_num_format("$#,##0.00");
+
+        let table_head_format = Format::new()
+            .set_bold()
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x0D9488))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin);
+
+        let cell_text_format = Format::new()
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xE2E8F0));
+
+        let cell_num_format = Format::new()
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xE2E8F0))
+            .set_num_format("#,##0");
+
+        let cell_curr_format = Format::new()
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xE2E8F0))
+            .set_num_format("$#,##0.00");
+
+        // Title banner
+        worksheet.merge_range(0, 0, 0, 4, "DOCUUPLOAD - RESUMEN EJECUTIVO Y ESTADÍSTICAS CÉDULAS SUA IMSS", &title_format)?;
+
+        let kpi_data = [
+            ("Total de Archivos PDF Analizados", stats.total_files as f64, &kpi_val_format),
+            ("Archivos Válidos con Formato Cédula SUA", stats.valid_files as f64, &kpi_green_format),
+            ("Trabajadores Válidos Concentrados", stats.valid_workers as f64, &kpi_green_format),
+            ("Registros / Trabajadores Duplicados (Omitidos)", stats.duplicate_workers as f64, &kpi_orange_format),
+            ("Archivos Inválidos / Sin Capa de Texto OCR", stats.invalid_files as f64, &kpi_red_format),
+        ];
+
+        worksheet.write_string_with_format(2, 0, "INDICADOR MÉTRICO SUA", &table_head_format)?;
+        worksheet.write_string_with_format(2, 1, "CANTIDAD", &table_head_format)?;
+
+        for (i, (label, val, fmt)) in kpi_data.iter().enumerate() {
+            let row = (3 + i) as u32;
+            worksheet.write_string_with_format(row, 0, *label, &kpi_label_format)?;
+            worksheet.write_number_with_format(row, 1, *val, fmt)?;
+        }
+
+        worksheet.write_string_with_format(8, 0, "Importe Total de Liquidaciones / Cuotas IMSS", &kpi_label_format)?;
+        worksheet.write_number_with_format(8, 1, stats.total_cuotas, &currency_kpi_format)?;
+
+        // Breakdown table per patronal registration
+        worksheet.merge_range(11, 0, 11, 4, "DESGLOSE POR REGISTRO PATRONAL / EMPRESA", &table_head_format)?;
+
+        let headers = ["REGISTRO PATRONAL", "RAZÓN SOCIAL", "DELEGACIÓN", "TRABAJADORES", "TOTAL LIQUIDACIONES ($)"];
+        for (col, head) in headers.iter().enumerate() {
+            worksheet.write_string_with_format(12, col as u16, *head, &table_head_format)?;
+        }
+
+        let mut current_row = 13;
+        for (_sheet_name, biz) in sheets {
+            let reg = biz.registro_patronal.as_deref().unwrap_or("SIN_REGISTRO");
+            let razon = biz.razon_social.as_deref().unwrap_or("SIN_RAZON_SOCIAL");
+            let del = biz.delegacion.as_deref().unwrap_or("-");
+            let count = biz.employees.len();
+
+            let total_biz: f64 = biz.employees.iter().flat_map(|e| &e.data_employee).filter_map(|d| d.subtotal).sum();
+
+            worksheet.write_string_with_format(current_row, 0, reg, &cell_text_format)?;
+            worksheet.write_string_with_format(current_row, 1, razon, &cell_text_format)?;
+            worksheet.write_string_with_format(current_row, 2, del, &cell_text_format)?;
+            worksheet.write_number_with_format(current_row, 3, count as f64, &cell_num_format)?;
+            worksheet.write_number_with_format(current_row, 4, total_biz, &cell_curr_format)?;
+            current_row += 1;
+        }
+
+        worksheet.autofit();
+        Ok(())
+    }
+
+    fn write_no_procesadas_sheet(
+        worksheet: &mut Worksheet,
+        invalid_items: &[crate::cedulas::processor::UnprocessedCedula],
+    ) -> Result<(), XlsxError> {
+        worksheet.set_name("No_Procesadas_Omitidas")?;
+
+        let header_format = Format::new()
+            .set_bold()
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x475569))
+            .set_align(rust_xlsxwriter::FormatAlign::Center);
+
+        let cell_format = Format::new()
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xE2E8F0));
+
+        let orange_cat_format = Format::new()
+            .set_bold()
+            .set_font_color(Color::RGB(0xC2410C))
+            .set_background_color(Color::RGB(0xFFEDD5))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin);
+
+        let red_cat_format = Format::new()
+            .set_bold()
+            .set_font_color(Color::RGB(0xB91C1C))
+            .set_background_color(Color::RGB(0xFEE2E2))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin);
+
+        let headers = [
+            "#",
+            "ARCHIVO",
+            "REGISTRO_PATRONAL",
+            "RAZON_SOCIAL",
+            "NSS_IDENTIFICADOR",
+            "PERIODO",
+            "CATEGORÍA / ESTATUS",
+            "MOTIVO DETALLADO DEL DESCARTE",
+        ];
+
+        for (col, head) in headers.iter().enumerate() {
+            worksheet.write_string_with_format(0, col as u16, *head, &header_format)?;
+        }
+
+        if invalid_items.is_empty() {
+            let ok_format = Format::new()
+                .set_bold()
+                .set_font_color(Color::RGB(0x15803D))
+                .set_background_color(Color::RGB(0xDCFCE7));
+            worksheet.write_string_with_format(
+                1,
+                1,
+                "¡Excelente! No se encontraron cédulas ni trabajadores rechazados o duplicados. Todas fueron válidas.",
+                &ok_format,
+            )?;
+        } else {
+            for (idx, item) in invalid_items.iter().enumerate() {
+                let row = (idx + 1) as u32;
+                worksheet.write_number(row, 0, (idx + 1) as f64)?;
+                worksheet.write_string_with_format(row, 1, &item.filename, &cell_format)?;
+                worksheet.write_string_with_format(row, 2, &item.registro_patronal, &cell_format)?;
+                worksheet.write_string_with_format(row, 3, &item.razon_social, &cell_format)?;
+                worksheet.write_string_with_format(row, 4, &item.identifier, &cell_format)?;
+                worksheet.write_string_with_format(row, 5, &item.periodo, &cell_format)?;
+
+                let cat_fmt = if item.category.contains("DUPLICAD") {
+                    &orange_cat_format
+                } else {
+                    &red_cat_format
+                };
+
+                worksheet.write_string_with_format(row, 6, &item.category, cat_fmt)?;
+                worksheet.write_string_with_format(row, 7, &item.reason, &cell_format)?;
+            }
+        }
+
+        worksheet.autofit();
         Ok(())
     }
 

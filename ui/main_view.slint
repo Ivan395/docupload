@@ -7,7 +7,7 @@ export { AppData, AppLogic, FileItemData, UnprocessedItemData, ProcessingSummary
 import { AppData, AppLogic } from "models.slint";
 
 export component MainWindow inherits Window {
-    title: "DocuUpload - Procesamiento de Nóminas SAT y Cédulas SUA";
+    title: "DocuUpload v0.5.0 - Procesamiento de Nóminas SAT y Cédulas SUA";
     icon: @image-url("assets/app_icon.png");
     min-width: 1200px;
     min-height: 850px;
@@ -147,6 +147,7 @@ export component MainWindow inherits Window {
                         process-button-text: "Procesar Nóminas";
 
                         add-files => { AppLogic.select_nominas_files(); }
+                        add-folder => { AppLogic.select_nominas_folder(); }
                         clear-files => { AppLogic.clear_nominas(); }
                         remove-file(id) => { AppLogic.remove_nomina_file(id); }
                         download => { AppLogic.download_nominas_excel(); }
@@ -180,6 +181,7 @@ export component MainWindow inherits Window {
                         process-button-text: "Procesar Cédulas";
 
                         add-files => { AppLogic.select_cedulas_files(); }
+                        add-folder => { AppLogic.select_cedulas_folder(); }
                         clear-files => { AppLogic.clear_cedulas(); }
                         remove-file(id) => { AppLogic.remove_cedula_file(id); }
                         download => { AppLogic.download_cedulas_excel(); }

@@ -1,7 +1,14 @@
 [package]
 name = "docu_ffacd"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
+authors = ["Firma Fiscal ACD <soporte@firmafiscalacd.com>"]
+description = "DocuUpload - Procesamiento concurrente y validación de nóminas CFDI (SAT SOAP) y cédulas SUA IMSS"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/Ivan395/docupload"
+keywords = ["sat", "cfdi", "sua", "imss", "nominas"]
+categories = ["office-software", "gui"]
 
 [dependencies]
 slint = "1.18.1"
@@ -25,4 +32,52 @@ mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"]
 
 [build-dependencies]
 slint-build = "1.18.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+# --- Metadata para cargo-bundle (macOS .app/.dmg, Windows, Linux) ---
+[package.metadata.bundle]
+name = "DocuUpload"
+identifier = "com.docuffacd.docupload"
+icon = ["ui/assets/app_icon.png", "ui/assets/app_icon_256.png", "ui/assets/app_icon.ico", "ui/assets/app_icon.icns"]
+version = "0.5.0"
+copyright = "Copyright © 2026 Firma Fiscal ACD. Todos los derechos reservados."
+category = "Business"
+short_description = "DocuUpload Fiscal & Nóminas"
+long_description = """
+DocuUpload Fiscal & Nóminas ACD
+Procesamiento concurrente y en paralelo de Nóminas CFDI con validación directa ante el WebService SOAP del SAT y Cédulas de Determinación de Cuotas del SUA IMSS con extracción de amortizaciones Infonavit y reportes en Excel.
+"""
+osx_minimum_system_version = "10.15"
+
+# --- Metadata para cargo-deb (Debian, Ubuntu) ---
+[package.metadata.deb]
+name = "docu-ffacd"
+maintainer = "Firma Fiscal ACD <soporte@firmafiscalacd.com>"
+copyright = "2026, Firma Fiscal ACD"
+license-file = ["LICENSE", "4"]
+depends = "$auto, libfontconfig1, libfreetype6"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/docu_ffacd", "usr/bin/docu_ffacd", "755"],
+    ["packaging/linux/docu_ffacd.desktop", "usr/share/applications/docu_ffacd.desktop", "644"],
+    ["ui/assets/app_icon_256.png", "usr/share/icons/hicolor/256x256/apps/docu_ffacd.png", "644"],
+    ["ui/assets/app_icon_64.png", "usr/share/icons/hicolor/64x64/apps/docu_ffacd.png", "644"],
+    ["ui/assets/app_icon_32.png", "usr/share/icons/hicolor/32x32/apps/docu_ffacd.png", "644"],
+    ["ui/assets/app_icon.svg", "usr/share/icons/hicolor/scalable/apps/docu_ffacd.svg", "644"],
+]
+
+# --- Metadata para cargo-generate-rpm (Fedora, RHEL) ---
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/docu_ffacd", dest = "/usr/bin/docu_ffacd", mode = "755" },
+    { source = "packaging/linux/docu_ffacd.desktop", dest = "/usr/share/applications/docu_ffacd.desktop", mode = "644" },
+    { source = "ui/assets/app_icon_256.png", dest = "/usr/share/icons/hicolor/256x256/apps/docu_ffacd.png", mode = "644" },
+    { source = "ui/assets/app_icon_64.png", dest = "/usr/share/icons/hicolor/64x64/apps/docu_ffacd.png", mode = "644" },
+    { source = "ui/assets/app_icon_32.png", dest = "/usr/share/icons/hicolor/32x32/apps/docu_ffacd.png", mode = "644" },
+    { source = "ui/assets/app_icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/docu_ffacd.svg", mode = "644" },
+]
+
 

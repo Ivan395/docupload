@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=DocuUpload
+GenericName=Procesamiento Fiscal y Cédulas SUA
+Comment=Validación de nóminas CFDI con SAT SOAP y extracción de cédulas SUA IMSS
+Exec=docu_ffacd
+Icon=docu_ffacd
+Terminal=false
+Type=Application
+Categories=Office;Finance;Utility;
+Keywords=sat;cfdi;sua;imss;nominas;fiscal;
+StartupWMClass=docu_ffacd
+MimeType=application/xml;application/pdf;application/zip;application/x-rar;

@@ -14,13 +14,29 @@ use crate::cedulas::regex_expressions::{initialize_patterns, OCRPatterns};
 #[derive(Debug, Clone)]
 pub struct UnprocessedCedula {
     pub filename: String,
+    pub registro_patronal: String,
+    pub razon_social: String,
+    pub identifier: String,
+    pub periodo: String,
+    pub category: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CedulasStats {
+    pub total_files: usize,
+    pub valid_files: usize,
+    pub valid_workers: usize,
+    pub duplicate_workers: usize,
+    pub invalid_files: usize,
+    pub total_cuotas: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct CedulasProcessResult {
     pub total_files: usize,
     pub valid_count: usize,
+    pub duplicate_count: usize,
     pub invalid_count: usize,
     pub invalid_items: Vec<UnprocessedCedula>,
     pub excel_path: Option<PathBuf>,
@@ -86,6 +102,7 @@ pub fn process_cedulas(
         return Ok(CedulasProcessResult {
             total_files: 0,
             valid_count: 0,
+            duplicate_count: 0,
             invalid_count: 0,
             invalid_items: Vec::new(),
             excel_path: None,
@@ -117,7 +134,7 @@ pub fn process_cedulas(
         .build()
         .map_err(|e| format!("Error creando thread pool para cédulas: {}", e))?;
 
-    let parse_results: Vec<Result<Vec<(Business, Vec<Employee>)>, UnprocessedCedula>> = pool.install(|| {
+    let parse_results: Vec<Result<(String, Vec<(Business, Vec<Employee>)>), UnprocessedCedula>> = pool.install(|| {
         pdf_files
             .par_iter()
             .map(|pdf_path| {
@@ -137,6 +154,11 @@ pub fn process_cedulas(
                         progress_callback(cur, total_files, &format!("{}/{} analizadas ({} válidas SUA | Faltan {})", cur, total_files, val, rem));
                         return Err(UnprocessedCedula {
                             filename: file_display_name,
+                            registro_patronal: "N/D".to_string(),
+                            razon_social: "N/D".to_string(),
+                            identifier: "DOCUMENTO".to_string(),
+                            periodo: "N/D".to_string(),
+                            category: "ERROR DE LECTURA".to_string(),
                             reason: format!("Error al extraer texto con layout: {}", e),
                         });
                     }
@@ -152,6 +174,11 @@ pub fn process_cedulas(
                     progress_callback(cur, total_files, &format!("{}/{} analizadas ({} válidas SUA | Faltan {})", cur, total_files, val, rem));
                     return Err(UnprocessedCedula {
                         filename: file_display_name,
+                        registro_patronal: "N/D".to_string(),
+                        razon_social: "N/D".to_string(),
+                        identifier: "DOCUMENTO".to_string(),
+                        periodo: "N/D".to_string(),
+                        category: "SIN TEXTO OCR".to_string(),
                         reason: "El archivo PDF no contiene texto legible (posible documento escaneado o imagen sin capa OCR)".to_string(),
                     });
                 }
@@ -172,6 +199,11 @@ pub fn process_cedulas(
                     progress_callback(cur, total_files, &format!("{}/{} analizadas ({} válidas SUA | Faltan {})", cur, total_files, val, rem));
                     return Err(UnprocessedCedula {
                         filename: file_display_name,
+                        registro_patronal: "N/D".to_string(),
+                        razon_social: "N/D".to_string(),
+                        identifier: "DOCUMENTO".to_string(),
+                        periodo: "N/D".to_string(),
+                        category: "NO CORRESPONDE A SUA".to_string(),
                         reason: "El documento no corresponde al formato oficial de Cédula de Determinación de Cuotas del SUA (faltan encabezados)".to_string(),
                     });
                 }
@@ -184,9 +216,9 @@ pub fn process_cedulas(
                     }
                 }
 
-                for page in &mut pages {
+                pages.par_iter_mut().for_each(|page| {
                     *page = clean_text(&page.to_lowercase(), &patterns);
-                }
+                });
 
                 // 5. Extract per-page / per-chunk business and employees, handling multi-company or multi-registration PDFs
                 let mut pdf_sections: Vec<(Business, Vec<Employee>)> = Vec::new();
@@ -271,6 +303,11 @@ pub fn process_cedulas(
                     progress_callback(cur, total_files, &format!("{}/{} analizadas ({} válidas SUA | Faltan {})", cur, total_files, val, rem));
                     return Err(UnprocessedCedula {
                         filename: file_display_name,
+                        registro_patronal: "N/D".to_string(),
+                        razon_social: "N/D".to_string(),
+                        identifier: "DOCUMENTO".to_string(),
+                        periodo: "N/D".to_string(),
+                        category: "SIN TRABAJADORES".to_string(),
                         reason: "No se pudieron extraer registros de trabajadores válidos en la cédula (posible formato incompatible o resumen sin desglose)".to_string(),
                     });
                 }
@@ -285,7 +322,7 @@ pub fn process_cedulas(
                     &format!("{}/{} analizadas localmente ({} válidas SUA | Faltan {})", cur, total_files, val, rem),
                 );
 
-                Ok(pdf_sections)
+                Ok((file_display_name, pdf_sections))
             })
             .collect()
     });
@@ -293,10 +330,12 @@ pub fn process_cedulas(
     let mut grouped_businesses: HashMap<String, Business> = HashMap::new();
     let mut invalid_items = Vec::new();
     let mut valid_count = 0;
+    let mut duplicate_count = 0;
+    let mut seen_workers: HashSet<(String, String)> = HashSet::new();
 
     for res in parse_results {
         match res {
-            Ok(sections) => {
+            Ok((file_display_name, sections)) => {
                 valid_count += 1;
                 for (biz, emps) in sections {
                     // Grouping key: Primary is canonical registro_patronal, secondary is canonical razon_social
@@ -309,9 +348,39 @@ pub fn process_cedulas(
                         _ => "DEFAULT_CEDULA".to_string(),
                     };
 
-                    let entry = grouped_businesses.entry(key).or_insert_with(Business::new);
+                    let entry = grouped_businesses.entry(key.clone()).or_insert_with(Business::new);
                     entry.merge_with(&biz, "");
-                    entry.employees.extend(emps);
+
+                    for emp in emps {
+                        let worker_id = emp
+                            .no_seguro_social
+                            .as_deref()
+                            .filter(|s| !s.trim().is_empty())
+                            .or(emp.curp.as_deref())
+                            .or(emp.nombre.as_deref())
+                            .unwrap_or("UNKNOWN")
+                            .trim()
+                            .to_uppercase();
+                        let mes = emp.mes_periodo.as_deref().unwrap_or("");
+                        let anio = emp.anio_periodo.as_deref().unwrap_or("");
+                        let dedupe_key = format!("{}_{}_{}", worker_id, mes, anio);
+
+                        if seen_workers.contains(&(key.clone(), dedupe_key.clone())) {
+                            duplicate_count += 1;
+                            invalid_items.push(UnprocessedCedula {
+                                filename: file_display_name.clone(),
+                                registro_patronal: biz.registro_patronal.clone().unwrap_or_else(|| "N/D".to_string()),
+                                razon_social: biz.razon_social.clone().unwrap_or_else(|| "N/D".to_string()),
+                                identifier: worker_id,
+                                periodo: if mes.is_empty() && anio.is_empty() { "N/D".to_string() } else { format!("{}/{}", mes, anio) },
+                                category: "TRABAJADOR DUPLICADO".to_string(),
+                                reason: "Registro de trabajador y periodo ya procesados previamente con el mismo NSS (descartado para evitar duplicados)".to_string(),
+                            });
+                        } else {
+                            seen_workers.insert((key.clone(), dedupe_key));
+                            entry.employees.push(emp);
+                        }
+                    }
                 }
             }
             Err(inv) => {
@@ -321,7 +390,7 @@ pub fn process_cedulas(
     }
 
     let mut generated_excel_path = None;
-    if valid_count > 0 && !grouped_businesses.is_empty() {
+    if total_files > 0 {
         progress_callback(
             total_files,
             total_files,
@@ -332,6 +401,13 @@ pub fn process_cedulas(
             let _ = std::fs::create_dir_all(parent);
         }
 
+        // Sort employee data across all businesses in parallel
+        pool.install(|| {
+            grouped_businesses.par_iter_mut().for_each(|(_key, biz)| {
+                biz.sort_employee_data();
+            });
+        });
+
         let mut keys: Vec<String> = grouped_businesses.keys().cloned().collect();
         keys.sort();
 
@@ -339,11 +415,10 @@ pub fn process_cedulas(
         let mut sheets: Vec<(String, Business)> = Vec::new();
 
         for key in keys {
-            if let Some(mut biz) = grouped_businesses.remove(&key) {
+            if let Some(biz) = grouped_businesses.remove(&key) {
                 if biz.employees.is_empty() {
                     continue;
                 }
-                biz.sort_employee_data();
                 let sheet_name = crate::cedulas::excel::make_cedula_sheet_name(
                     biz.razon_social.as_deref(),
                     biz.registro_patronal.as_deref(),
@@ -353,19 +428,35 @@ pub fn process_cedulas(
             }
         }
 
-        if !sheets.is_empty() {
-            let mut excel = Excel::new(&output_excel_path.to_string_lossy());
-            excel
-                .create_excel_multi(&sheets, "spanish")
-                .map_err(|e| format!("Error creando archivo Excel de Cédulas: {}", e))?;
+        let valid_workers: usize = sheets.iter().map(|(_, b)| b.employees.len()).sum();
+        let total_cuotas: f64 = sheets
+            .iter()
+            .flat_map(|(_, b)| &b.employees)
+            .flat_map(|e| &e.data_employee)
+            .filter_map(|d| d.subtotal)
+            .sum();
 
-            generated_excel_path = Some(output_excel_path.to_path_buf());
-        }
+        let stats = CedulasStats {
+            total_files,
+            valid_files: valid_count,
+            valid_workers,
+            duplicate_workers: duplicate_count,
+            invalid_files: invalid_items.iter().filter(|i| i.category != "TRABAJADOR DUPLICADO").count(),
+            total_cuotas,
+        };
+
+        let mut excel = Excel::new(&output_excel_path.to_string_lossy());
+        excel
+            .create_excel_full(&sheets, &invalid_items, &stats, "spanish")
+            .map_err(|e| format!("Error creando archivo Excel de Cédulas: {}", e))?;
+
+        generated_excel_path = Some(output_excel_path.to_path_buf());
     }
 
     Ok(CedulasProcessResult {
         total_files,
         valid_count,
+        duplicate_count,
         invalid_count: invalid_items.len(),
         invalid_items,
         excel_path: generated_excel_path,
@@ -443,6 +534,48 @@ mod tests {
         assert!(sheet_names.iter().any(|s| s.contains("gondesa") && s.contains("77458")));
         assert!(sheet_names.iter().any(|s| s.contains("gondesa") && s.contains("77459")));
         assert!(sheet_names.iter().any(|s| s.contains("machinen") && s.contains("77252")));
+    }
+
+    #[test]
+    fn test_cedula_worker_deduplication() {
+        let mut seen_workers: HashSet<(String, String)> = HashSet::new();
+        let key = "A3677458103".to_string();
+
+        let mut emp1 = Employee::new();
+        emp1.no_seguro_social = Some("12345678901".to_string());
+        emp1.mes_periodo = Some("01".to_string());
+        emp1.anio_periodo = Some("2024".to_string());
+
+        let mut emp2 = Employee::new();
+        emp2.no_seguro_social = Some("12345678901".to_string());
+        emp2.mes_periodo = Some("01".to_string());
+        emp2.anio_periodo = Some("2024".to_string());
+
+        let mut emp3 = Employee::new();
+        emp3.no_seguro_social = Some("98765432100".to_string());
+        emp3.mes_periodo = Some("01".to_string());
+        emp3.anio_periodo = Some("2024".to_string());
+
+        let emps = vec![emp1, emp2, emp3];
+        let mut valid_emps = Vec::new();
+        let mut duplicate_count = 0;
+
+        for emp in emps {
+            let worker_id = emp.no_seguro_social.as_deref().unwrap();
+            let mes = emp.mes_periodo.as_deref().unwrap();
+            let anio = emp.anio_periodo.as_deref().unwrap();
+            let dedupe_key = format!("{}_{}_{}", worker_id, mes, anio);
+
+            if seen_workers.contains(&(key.clone(), dedupe_key.clone())) {
+                duplicate_count += 1;
+            } else {
+                seen_workers.insert((key.clone(), dedupe_key));
+                valid_emps.push(emp);
+            }
+        }
+
+        assert_eq!(valid_emps.len(), 2);
+        assert_eq!(duplicate_count, 1);
     }
 }
 

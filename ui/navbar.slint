@@ -33,11 +33,32 @@ export component NavBar inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     spacing: 2px;
-                    Text {
-                        text: "DocuUpload Fiscal & Nóminas";
-                        font-size: 17px;
-                        font-weight: 800;
-                        color: #0f172a;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: "DocuUpload Fiscal & Nóminas";
+                            font-size: 17px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Rectangle {
+                            height: 18px;
+                            background: #e0f2fe;
+                            border-radius: 9px;
+                            y: 2px;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                Text {
+                                    text: "v0.5.0";
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    color: #0369a1;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
                     }
                     Text {
                         text: "Validación SAT SOAP y Procesamiento SUA IMSS";

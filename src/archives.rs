@@ -37,17 +37,28 @@ pub fn collect_or_extract_files(
             }
 
             if path.is_dir() {
-                // Scan directory recursively
+                // Scan directory recursively for direct files and nested archives
+                let mut dir_files = Vec::new();
                 for entry in WalkDir::new(path).into_iter().flatten() {
                     if entry.file_type().is_file() {
-                        if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
-                            if ext.eq_ignore_ascii_case(&target_ext_lower) {
-                                collected.push(entry.path().to_path_buf());
+                        let p = entry.path();
+                        if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                            let ext_lower = ext.to_lowercase();
+                            if ext_lower == target_ext_lower {
+                                dir_files.push(p.to_path_buf());
+                            } else if ext_lower == "zip" {
+                                if let Ok(extracted) = extract_zip(p, &target_ext_lower, temp_dir, progress_callback) {
+                                    dir_files.extend(extracted);
+                                }
+                            } else if ext_lower == "rar" {
+                                if let Ok(extracted) = extract_rar(p, &target_ext_lower, temp_dir) {
+                                    dir_files.extend(extracted);
+                                }
                             }
                         }
                     }
                 }
-                return Ok(collected);
+                return Ok(dir_files);
             }
 
             let ext = path
@@ -80,12 +91,40 @@ fn extract_zip(
     temp_dir: &Path,
     progress_callback: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
 ) -> Result<Vec<PathBuf>, String> {
-    let file = File::open(zip_path)
-        .map_err(|e| format!("No se pudo abrir ZIP {:?}: {}", zip_path.file_name().unwrap_or_default(), e))?;
+    let zip_filename = zip_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
 
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("Error leyendo contenido de ZIP {:?}: {}", zip_path.file_name().unwrap_or_default(), e))?;
+    // 1. First pass: inspect central directory to find all matching entries
+    let matching_entries: Vec<(usize, PathBuf)> = {
+        let file = File::open(zip_path)
+            .map_err(|e| format!("No se pudo abrir ZIP {}: {}", zip_filename, e))?;
 
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("Error leyendo contenido de ZIP {}: {}", zip_filename, e))?;
+
+        let total_in_zip = archive.len();
+        let mut list = Vec::new();
+
+        for i in 0..total_in_zip {
+            if let Ok(entry) = archive.by_index_raw(i) {
+                if !entry.is_dir() {
+                    if let Some(enclosed) = entry.enclosed_name() {
+                        if let Some(ext) = enclosed.extension().and_then(|s| s.to_str()) {
+                            if ext.eq_ignore_ascii_case(target_extension) {
+                                list.push((i, enclosed.to_path_buf()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        list
+    };
+
+    if matching_entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let total_matching = matching_entries.len();
     let archive_stem = zip_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -94,36 +133,29 @@ fn extract_zip(
     fs::create_dir_all(&dest_folder)
         .map_err(|e| format!("Error creando carpeta temporal: {}", e))?;
 
-    let mut extracted_paths = Vec::new();
-    let total_in_zip = archive.len();
+    // 2. Extract entries in parallel across Rayon worker threads
+    let extracted_counter = std::sync::atomic::AtomicUsize::new(0);
 
-    for i in 0..total_in_zip {
-        if let Some(cb) = progress_callback {
-            if i % 30 == 0 || i + 1 == total_in_zip {
-                cb(
-                    i + 1,
-                    total_in_zip,
-                    &format!("Extrayendo archivos de ZIP: {}/{}...", i + 1, total_in_zip),
-                );
-            }
-        }
+    // Chunk size balanced for CPU cache & thread utilization
+    let chunk_size = (total_matching / rayon::current_num_threads().max(1)).clamp(8, 64);
 
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| format!("Error accediendo a archivo {} en ZIP: {}", i, e))?;
+    let extracted_chunks: Result<Vec<Vec<PathBuf>>, String> = matching_entries
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            // Open a separate file handle per chunk/thread to allow full parallel seeking and decompression
+            let file = File::open(zip_path)
+                .map_err(|e| format!("Error abriendo ZIP en hilo de extracción: {}", e))?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|e| format!("Error accediendo a ZIP en hilo de extracción: {}", e))?;
 
-        if file.is_dir() {
-            continue;
-        }
+            let mut chunk_paths = Vec::with_capacity(chunk.len());
 
-        let enclosed_name = match file.enclosed_name() {
-            Some(path) => path.to_owned(),
-            None => continue,
-        };
+            for &(idx, ref enclosed_name) in chunk {
+                let mut file_entry = archive
+                    .by_index(idx)
+                    .map_err(|e| format!("Error accediendo a archivo {} en ZIP: {}", idx, e))?;
 
-        if let Some(ext) = enclosed_name.extension().and_then(|s| s.to_str()) {
-            if ext.eq_ignore_ascii_case(target_extension) {
-                let outpath = dest_folder.join(&enclosed_name);
+                let outpath = dest_folder.join(enclosed_name);
                 if let Some(parent) = outpath.parent() {
                     if !parent.exists() {
                         let _ = fs::create_dir_all(parent);
@@ -133,8 +165,8 @@ fn extract_zip(
                 let outfile_raw = File::create(&outpath).map_err(|e| {
                     format!("Error creando archivo extraído {:?}: {}", outpath, e)
                 })?;
-                let mut outfile = io::BufWriter::new(outfile_raw);
-                io::copy(&mut file, &mut outfile).map_err(|e| {
+                let mut outfile = io::BufWriter::with_capacity(64 * 1024, outfile_raw);
+                io::copy(&mut file_entry, &mut outfile).map_err(|e| {
                     format!("Error escribiendo archivo extraído {:?}: {}", outpath, e)
                 })?;
                 use std::io::Write;
@@ -142,12 +174,31 @@ fn extract_zip(
                     format!("Error finalizando archivo extraído {:?}: {}", outpath, e)
                 })?;
 
-                extracted_paths.push(outpath);
-            }
-        }
-    }
+                chunk_paths.push(outpath);
 
-    Ok(extracted_paths)
+                let current = extracted_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if let Some(cb) = progress_callback {
+                    if current % 40 == 0 || current == total_matching {
+                        cb(
+                            current,
+                            total_matching,
+                            &format!(
+                                "Extrayendo {} archivos en paralelo: {}/{}...",
+                                target_extension.to_uppercase(),
+                                current,
+                                total_matching
+                            ),
+                        );
+                    }
+                }
+            }
+
+            Ok(chunk_paths)
+        })
+        .collect();
+
+    let all_extracted = extracted_chunks?.into_iter().flatten().collect();
+    Ok(all_extracted)
 }
 
 fn get_7z_candidates() -> Vec<PathBuf> {

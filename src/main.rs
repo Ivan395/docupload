@@ -269,12 +269,17 @@ fn spawn_nominas_worker(
                         let mut current_unproc: Vec<UnprocessedItemData> = app_data
                             .get_unprocessed_items()
                             .iter()
-                            .filter(|it| it.category != "NÓMINA")
+                            .filter(|it| !it.category.starts_with("NÓMINA"))
                             .collect();
 
                         for inv in outcome.invalid_items {
+                            let cat_label = if inv.category.is_empty() {
+                                "NÓMINA".to_string()
+                            } else {
+                                format!("NÓMINA - {}", inv.category)
+                            };
                             current_unproc.push(UnprocessedItemData {
-                                category: "NÓMINA".into(),
+                                category: cat_label.into(),
                                 filename: inv.filename.into(),
                                 uuid: inv.uuid.into(),
                                 reason: inv.reason.into(),
@@ -421,14 +426,19 @@ fn spawn_cedulas_worker(
                         let mut current_unproc: Vec<UnprocessedItemData> = app_data
                             .get_unprocessed_items()
                             .iter()
-                            .filter(|it| it.category != "CÉDULA")
+                            .filter(|it| !it.category.starts_with("CÉDULA"))
                             .collect();
 
                         for inv in outcome.invalid_items {
+                            let cat_label = if inv.category.is_empty() {
+                                "CÉDULA".to_string()
+                            } else {
+                                format!("CÉDULA - {}", inv.category)
+                            };
                             current_unproc.push(UnprocessedItemData {
-                                category: "CÉDULA".into(),
+                                category: cat_label.into(),
                                 filename: inv.filename.into(),
-                                uuid: "".into(),
+                                uuid: inv.identifier.into(),
                                 reason: inv.reason.into(),
                                 is_sat_error: false,
                             });
@@ -489,6 +499,48 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // 1b. Select Nominas Folder (Recursive Search)
+    {
+        let ui_weak = main_window.as_weak();
+        let nominas_list_clone = nominas_list.clone();
+        app_logic.on_select_nominas_folder(move || {
+            let folder = rfd::FileDialog::new()
+                .set_title("Seleccionar Carpeta con Nóminas (Búsqueda Recursiva XML, ZIP, RAR)")
+                .pick_folder();
+
+            if let Some(folder_path) = folder {
+                let mut found_paths = Vec::new();
+                for entry in walkdir::WalkDir::new(&folder_path).into_iter().flatten() {
+                    if entry.file_type().is_file() {
+                        if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
+                            let ext_lower = ext.to_lowercase();
+                            if ext_lower == "xml" || ext_lower == "zip" || ext_lower == "rar" {
+                                found_paths.push(entry.path().to_path_buf());
+                            }
+                        }
+                    }
+                }
+
+                let mut list = nominas_list_clone.borrow_mut();
+                let initial_len = list.len();
+                for p in found_paths {
+                    if !list.iter().any(|existing| existing.path == p) {
+                        list.push(create_file_entry(p));
+                    }
+                }
+                let added = list.len() - initial_len;
+                if let Some(ui) = ui_weak.upgrade() {
+                    update_nominas_ui(&ui, &list);
+                    if added > 0 {
+                        show_toast_message(&ui, &format!("Se agregaron {} archivos de nómina encontrados recursivamente.", added));
+                    } else {
+                        show_toast_message(&ui, "No se encontraron archivos de nómina (XML, ZIP o RAR) en la carpeta.");
+                    }
+                }
+            }
+        });
+    }
+
     // 2. Select Cédulas Files
     {
         let ui_weak = main_window.as_weak();
@@ -510,6 +562,48 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 if let Some(ui) = ui_weak.upgrade() {
                     update_cedulas_ui(&ui, &list);
+                }
+            }
+        });
+    }
+
+    // 2b. Select Cédulas Folder (Recursive Search)
+    {
+        let ui_weak = main_window.as_weak();
+        let cedulas_list_clone = cedulas_list.clone();
+        app_logic.on_select_cedulas_folder(move || {
+            let folder = rfd::FileDialog::new()
+                .set_title("Seleccionar Carpeta con Cédulas SUA (Búsqueda Recursiva PDF, ZIP, RAR)")
+                .pick_folder();
+
+            if let Some(folder_path) = folder {
+                let mut found_paths = Vec::new();
+                for entry in walkdir::WalkDir::new(&folder_path).into_iter().flatten() {
+                    if entry.file_type().is_file() {
+                        if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
+                            let ext_lower = ext.to_lowercase();
+                            if ext_lower == "pdf" || ext_lower == "zip" || ext_lower == "rar" {
+                                found_paths.push(entry.path().to_path_buf());
+                            }
+                        }
+                    }
+                }
+
+                let mut list = cedulas_list_clone.borrow_mut();
+                let initial_len = list.len();
+                for p in found_paths {
+                    if !list.iter().any(|existing| existing.path == p) {
+                        list.push(create_file_entry(p));
+                    }
+                }
+                let added = list.len() - initial_len;
+                if let Some(ui) = ui_weak.upgrade() {
+                    update_cedulas_ui(&ui, &list);
+                    if added > 0 {
+                        show_toast_message(&ui, &format!("Se agregaron {} cédulas/archivos encontrados recursivamente.", added));
+                    } else {
+                        show_toast_message(&ui, "No se encontraron cédulas SUA (PDF, ZIP o RAR) en la carpeta.");
+                    }
                 }
             }
         });

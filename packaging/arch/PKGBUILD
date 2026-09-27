@@ -1,0 +1,27 @@
+# Maintainer: Firma Fiscal ACD <soporte@firmafiscalacd.com>
+pkgname=docu_ffacd
+pkgver=0.5.0
+pkgrel=1
+pkgdesc="DocuUpload - Procesamiento concurrente de nóminas SAT y cédulas SUA IMSS"
+arch=('x86_64')
+url="https://github.com/Ivan395/docupload"
+license=('MIT' 'Apache-2.0')
+depends=('fontconfig' 'freetype2')
+makedepends=('cargo' 'rust')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/Ivan395/docupload/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$srcdir/$pkgname-$pkgver"
+    cargo build --release --locked
+}
+
+package() {
+    cd "$srcdir/$pkgname-$pkgver"
+    install -Dm755 "target/release/docu_ffacd" "$pkgdir/usr/bin/docu_ffacd"
+    install -Dm644 "packaging/linux/docu_ffacd.desktop" "$pkgdir/usr/share/applications/docu_ffacd.desktop"
+    install -Dm644 "ui/assets/app_icon_256.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/docu_ffacd.png"
+    install -Dm644 "ui/assets/app_icon_64.png" "$pkgdir/usr/share/icons/hicolor/64x64/apps/docu_ffacd.png"
+    install -Dm644 "ui/assets/app_icon_32.png" "$pkgdir/usr/share/icons/hicolor/32x32/apps/docu_ffacd.png"
+    install -Dm644 "ui/assets/app_icon.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/docu_ffacd.svg"
+}
