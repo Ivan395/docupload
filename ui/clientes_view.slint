@@ -1,0 +1,1058 @@
+import { ScrollView, LineEdit, Button, ComboBox } from "std-widgets.slint";
+import { AppData, AppLogic, ClienteCardData } from "models.slint";
+
+export component ClientesView inherits Rectangle {
+    background: #f8fafc;
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 20px;
+
+        // Header: Título, Filtros, Buscador y Botón Nuevo
+        HorizontalLayout {
+            alignment: space-between;
+            spacing: 16px;
+
+            VerticalLayout {
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    Text {
+                        text: "Catálogo de Clientes";
+                        font-size: 22px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 11px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+                        y: (parent.height - self.height) / 2;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: AppData.clientes_list.length + " Registros";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: "Gestión de entidades fiscales y empresas vinculadas a registros patronales, nóminas CFDI y cédulas SUA.";
+                    font-size: 12px;
+                    color: #64748b;
+                }
+            }
+
+            // Barra de acciones superiores: Filtros, Buscador, + Nuevo Cliente
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+
+                // Buscador
+                Rectangle {
+                    width: 260px;
+                    height: 38px;
+                    border-radius: 8px;
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #cbd5e1;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        alignment: center;
+
+                        Text { text: "🔍"; font-size: 12px; vertical-alignment: center; }
+                        LineEdit {
+                            text <=> AppData.clientes_search;
+                            placeholder-text: "Buscar por Nombre o RFC...";
+                            horizontal-stretch: 1;
+                            edited => { AppLogic.reload_clientes(); }
+                        }
+                    }
+                }
+
+                // Botón + Nuevo Cliente
+                Rectangle {
+                    height: 38px;
+                    border-radius: 8px;
+                    background: new_cli_btn.has-hover ? #1e40af : #1e3a8a;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: center;
+
+                        Text {
+                            text: "+ Nuevo Cliente";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    new_cli_btn := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.open_new_cliente_dialog(); }
+                    }
+                }
+            }
+        }
+
+        // Grid Scrollable de Clientes en formato Cards
+        ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                alignment: start;
+                spacing: 16px;
+                padding-bottom: 24px;
+
+                if AppData.clientes_list.length == 0 : Rectangle {
+                    height: 200px;
+                    background: #ffffff;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        Text {
+                            text: "🏢";
+                            font-size: 32px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "No se encontraron clientes registrados";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: #0f172a;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "Haz clic en '+ Nuevo Cliente' o procesa nóminas / cédulas para agregar empresas automáticamente.";
+                            font-size: 12px;
+                            color: #64748b;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                for cli in AppData.clientes_list : Rectangle {
+                    border-radius: 12px;
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        alignment: start;
+                        padding: 18px;
+                        spacing: 14px;
+
+                        // Fila Superior: ID, Badge Estado, Botón Editar Datos
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: center;
+
+                                // ID Badge
+                                Rectangle {
+                                    height: 24px;
+                                    border-radius: 4px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        Text {
+                                            text: "ID: " + cli.id;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #475569;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                // Status Badge
+                                Rectangle {
+                                    height: 24px;
+                                    border-radius: 12px;
+                                    background: cli.has_ingested_data ? #ecfdf5 : #fffbeb;
+                                    border-width: 1px;
+                                    border-color: cli.has_ingested_data ? #a7f3d0 : #fde68a;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 5px;
+                                        alignment: center;
+
+                                        Rectangle {
+                                            width: 6px;
+                                            height: 6px;
+                                            border-radius: 3px;
+                                            background: cli.has_ingested_data ? #059669 : #d97706;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: cli.status_label;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: cli.has_ingested_data ? #065f46 : #92400e;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: end;
+
+                                // Botón Editar Datos (Habilitado para todos los clientes)
+                                Rectangle {
+                                    height: 30px;
+                                    border-radius: 6px;
+                                    background: edit_touch.has-hover ? #eff6ff : #ffffff;
+                                    border-width: 1px;
+                                    border-color: #bfdbfe;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 6px;
+                                        alignment: center;
+
+                                        Text {
+                                            text: "✏";
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: "Editar Datos";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #1d4ed8;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    edit_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            AppLogic.open_edit_cliente_dialog(cli.id);
+                                        }
+                                    }
+                                }
+
+                                // Botón Eliminar Cliente
+                                Rectangle {
+                                    height: 30px;
+                                    border-radius: 6px;
+                                    background: del_cli_touch.has-hover ? #fee2e2 : #ffffff;
+                                    border-width: 1px;
+                                    border-color: #fecaca;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 5px;
+                                        alignment: center;
+
+                                        Text { text: "🗑"; font-size: 12px; vertical-alignment: center; }
+                                        Text {
+                                            text: "Eliminar";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #dc2626;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    del_cli_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            AppLogic.open_delete_cliente_dialog(cli.id, cli.nombre);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Nombre de la Empresa y Razón Social
+                        VerticalLayout {
+                            spacing: 3px;
+                            Text {
+                                text: cli.nombre;
+                                font-size: 17px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+                            if cli.razon_social != "" : Text {
+                                text: "Razón Social: " + cli.razon_social;
+                                font-size: 13px;
+                                color: #475569;
+                            }
+                        }
+
+                        // Fila de Datos Fiscales: RFC, Tipo Persona, Régimen Fiscal
+                        Rectangle {
+                            height: 56px;
+                            border-radius: 8px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #f1f5f9;
+
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                alignment: space-between;
+
+                                // RFC
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 2px;
+                                    Text { text: "RFC SAT"; font-size: 11px; font-weight: 700; color: #64748b; }
+                                    Text {
+                                        text: cli.rfc != "" ? cli.rfc : (cli.has_ingested_data ? "Pendiente" : "[Pendiente de importación]");
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: cli.rfc != "" ? #0f172a : #94a3b8;
+                                    }
+                                }
+
+                                // Tipo Persona
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 2px;
+                                    Text { text: "PERSONA"; font-size: 11px; font-weight: 700; color: #64748b; }
+                                    Text {
+                                        text: cli.tipo_persona != "" ? cli.tipo_persona : "No clasificado";
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: cli.tipo_persona != "" ? #1e3a8a : #94a3b8;
+                                    }
+                                }
+
+                                // Régimen Fiscal
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 2px;
+                                    Text { text: "RÉGIMEN FISCAL SAT"; font-size: 11px; font-weight: 700; color: #64748b; }
+                                    Text {
+                                        text: cli.regimen_fiscal != "" ? cli.regimen_fiscal : "No asignado";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: cli.regimen_fiscal != "" ? #0f172a : #94a3b8;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fila de Estadísticas y Contadores
+                        HorizontalLayout {
+                            spacing: 16px;
+
+                            // Registros Patronales Badge
+                            Rectangle {
+                                height: 38px;
+                                border-radius: 8px;
+                                background: #eff6ff;
+                                border-width: 1px;
+                                border-color: #dbeafe;
+                                horizontal-stretch: 1;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 8px;
+                                    alignment: center;
+
+                                    Text { text: "📜"; font-size: 14px; vertical-alignment: center; }
+                                    Text {
+                                        text: cli.registros_patronales_count + " Registros Patronales";
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: #1d4ed8;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Empleados Activos Badge
+                            Rectangle {
+                                height: 38px;
+                                border-radius: 8px;
+                                background: cli.empleados_count > 0 ? #ecfdf5 : #f1f5f9;
+                                border-width: 1px;
+                                border-color: cli.empleados_count > 0 ? #a7f3d0 : #e2e8f0;
+                                horizontal-stretch: 1;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 8px;
+                                    alignment: center;
+
+                                    Text { text: "👥"; font-size: 14px; vertical-alignment: center; }
+                                    Text {
+                                        text: cli.empleados_count + " Empleados Activos";
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: cli.empleados_count > 0 ? #065f46 : #64748b;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fila Inferior de Botones de Navegación
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            // Botón: Ver Registros Patronales
+                            Rectangle {
+                                height: 42px;
+                                border-radius: 8px;
+                                background: btn_rp_nav.has-hover ? #1e40af : #1e3a8a;
+                                horizontal-stretch: 1;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: center;
+
+                                    Text { text: "📜"; font-size: 14px; vertical-alignment: center; }
+                                    Text {
+                                        text: "Ver Registros Patronales (" + cli.registros_patronales_count + ")";
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                btn_rp_nav := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        AppLogic.select_cliente_for_rp(cli.id, cli.nombre, cli.rfc, cli.has_ingested_data);
+                                    }
+                                }
+                            }
+
+                            // Botón: Ver Empleados (Deshabilitado si empleados_count == 0)
+                            Rectangle {
+                                height: 40px;
+                                border-radius: 8px;
+                                background: cli.empleados_count == 0 ? #e2e8f0 : (btn_emp_nav.has-hover ? #047857 : #059669);
+                                horizontal-stretch: 1;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: cli.empleados_count == 0 ? "🔒" : "👥";
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: cli.empleados_count == 0 ? "Sin Empleados (Deshabilitado)" : "Ver Empleados (" + cli.empleados_count + ")";
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        color: cli.empleados_count == 0 ? #94a3b8 : #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                btn_emp_nav := TouchArea {
+                                    mouse-cursor: cli.empleados_count > 0 ? pointer : default;
+                                    clicked => {
+                                        if cli.empleados_count > 0 {
+                                            AppLogic.select_cliente_for_empleados(cli.id, cli.nombre, cli.rfc);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal: Nuevo Cliente
+    if AppData.show_new_cliente_modal : Rectangle {
+        background: #00000066;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 520px;
+            height: 490px;
+            background: #ffffff;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 8px;
+                alignment: start;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Crear Nuevo Cliente";
+                        font-size: 16px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+                    Rectangle {
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: close_new_cli.has-hover ? #fee2e2 : transparent;
+                        Text {
+                            text: "✕";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: close_new_cli.has-hover ? #dc2626 : #64748b;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        close_new_cli := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_new_cliente_dialog(); }
+                        }
+                    }
+                }
+
+                Text {
+                    text: "Ingresa los datos del cliente. Nombre y RFC son obligatorios; los demás datos son opcionales.";
+                    font-size: 11px;
+                    color: #64748b;
+                }
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "Nombre de la Empresa / Comercial *"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                    LineEdit {
+                        height: 34px;
+                        text <=> AppData.new_cliente_nombre;
+                        placeholder-text: "Ej. Gondesa o Constructora del Centro SA de CV";
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    VerticalLayout {
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        Text { text: "RFC SAT *"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                        LineEdit {
+                            height: 34px;
+                            text <=> AppData.new_cliente_rfc;
+                            placeholder-text: "RFC a 12 o 13 posiciones";
+                            edited => { AppLogic.validate_new_cliente_input(); }
+                        }
+                        if AppData.new_cliente_rfc_msg != "" : Text {
+                            text: AppData.new_cliente_rfc_msg;
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: AppData.new_cliente_rfc_status == "valid" ? #16a34a : #dc2626;
+                            wrap: word-wrap;
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        Text { text: "CURP (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                        LineEdit {
+                            height: 34px;
+                            text <=> AppData.new_cliente_curp;
+                            placeholder-text: "CURP a 18 posiciones";
+                            edited => { AppLogic.validate_new_cliente_input(); }
+                        }
+                        if AppData.new_cliente_curp_msg != "" : Text {
+                            text: AppData.new_cliente_curp_msg;
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: AppData.new_cliente_curp_status == "valid" ? #16a34a : #dc2626;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "Razón Social (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                    LineEdit {
+                        height: 34px;
+                        text <=> AppData.new_cliente_razon_social;
+                        placeholder-text: "Razón Social oficial de la empresa";
+                    }
+                }
+
+                // Dropdown Tipo de Persona
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "Tipo de Persona (Opcional)"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                    ComboBox {
+                        height: 34px;
+                        model: AppData.tipos_personas_combo;
+                        current-value: AppData.new_cliente_tipo_persona_val;
+                        selected(val) => {
+                            AppData.new_cliente_tipo_persona_val = val;
+                            AppLogic.change_new_tipo_persona(val);
+                        }
+                    }
+                }
+
+                // Dropdown Régimen Fiscal
+                VerticalLayout {
+                    spacing: 2px;
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text { text: "Régimen Fiscal SAT (Opcional)"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                        if !AppData.new_cliente_regimen_enabled : Text {
+                            text: "Seleccione Tipo de Persona para habilitar";
+                            font-size: 9px;
+                            color: #94a3b8;
+                        }
+                    }
+                    ComboBox {
+                        height: 34px;
+                        enabled: AppData.new_cliente_regimen_enabled;
+                        model: AppData.new_cliente_regimenes_combo;
+                        current-value: AppData.new_cliente_regimen_val;
+                        selected(val) => {
+                            AppData.new_cliente_regimen_val = val;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 12px;
+                    padding-top: 6px;
+
+                    Button {
+                        height: 34px;
+                        text: "Cancelar";
+                        clicked => { AppLogic.close_new_cliente_dialog(); }
+                    }
+
+                    Rectangle {
+                        height: 34px;
+                        width: 140px;
+                        border-radius: 6px;
+                        background: (AppData.new_cliente_nombre != "" && AppData.new_cliente_rfc != "") ? #1e3a8a : #94a3b8;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Guardar Cliente";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: (AppData.new_cliente_nombre != "" && AppData.new_cliente_rfc != "") ? pointer : default;
+                            clicked => {
+                                if AppData.new_cliente_nombre != "" && AppData.new_cliente_rfc != "" {
+                                    AppLogic.submit_new_cliente(
+                                        AppData.new_cliente_nombre,
+                                        AppData.new_cliente_rfc,
+                                        AppData.new_cliente_razon_social,
+                                        AppData.new_cliente_curp,
+                                        AppData.new_cliente_tipo_persona_val,
+                                        AppData.new_cliente_regimen_val
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal: Editar Cliente
+    if AppData.show_edit_cliente_modal : Rectangle {
+        background: #00000066;
+
+        TouchArea {
+            // Prevent clicks from falling through
+        }
+
+        Rectangle {
+            width: 520px;
+            height: 490px;
+            background: #ffffff;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 8px;
+                alignment: start;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Actualizar Datos del Cliente";
+                        font-size: 16px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+                    Rectangle {
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: close_edit_cli.has-hover ? #fee2e2 : transparent;
+                        Text {
+                            text: "✕";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: close_edit_cli.has-hover ? #dc2626 : #64748b;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        close_edit_cli := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_edit_cliente_dialog(); }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "Nombre de la Empresa / Comercial *"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                    LineEdit {
+                        height: 34px;
+                        text <=> AppData.edit_cliente_nombre;
+                        placeholder-text: "Nombre comercial o identificador de la empresa";
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    VerticalLayout {
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        Text { text: "RFC SAT *"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                        LineEdit {
+                            height: 34px;
+                            text <=> AppData.edit_cliente_rfc;
+                            placeholder-text: "RFC a 12 o 13 posiciones";
+                            edited => { AppLogic.validate_edit_cliente_input(); }
+                        }
+                        if AppData.edit_cliente_rfc_msg != "" : Text {
+                            text: AppData.edit_cliente_rfc_msg;
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: AppData.edit_cliente_rfc_status == "valid" ? #16a34a : #dc2626;
+                            wrap: word-wrap;
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        Text { text: "CURP"; font-size: 10px; font-weight: 700; color: #475569; }
+                        LineEdit {
+                            height: 34px;
+                            text <=> AppData.edit_cliente_curp;
+                            placeholder-text: "CURP a 18 posiciones";
+                            edited => { AppLogic.validate_edit_cliente_input(); }
+                        }
+                        if AppData.edit_cliente_curp_msg != "" : Text {
+                            text: AppData.edit_cliente_curp_msg;
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: AppData.edit_cliente_curp_status == "valid" ? #16a34a : #dc2626;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "Razón Social"; font-size: 10px; font-weight: 700; color: #475569; }
+                    LineEdit {
+                        height: 34px;
+                        text <=> AppData.edit_cliente_razon_social;
+                        placeholder-text: "Razón Social oficial de la empresa";
+                    }
+                }
+
+                // Dropdown Tipo de Persona
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "Tipo de Persona"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                    ComboBox {
+                        height: 34px;
+                        model: AppData.tipos_personas_combo;
+                        current-value: AppData.edit_cliente_tipo_persona_val;
+                        selected(val) => {
+                            AppData.edit_cliente_tipo_persona_val = val;
+                            AppLogic.change_tipo_persona(val);
+                        }
+                    }
+                }
+
+                // Dropdown Régimen Fiscal
+                VerticalLayout {
+                    spacing: 2px;
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text { text: "Régimen Fiscal SAT"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                        if !AppData.edit_cliente_regimen_enabled : Text {
+                            text: "Seleccione Tipo de Persona para habilitar";
+                            font-size: 9px;
+                            color: #94a3b8;
+                        }
+                    }
+                    ComboBox {
+                        height: 34px;
+                        enabled: AppData.edit_cliente_regimen_enabled;
+                        model: AppData.regimenes_fiscales_combo;
+                        current-value: AppData.edit_cliente_regimen_val;
+                        selected(val) => {
+                            AppData.edit_cliente_regimen_val = val;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 12px;
+                    padding-top: 6px;
+
+                    Button {
+                        height: 34px;
+                        text: "Cancelar";
+                        clicked => { AppLogic.close_edit_cliente_dialog(); }
+                    }
+
+                    Rectangle {
+                        height: 34px;
+                        width: 150px;
+                        border-radius: 6px;
+                        background: (AppData.edit_cliente_nombre != "" && AppData.edit_cliente_rfc != "") ? #1e3a8a : #94a3b8;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Guardar Cambios";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: (AppData.edit_cliente_nombre != "" && AppData.edit_cliente_rfc != "") ? pointer : default;
+                            clicked => {
+                                if AppData.edit_cliente_nombre != "" && AppData.edit_cliente_rfc != "" {
+                                    AppLogic.submit_edit_cliente(
+                                        AppData.edit_cliente_id,
+                                        AppData.edit_cliente_nombre,
+                                        AppData.edit_cliente_razon_social,
+                                        AppData.edit_cliente_rfc,
+                                        AppData.edit_cliente_curp,
+                                        AppData.edit_cliente_tipo_persona_val,
+                                        AppData.edit_cliente_regimen_val
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal de Confirmación de Eliminación de Cliente
+    if AppData.show_delete_cliente_modal : Rectangle {
+        background: #00000077;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 480px;
+            height: 230px;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #fecaca;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "⚠️";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "¿Eliminar Cliente?";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+                        Text {
+                            text: "Esta acción eliminará el cliente seleccionado y todos sus registros asociados.";
+                            font-size: 12px;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Card resumen
+                Rectangle {
+                    border-radius: 6px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 4px;
+                        Text {
+                            text: "CLIENTE / RAZÓN SOCIAL:";
+                            font-size: 10px;
+                            font-weight: 800;
+                            color: #065f46;
+                        }
+                        Text {
+                            text: AppData.delete_cliente_nombre;
+                            font-size: 14px;
+                            font-weight: 800;
+                            color: #0f172a;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    // Cancelar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_cancel_del_cli.has-hover ? #f1f5f9 : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: center;
+                            Text {
+                                text: "Cancelar";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_cancel_del_cli := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_delete_cliente_dialog(); }
+                        }
+                    }
+
+                    // Sí, Eliminar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_confirm_del_cli.has-hover ? #b91c1c : #dc2626;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text {
+                                text: "🗑";
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Sí, Eliminar Cliente";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_confirm_del_cli := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.confirm_delete_cliente(AppData.delete_cliente_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

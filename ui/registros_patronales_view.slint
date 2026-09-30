@@ -1,0 +1,1185 @@
+import { ScrollView, LineEdit, TextEdit, Button, ComboBox } from "std-widgets.slint";
+import { AppData, AppLogic, RegistroPatronalData } from "models.slint";
+
+export component RegistrosPatronalesView inherits Rectangle {
+    background: #f8fafc;
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 18px;
+
+        // Header Superior: Breadcrumbs y Acciones
+        HorizontalLayout {
+            alignment: space-between;
+
+            VerticalLayout {
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+
+                    Text {
+                        text: "Registros Patronales IMSS";
+                        font-size: 22px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+
+                    Rectangle {
+                        height: 24px;
+                        border-radius: 4px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: AppData.selected_cliente_nombre != "" ? AppData.selected_cliente_nombre : "Cliente";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if AppData.selected_cliente_rfc != "" : Rectangle {
+                        height: 24px;
+                        border-radius: 4px;
+                        background: #f1f5f9;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: "RFC: " + AppData.selected_cliente_rfc;
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if AppData.selected_cliente_id != "" : Rectangle {
+                        height: 24px;
+                        border-radius: 4px;
+                        background: btn_del_header_cli.has-hover ? #fee2e2 : #fef2f2;
+                        border-width: 1px;
+                        border-color: #fca5a5;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 4px;
+                            alignment: center;
+                            Text {
+                                text: "🗑";
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Eliminar Cliente";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #dc2626;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_del_header_cli := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.open_delete_cliente_dialog(AppData.selected_cliente_id, AppData.selected_cliente_nombre);
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: "Control de centros de trabajo, clases de riesgo, primas de RT y homologación con nóminas CFDI y cédulas SUA.";
+                    font-size: 12px;
+                    color: #64748b;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+
+                // Botón Nuevo Registro Patronal
+                Rectangle {
+                    height: 38px;
+                    border-radius: 8px;
+                    background: btn_new_rp.has-hover ? #1e40af : #1e3a8a;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: center;
+
+                        Text {
+                            text: "+ Nuevo Registro Patronal";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_new_rp := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.open_new_rp_dialog(); }
+                    }
+                }
+            }
+        }
+
+        // Barra de Filtros y Búsqueda
+        Rectangle {
+            height: 52px;
+            border-radius: 10px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                alignment: space-between;
+
+                // Buscador de Registros Patronales
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+                    Text { text: "🔍"; font-size: 13px; vertical-alignment: center; }
+                    LineEdit {
+                        width: 340px;
+                        text <=> AppData.rp_search;
+                        placeholder-text: "Buscar por NRP, Actividad o Delegación...";
+                        edited => { AppLogic.filter_rp_search(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+
+                    Rectangle {
+                        height: 26px;
+                        border-radius: 13px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            Text {
+                                text: AppData.registros_patronales_list.length + " Registros Patronales";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tabla de Registros Patronales (Lista completa de ancho completo)
+        Rectangle {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                // Encabezados de Columna
+                Rectangle {
+                    height: 38px;
+                    background: #f8fafc;
+                    border-radius: 6px;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: space-between;
+
+                        Text { text: "REGISTRO PATRONAL (NRP)"; font-size: 11.5px; font-weight: 800; color: #64748b; horizontal-stretch: 3; vertical-alignment: center; }
+                        Text { text: "ACTIVIDAD ECONÓMICA"; font-size: 11.5px; font-weight: 800; color: #64748b; horizontal-stretch: 4; vertical-alignment: center; }
+                        Text { text: "CLASE Y FRACCIÓN"; font-size: 11.5px; font-weight: 800; color: #64748b; horizontal-stretch: 2; vertical-alignment: center; }
+                        Text { text: "PRIMA DE RIESGO"; font-size: 11.5px; font-weight: 800; color: #64748b; horizontal-stretch: 2; vertical-alignment: center; }
+                        Text { text: "TRABAJADORES"; font-size: 11.5px; font-weight: 800; color: #64748b; horizontal-stretch: 2; vertical-alignment: center; }
+                        Text { text: "ACCIONES"; font-size: 11.5px; font-weight: 800; color: #64748b; width: 330px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+
+                // Filas de la Tabla
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        padding-bottom: 12px;
+
+                        if AppData.registros_patronales_list.length == 0 : Rectangle {
+                            height: 180px;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 8px;
+                                Text { text: "📜"; font-size: 30px; horizontal-alignment: center; }
+                                Text {
+                                    text: "No hay registros patronales para este cliente";
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    color: #0f172a;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Haga clic en el botón '+ Nuevo Registro Patronal' para dar de alta el primer registro.";
+                                    font-size: 12px;
+                                    color: #64748b;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        for rp in AppData.registros_patronales_list : Rectangle {
+                            height: 64px;
+                            border-radius: 8px;
+                            background: #ffffff;
+                            border-width: 1px;
+                            border-color: #f1f5f9;
+
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                alignment: space-between;
+
+                                // Columna 1: NRP, Subdelegación y Estado de Sincronización
+                                HorizontalLayout {
+                                    horizontal-stretch: 3;
+                                    spacing: 12px;
+                                    alignment: start;
+
+                                    Rectangle {
+                                        width: 36px;
+                                        height: 36px;
+                                        border-radius: 6px;
+                                        background: #1e3a8a;
+                                        y: (parent.height - self.height) / 2;
+
+                                        Text {
+                                            text: "🏛";
+                                            font-size: 15px;
+                                            color: #ffffff;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 2px;
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: rp.registro;
+                                                font-size: 14px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                                vertical-alignment: center;
+                                            }
+                                            if !rp.is_valid_structure : Rectangle {
+                                                height: 19px;
+                                                border-radius: 4px;
+                                                background: #fee2e2;
+                                                border-width: 1px;
+                                                border-color: #fca5a5;
+                                                HorizontalLayout {
+                                                    padding-left: 6px;
+                                                    padding-right: 6px;
+                                                    Text {
+                                                        text: "⚠️ Estructura no válida";
+                                                        font-size: 10px;
+                                                        font-weight: 700;
+                                                        color: #b91c1c;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Rectangle {
+                                                height: 18px;
+                                                border-radius: 3px;
+                                                background: rp.has_ingested_data ? #ecfdf5 : #fffbeb;
+                                                border-width: 1px;
+                                                border-color: rp.has_ingested_data ? #a7f3d0 : #fde68a;
+                                                HorizontalLayout {
+                                                    padding-left: 5px;
+                                                    padding-right: 5px;
+                                                    Text {
+                                                        text: rp.has_ingested_data ? "✓ Sincronizado" : "Pendiente";
+                                                        font-size: 10px;
+                                                        font-weight: 700;
+                                                        color: rp.has_ingested_data ? #065f46 : #92400e;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                            if rp.subdelegacion != "" : Text {
+                                                text: rp.subdelegacion;
+                                                font-size: 11px;
+                                                color: #64748b;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Columna 2: Actividad Económica
+                                HorizontalLayout {
+                                    horizontal-stretch: 4;
+                                    alignment: start;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Text {
+                                            text: rp.actividad != "" ? rp.actividad : "Sin actividad descrita";
+                                            font-size: 12px;
+                                            color: #334155;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+
+                                // Columna 3: Clase y Fracción
+                                HorizontalLayout {
+                                    horizontal-stretch: 2;
+                                    alignment: start;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Text {
+                                            text: rp.clase_nombre != "" ? ("Clase " + rp.clase_nombre) : "Sin Clase";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #0f172a;
+                                        }
+                                        Text {
+                                            text: rp.fraccion_codigo != "" ? ("Frac. " + rp.fraccion_codigo) : "Sin fracción";
+                                            font-size: 11px;
+                                            color: #64748b;
+                                        }
+                                    }
+                                }
+
+                                // Columna 4: Prima de Riesgo RT
+                                HorizontalLayout {
+                                    horizontal-stretch: 2;
+                                    alignment: start;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Text {
+                                            text: rp.prima_riesgo != "" ? (rp.prima_riesgo + "%") : "0.00000%";
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            color: #1d4ed8;
+                                        }
+                                        Text {
+                                            text: "Prima RT Anual";
+                                            font-size: 10px;
+                                            color: #64748b;
+                                        }
+                                    }
+                                }
+
+                                // Columna 5: Trabajadores / Fuerza Laboral
+                                HorizontalLayout {
+                                    horizontal-stretch: 2;
+                                    alignment: start;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            height: 26px;
+                                            border-radius: 4px;
+                                            background: rp.empleados_count > 0 ? #ecfdf5 : #f1f5f9;
+                                            border-width: 1px;
+                                            border-color: rp.empleados_count > 0 ? #a7f3d0 : #e2e8f0;
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 4px;
+                                                alignment: center;
+                                                Text {
+                                                    text: "👥 " + rp.empleados_count + " Activos";
+                                                    font-size: 12px;
+                                                    font-weight: 700;
+                                                    color: rp.empleados_count > 0 ? #065f46 : #64748b;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Columna 6: Acciones
+                                HorizontalLayout {
+                                    width: 330px;
+                                    spacing: 8px;
+                                    alignment: center;
+
+                                    // Botón: Editar Registro Patronal
+                                    Rectangle {
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        background: edit_rp_touch.has-hover ? #eff6ff : #ffffff;
+                                        border-width: 1px;
+                                        border-color: #bfdbfe;
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            spacing: 5px;
+                                            alignment: center;
+                                            Text { text: "✏"; font-size: 12px; vertical-alignment: center; }
+                                            Text {
+                                                text: "Editar";
+                                                font-size: 12px;
+                                                font-weight: 700;
+                                                color: #1d4ed8;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        edit_rp_touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.select_rp_for_edit(rp.id);
+                                            }
+                                        }
+                                    }
+
+                                    // Botón: Ver Revisiones Patronales
+                                    Rectangle {
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        background: rev_rp_touch.has-hover ? #047857 : #059669;
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            spacing: 5px;
+                                            alignment: center;
+                                            Text { text: "📋"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                                            Text {
+                                                text: "Ver Revisiones";
+                                                font-size: 12px;
+                                                font-weight: 700;
+                                                color: #ffffff;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        rev_rp_touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.select_rp_for_revisiones(rp.id, rp.registro, rp.subdelegacion, rp.delegacion);
+                                            }
+                                        }
+                                    }
+
+                                    // Botón: Eliminar Registro Patronal
+                                    Rectangle {
+                                        height: 32px;
+                                        width: 36px;
+                                        border-radius: 6px;
+                                        background: del_rp_touch.has-hover ? #fee2e2 : #ffffff;
+                                        border-width: 1px;
+                                        border-color: del_rp_touch.has-hover ? #f87171 : #cbd5e1;
+
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: "🗑";
+                                                font-size: 13px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        del_rp_touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.open_delete_rp_dialog(rp.id, rp.registro);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal Box: Alta y Edición de Registro Patronal
+    if AppData.show_rp_modal : Rectangle {
+        background: #00000066;
+
+        TouchArea {
+            // Prevenir clicks al fondo
+        }
+
+        Rectangle {
+            width: 580px;
+            height: 580px;
+            background: #ffffff;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 22px;
+                spacing: 14px;
+
+                // Header del Diálogo
+                HorizontalLayout {
+                    alignment: space-between;
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: AppData.rp_form_is_editing ? "Editar Registro Patronal" : "Alta de Registro Patronal";
+                            font-size: 18px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: AppData.rp_form_is_editing ? "Actualice los datos del centro de trabajo IMSS" : "Homologación de Centro de Trabajo IMSS";
+                            font-size: 11px;
+                            color: #64748b;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: close_rp_btn.has-hover ? #fee2e2 : transparent;
+                        Text {
+                            text: "✕";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: close_rp_btn.has-hover ? #dc2626 : #64748b;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        close_rp_btn := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_rp_dialog(); }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #e2e8f0; }
+
+                // Formulario Scrollable
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 12px;
+                        padding-right: 8px;
+                        padding-bottom: 8px;
+
+                        // 1. Número de Registro Patronal (Obligatorio)
+                        VerticalLayout {
+                            spacing: 4px;
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Número de Registro Patronal (NRP) *"; font-size: 11px; font-weight: 700; color: #0f172a; }
+                                Text { text: "11 Caracteres"; font-size: 10px; font-weight: 600; color: #94a3b8; }
+                            }
+                            LineEdit {
+                                text <=> AppData.rp_form_registro;
+                                placeholder-text: "Ej. Y5839210104";
+                                edited => { AppLogic.validate_rp_input(); }
+                                changed text => { AppLogic.validate_rp_input(); }
+                            }
+                            if AppData.rp_form_registro_msg != "" : Text {
+                                text: AppData.rp_form_registro_msg;
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: AppData.rp_form_registro_status == "valid" ? #16a34a : #dc2626;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // 2. Actividad Económica (Opcional, Máximo 300 caracteres)
+                        VerticalLayout {
+                            spacing: 4px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Actividad Económica Según Acta / Cédula (Opcional)"; font-size: 11px; font-weight: 700; color: #0f172a; }
+
+                                Rectangle {
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    background: AppData.rp_form_char_count >= 300 ? #fee2e2 : (AppData.rp_form_char_count >= 250 ? #fef3c7 : #f1f5f9);
+
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Text {
+                                            text: AppData.rp_form_char_count + " / 300 caracteres" + (AppData.rp_form_char_count >= 300 ? " (Límite alcanzado)" : (" (" + (300 - AppData.rp_form_char_count) + " restantes)"));
+                                            font-size: 10px;
+                                            font-weight: 700;
+                                            color: AppData.rp_form_char_count >= 300 ? #dc2626 : (AppData.rp_form_char_count >= 250 ? #d97706 : #475569);
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            LineEdit {
+                                text <=> AppData.rp_form_actividad;
+                                placeholder-text: "Describa la actividad económica del centro de trabajo (opcional, máx. 300 caracteres)...";
+                                edited(new_text) => {
+                                    AppLogic.update_rp_actividad(new_text);
+                                }
+                                changed text => {
+                                    AppLogic.update_rp_actividad(self.text);
+                                }
+                            }
+
+                            Text {
+                                text: AppData.rp_form_char_count >= 300 ? "⚠️ Límite de 300 caracteres alcanzado. Solo se permite borrar." : "Límite máximo estipulado: 300 caracteres (" + (300 - AppData.rp_form_char_count) + " restantes).";
+                                font-size: 10px;
+                                color: AppData.rp_form_char_count >= 300 ? #dc2626 : #94a3b8;
+                            }
+                        }
+
+                        // 3. Sección Campos Complementarios (Editables y Opcionales)
+                        Rectangle {
+                            border-radius: 8px;
+                            background: #ffffff;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text {
+                                        text: "Campos Complementarios (Opcionales)";
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        color: #1e3a8a;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle {
+                                        height: 20px;
+                                        border-radius: 4px;
+                                        background: #eff6ff;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: "Editables / Opcionales";
+                                                font-size: 10px;
+                                                font-weight: 700;
+                                                color: #2563eb;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Domicilio
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    Text { text: "Domicilio Fiscal / Obra (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    LineEdit {
+                                        text <=> AppData.rp_form_domicilio;
+                                        placeholder-text: "Calle, número y colonia";
+                                    }
+                                }
+
+                                // CP y Entidad
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        horizontal-stretch: 1;
+                                        Text { text: "Código Postal (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                        LineEdit {
+                                            text <=> AppData.rp_form_codigo_postal;
+                                            placeholder-text: "5 dígitos";
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        horizontal-stretch: 2;
+                                        Text { text: "Entidad Federativa (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                        LineEdit {
+                                            text <=> AppData.rp_form_entidad;
+                                            placeholder-text: "Ej. Ciudad de México";
+                                        }
+                                    }
+                                }
+
+                                // Área Geográfica
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    Text { text: "Área Geográfica (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    LineEdit {
+                                        text <=> AppData.rp_form_area_geografica;
+                                        placeholder-text: "A o B";
+                                    }
+                                }
+
+                                // Delegación y Subdelegación (2 campos separados)
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        horizontal-stretch: 1;
+                                        Text { text: "Delegación IMSS (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                        LineEdit {
+                                            text <=> AppData.rp_form_delegacion;
+                                            placeholder-text: "Ej. Ciudad de México Sur";
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        horizontal-stretch: 1;
+                                        Text { text: "Subdelegación IMSS (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                        LineEdit {
+                                            text <=> AppData.rp_form_subdelegacion;
+                                            placeholder-text: "Ej. 01 Hidalgo Sur";
+                                        }
+                                    }
+                                }
+
+                                // Prima de Riesgo
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    Text { text: "Prima de Riesgo RT (% Anual) (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    LineEdit {
+                                        text <=> AppData.rp_form_prima_riesgo;
+                                        placeholder-text: "Ej. 5.43550";
+                                    }
+                                }
+
+                                // Clase de Riesgo
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    Text { text: "Clase de Riesgo (Catálogo) (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    ComboBox {
+                                        model: AppData.clases_combo;
+                                        current-value: AppData.rp_form_clase_val;
+                                        selected(val) => {
+                                            AppData.rp_form_clase_val = val;
+                                            AppLogic.change_rp_clase(val);
+                                        }
+                                    }
+                                }
+
+                                // Fracción
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    Text { text: "Fracción y Actividad RT (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    ComboBox {
+                                        model: AppData.fracciones_combo;
+                                        current-value: AppData.rp_form_fraccion_val;
+                                        selected(val) => {
+                                            AppData.rp_form_fraccion_val = val;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Footer de Acciones
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+                    padding-top: 4px;
+
+                    Button {
+                        text: "Cancelar";
+                        clicked => { AppLogic.close_rp_dialog(); }
+                    }
+
+                    if !AppData.rp_form_is_editing : Button {
+                        text: "Limpiar";
+                        clicked => { AppLogic.clear_rp_form(); }
+                    }
+
+                    Rectangle {
+                        height: 38px;
+                        width: 170px;
+                        border-radius: 6px;
+                        background: (AppData.rp_form_registro != "" && AppData.rp_form_registro_status == "valid") ? #1e3a8a : #94a3b8;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            Text {
+                                text: AppData.rp_form_is_editing ? "Actualizar Registro" : "Guardar Registro Patronal";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: (AppData.rp_form_registro != "" && AppData.rp_form_registro_status == "valid") ? pointer : default;
+                            clicked => {
+                                if (AppData.rp_form_registro != "" && AppData.rp_form_registro_status == "valid") {
+                                    AppLogic.submit_registro_patronal(
+                                        AppData.rp_form_id,
+                                        AppData.selected_cliente_id,
+                                        AppData.rp_form_registro,
+                                        AppData.rp_form_actividad,
+                                        AppData.rp_form_domicilio,
+                                        AppData.rp_form_codigo_postal,
+                                        AppData.rp_form_entidad,
+                                        AppData.rp_form_area_geografica,
+                                        AppData.rp_form_delegacion,
+                                        AppData.rp_form_subdelegacion,
+                                        AppData.rp_form_prima_riesgo,
+                                        AppData.rp_form_clase_val,
+                                        AppData.rp_form_fraccion_val
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal compacto: Confirmar eliminación de Cliente desde Registros Patronales
+    if AppData.show_delete_cliente_modal : Rectangle {
+        background: #00000077;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 480px;
+            height: 230px;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #fecaca;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "⚠️";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "¿Eliminar Cliente?";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+                        Text {
+                            text: "Esta acción eliminará el cliente seleccionado.";
+                            font-size: 12px;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Card resumen
+                Rectangle {
+                    border-radius: 6px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 4px;
+                        Text {
+                            text: "CLIENTE:";
+                            font-size: 10px;
+                            font-weight: 800;
+                            color: #065f46;
+                        }
+                        Text {
+                            text: AppData.delete_cliente_nombre;
+                            font-size: 14px;
+                            font-weight: 800;
+                            color: #0f172a;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    // Cancelar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_cancel_del_cli_rp.has-hover ? #f1f5f9 : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: center;
+                            Text {
+                                text: "Cancelar";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_cancel_del_cli_rp := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_delete_cliente_dialog(); }
+                        }
+                    }
+
+                    // Sí, Eliminar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_confirm_del_cli_rp.has-hover ? #b91c1c : #dc2626;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text {
+                                text: "🗑";
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Sí, Eliminar Cliente";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_confirm_del_cli_rp := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.confirm_delete_cliente(AppData.delete_cliente_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal compacto: Confirmar eliminación de Registro Patronal
+    if AppData.show_delete_rp_modal : Rectangle {
+        background: #00000077;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 480px;
+            height: 230px;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #fecaca;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "⚠️";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "¿Eliminar Registro Patronal?";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+                        Text {
+                            text: "Esta acción eliminará el registro patronal seleccionado y sus registros vinculados.";
+                            font-size: 12px;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Card resumen
+                Rectangle {
+                    border-radius: 6px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 4px;
+                        Text {
+                            text: "REGISTRO PATRONAL:";
+                            font-size: 10px;
+                            font-weight: 800;
+                            color: #065f46;
+                        }
+                        Text {
+                            text: AppData.delete_rp_registro;
+                            font-size: 14px;
+                            font-weight: 800;
+                            color: #0f172a;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    // Cancelar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_cancel_del_rp.has-hover ? #f1f5f9 : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: center;
+                            Text {
+                                text: "Cancelar";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_cancel_del_rp := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_delete_rp_dialog(); }
+                        }
+                    }
+
+                    // Sí, Eliminar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_confirm_del_rp.has-hover ? #b91c1c : #dc2626;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text {
+                                text: "🗑";
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Sí, Eliminar Reg. Patronal";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_confirm_del_rp := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.confirm_delete_rp(AppData.delete_rp_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,2033 @@
+import { ScrollView, Button } from "std-widgets.slint";
+import { AppData, AppLogic, CedulaFileItem, CedulaDetalleRow, CedulaSumatoriaRow } from "models.slint";
+
+export component CedulaCuotasView inherits Rectangle {
+    background: #f4f6fa;
+
+    ScrollView {
+        VerticalLayout {
+            padding: 24px;
+            spacing: 20px;
+
+            // 1. Barra de Navegación y Acciones Superiores
+            HorizontalLayout {
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: center;
+
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: back_rev_touch.has-hover ? #eff6ff : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text { text: "←"; font-size: 13px; font-weight: 800; color: #1e3a8a; }
+                            Text {
+                                text: "Auditoría Fiscal / Revisiones";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #1e3a8a;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        back_rev_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.navigate_view(3); }
+                        }
+                    }
+
+                    Text {
+                        text: "Auditoría Fiscal  ›  Cédulas de Determinación de Cuotas (SUA)";
+                        font-size: 13px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        height: 24px;
+                        border-radius: 4px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: "Periodo Auditable: Ejercicio 2023";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Acciones de Cabecera (Reporte, Descargar Excel, Borrar, Refrescar)
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+
+                    if AppData.cedulas_view_state == 2 : Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_rep.has-hover ? #f8fafc : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "📋"; font-size: 13px; vertical-alignment: center; }
+                            Text {
+                                text: "Realizar Reporte";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_rep := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.open_reporte_liquidaciones(); }
+                        }
+                    }
+
+                    if AppData.cedulas_view_state == 2 : Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_down.has-hover ? #047857 : #059669;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            alignment: center;
+
+                            Text { text: "📥"; font-size: 13px; vertical-alignment: center; }
+                            Text {
+                                text: "Descargar a Excel (.xlsx)";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                height: 18px;
+                                border-radius: 3px;
+                                background: #065f46;
+                                HorizontalLayout {
+                                    padding-left: 4px;
+                                    padding-right: 4px;
+                                    Text { text: "XLSX"; font-size: 9px; font-weight: 800; color: #ffffff; vertical-alignment: center; }
+                                }
+                            }
+                        }
+
+                        btn_down := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.descargar_cedulas_excel(); }
+                        }
+                    }
+
+                    if AppData.cedulas_view_state == 2 : Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_del_all.has-hover ? #fef2f2 : #ffffff;
+                        border-width: 1px;
+                        border-color: #fca5a5;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text { text: "🗑"; font-size: 13px; color: #dc2626; vertical-alignment: center; }
+                            Text {
+                                text: "Borrar Todas las Cédulas";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #dc2626;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_del_all := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.solicitar_borrar_todas_cedulas(); }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_ref.has-hover ? #f1f5f9 : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        Text {
+                            text: "⟳";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #475569;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        btn_ref := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.recargar_cedulas_view(); }
+                        }
+                    }
+                }
+            }
+
+            // 2. Tarjeta Principal: Cédulas de Determinación de Cuotas
+            Rectangle {
+                background: #ffffff;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 16px;
+
+                    // Cabecera de la Tarjeta
+                    HorizontalLayout {
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: center;
+
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 14px;
+                                background: #eff6ff;
+                                border-width: 1px;
+                                border-color: #bfdbfe;
+                                Text {
+                                    text: "2";
+                                    font-size: 13px;
+                                    font-weight: 800;
+                                    color: #1d4ed8;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Text {
+                                text: "Cédulas de Determinación de Cuotas";
+                                font-size: 16px;
+                                font-weight: 800;
+                                color: #0f172a;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                height: 22px;
+                                border-radius: 4px;
+                                background: #eff6ff;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    Text {
+                                        text: "Múltiples archivos o .ZIP / .RAR / Carpeta";
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        color: #1d4ed8;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 24px;
+                            border-radius: 4px;
+                            background: #f1f5f9;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 4px;
+                                alignment: center;
+                                Text { text: "⚙"; font-size: 11px; vertical-alignment: center; }
+                                Text {
+                                    text: "Motor OCR Vectorial IMSS v3.2";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Cédulas generadas por el SUA en formato PDF (mensuales / bimestrales). Extracción automática mediante motor de layout SUA (búsqueda recursiva).";
+                        font-size: 12px;
+                        color: #64748b;
+                    }
+
+                    // Cuadro de Carga / Drag & Drop
+                    Rectangle {
+                        height: 140px;
+                        background: #f8fafc;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 10px;
+
+                            Text {
+                                text: "🔲";
+                                font-size: 26px;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "Arrastra archivos o carpetas aquí, o selecciona:";
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: #334155;
+                                horizontal-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 12px;
+
+                                Rectangle {
+                                    height: 36px;
+                                    width: 170px;
+                                    border-radius: 6px;
+                                    background: btn_exp.has-hover ? #022c22 : #064e3b;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 6px;
+                                        Text { text: "📁"; font-size: 13px; vertical-alignment: center; }
+                                        Text {
+                                            text: "Explorar Archivos";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #ffffff;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    btn_exp := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.select_cedulas_view_files(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 36px;
+                                    width: 180px;
+                                    border-radius: 6px;
+                                    background: btn_car.has-hover ? #f0fdf4 : #ffffff;
+                                    border-width: 1px;
+                                    border-color: #065f46;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 6px;
+                                        Text { text: "📂"; font-size: 13px; vertical-alignment: center; }
+                                        Text {
+                                            text: "Seleccionar Carpeta";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #065f46;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    btn_car := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.select_cedulas_view_folder(); }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 8px;
+
+                                Text {
+                                    text: "Formatos admitidos:";
+                                    font-size: 11px;
+                                    color: #64748b;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 3px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout { padding-left: 5px; padding-right: 5px; Text { text: ".PDF"; font-size: 9px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                }
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 3px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout { padding-left: 5px; padding-right: 5px; Text { text: ".ZIP"; font-size: 9px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                }
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 3px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout { padding-left: 5px; padding-right: 5px; Text { text: ".RAR"; font-size: 9px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                }
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 3px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout { padding-left: 5px; padding-right: 5px; Text { text: "CARPETA"; font-size: 9px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                }
+                            }
+                        }
+                    }
+
+                    // SECCIÓN: ARCHIVOS CARGADOS (N ANALIZADOS)
+                    // Visible cuando se han seleccionado archivos (estado >= 1)
+                    if AppData.cedulas_view_files_count > 0 : VerticalLayout {
+                        spacing: 12px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            Text {
+                                text: "ARCHIVOS CARGADOS (" + AppData.cedulas_view_files_count + " ANALIZADOS)";
+                                font-size: 11px;
+                                font-weight: 800;
+                                color: #475569;
+                                letter-spacing: 0.5px;
+                                vertical-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: center;
+
+                                Text {
+                                    text: "Tamaño Total: " + AppData.cedulas_view_total_size_str;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #334155;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    background: #ecfdf5;
+                                    border-width: 1px;
+                                    border-color: #a7f3d0;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Text {
+                                            text: AppData.cedulas_view_extracted_count_str;
+                                            font-size: 10px;
+                                            font-weight: 700;
+                                            color: #059669;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Tabla con Ancho y Alto Fijo + Scroll Vertical y Horizontal
+                        Rectangle {
+                            height: 220px;
+                            background: #ffffff;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+                            clip: true;
+
+                            ScrollView {
+                                VerticalLayout {
+                                    padding: 0px;
+                                    spacing: 0px;
+
+                                    // Cabecera de la tabla
+                                    Rectangle {
+                                        height: 36px;
+                                        background: #f8fafc;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 8px;
+
+                                            Text { width: 280px; text: "Archivo"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 150px; text: "Tipo / Extensión"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 90px; text: "Tamaño"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 140px; text: "Págs SUA Detectadas"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 130px; text: "Estatus Extracción"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { horizontal-stretch: 1; text: "Checksum SHA-256"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 50px; text: "Acción"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                    }
+
+                                    Rectangle { height: 1px; background: #e2e8f0; }
+
+                                    // Filas de Archivos
+                                    for item in AppData.cedulas_view_files : Rectangle {
+                                        height: 40px;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 8px;
+                                            alignment: center;
+
+                                            HorizontalLayout {
+                                                width: 280px;
+                                                spacing: 6px;
+                                                alignment: center;
+                                                Text { text: item.file_type == "PDF Vectorial IMSS" ? "📄" : "🗂"; font-size: 13px; vertical-alignment: center; }
+                                                Text {
+                                                    text: item.filename;
+                                                    font-size: 11px;
+                                                    font-weight: 600;
+                                                    color: #1e293b;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            Text { width: 150px; text: item.file_type; font-size: 11px; color: #475569; vertical-alignment: center; }
+                                            Text { width: 90px; text: item.size_str; font-size: 11px; color: #64748b; vertical-alignment: center; }
+                                            Text { width: 140px; text: item.pages_detected; font-size: 11px; color: #334155; vertical-alignment: center; }
+
+                                            Rectangle {
+                                                width: 130px;
+                                                height: 24px;
+                                                y: (parent.height - self.height) / 2;
+                                                border-radius: 4px;
+                                                background: item.status_is_valid ? #ecfdf5 : #fef2f2;
+                                                HorizontalLayout {
+                                                    padding-left: 6px;
+                                                    padding-right: 6px;
+                                                    spacing: 4px;
+                                                    alignment: center;
+                                                    Text { text: "•"; font-size: 12px; color: item.status_is_valid ? #059669 : #dc2626; vertical-alignment: center; }
+                                                    Text {
+                                                        text: item.status_badge;
+                                                        font-size: 10px;
+                                                        font-weight: 700;
+                                                        color: item.status_is_valid ? #059669 : #dc2626;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: item.checksum;
+                                                font-size: 10px;
+                                                font-family: "monospace";
+                                                color: #64748b;
+                                                vertical-alignment: center;
+                                            }
+
+                                            Rectangle {
+                                                width: 50px;
+                                                height: 26px;
+                                                y: (parent.height - self.height) / 2;
+                                                border-radius: 4px;
+                                                background: btn_rem.has-hover ? #fee2e2 : transparent;
+
+                                                Text {
+                                                    text: "✕";
+                                                    font-size: 12px;
+                                                    font-weight: 800;
+                                                    color: #ef4444;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                btn_rem := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { AppLogic.remove_cedula_view_file(item.id); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Footer de Estado y Botón de Procesar y Guardar
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: center;
+                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #10b981; }
+                                Text {
+                                    text: AppData.cedulas_view_status_banner_text;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 38px;
+                                width: 180px;
+                                border-radius: 6px;
+                                background: btn_save.has-hover ? #022c22 : #064e3b;
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 8px;
+                                    Text { text: "💾"; font-size: 14px; vertical-alignment: center; }
+                                    Text {
+                                        text: "Procesar y Guardar";
+                                        font-size: 12px;
+                                        font-weight: 800;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                btn_save := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { AppLogic.procesar_y_guardar_cedulas(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. SECCIÓN PROCESADA Y GUARDADA EN DB (estado == 2)
+            if AppData.cedulas_view_state == 2 : VerticalLayout {
+                spacing: 20px;
+
+                // 3.1. Tres Tarjetas de Resumen General
+                HorizontalLayout {
+                    spacing: 16px;
+
+                    // Tarjeta 1: Rango de Periodos Detectados
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #ffffff;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "RANGO DE PERIODOS DETECTADOS"; font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; }
+                                Text { text: "📅"; font-size: 14px; color: #2563eb; }
+                            }
+
+                            Text {
+                                text: AppData.cedulas_periodo_rango_str;
+                                font-size: 18px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+
+                            Text {
+                                text: AppData.cedulas_periodo_sub_str;
+                                font-size: 11px;
+                                color: #475569;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    background: #eff6ff;
+                                    HorizontalLayout {
+                                        padding-left: 6px; padding-right: 6px;
+                                        Text { text: "Cédulas Mensuales: " + AppData.cedulas_mensuales_count; font-size: 10px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                                    }
+                                }
+                                Rectangle {
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout {
+                                        padding-left: 6px; padding-right: 6px;
+                                        Text { text: "Bimestrales: " + AppData.cedulas_bimestrales_count; font-size: 10px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Tarjeta 2: SBC Promedio Ponderado
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #ffffff;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "SBC PROMEDIO PONDERADO"; font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; }
+                                Text { text: "💵"; font-size: 14px; color: #059669; }
+                            }
+
+                            Text {
+                                text: AppData.cedulas_sbc_promedio_str;
+                                font-size: 18px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+
+                            Text {
+                                text: "📈 " + AppData.cedulas_sbc_sub_str;
+                                font-size: 11px;
+                                color: #059669;
+                                font-weight: 600;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: AppData.cedulas_sbc_min_str; font-size: 10px; color: #64748b; vertical-alignment: center; }
+                                Text { text: "•"; font-size: 10px; color: #cbd5e1; vertical-alignment: center; }
+                                Text { text: AppData.cedulas_sbc_max_str; font-size: 10px; color: #64748b; vertical-alignment: center; }
+                            }
+                        }
+                    }
+
+                    // Tarjeta 3: Ramas de Cuotas Detectadas
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #ffffff;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "RAMAS DE CUOTAS DETECTADAS"; font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; }
+                                Text { text: "🏛"; font-size: 14px; color: #7c3aed; }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Rectangle {
+                                    height: 22px;
+                                    border-radius: 4px;
+                                    background: #fdf2f8;
+                                    border-width: 1px;
+                                    border-color: #fbcfe8;
+                                    HorizontalLayout {
+                                        padding-left: 6px; padding-right: 6px;
+                                        Text { text: AppData.cedulas_ramas_rt_str; font-size: 10px; font-weight: 800; color: #db2777; vertical-alignment: center; }
+                                    }
+                                }
+                                Rectangle {
+                                    height: 22px;
+                                    border-radius: 4px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout {
+                                        padding-left: 6px; padding-right: 6px;
+                                        Text { text: "Invalidez y Vida"; font-size: 10px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                    }
+                                }
+                                Rectangle {
+                                    height: 22px;
+                                    border-radius: 4px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout {
+                                        padding-left: 6px; padding-right: 6px;
+                                        Text { text: "Guarderías"; font-size: 10px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                    }
+                                }
+                                Rectangle {
+                                    height: 22px;
+                                    border-radius: 4px;
+                                    background: #eff6ff;
+                                    HorizontalLayout {
+                                        padding-left: 6px; padding-right: 6px;
+                                        Text { text: "RCV (Bimestral)"; font-size: 10px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Prestaciones en Especie y Dinero"; font-size: 11px; color: #64748b; }
+                                Text { text: "100% Homologado"; font-size: 10px; font-weight: 800; color: #059669; }
+                            }
+                        }
+                    }
+                }
+
+                // 3.2. Tabla Paginada de 100 en 100: Detalle Extraído de Cédulas SUA
+                Rectangle {
+                    background: #ffffff;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        // Cabecera y Buscador de la tabla
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "Detalle Extraído de Cédulas SUA";
+                                    font-size: 16px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+
+                                    Text {
+                                        text: "Mostrando " + AppData.cedulas_page_start_row + " - " + AppData.cedulas_page_end_row + " de " + AppData.cedulas_detalle_total_count + " registros procesados";
+                                        font-size: 12px;
+                                        color: #64748b;
+                                        vertical-alignment: center;
+                                    }
+
+                                    // Controles rápidos de paginación superior
+                                    if AppData.cedulas_page_total > 1 : HorizontalLayout {
+                                        spacing: 4px;
+                                        alignment: center;
+
+                                        Rectangle {
+                                            width: 24px;
+                                            height: 22px;
+                                            border-radius: 4px;
+                                            background: AppData.cedulas_page_current > 1 ? (btn_top_prev.has-hover ? #e2e8f0 : #ffffff) : #f8fafc;
+                                            border-width: 1px;
+                                            border-color: AppData.cedulas_page_current > 1 ? #cbd5e1 : #e2e8f0;
+                                            opacity: AppData.cedulas_page_current > 1 ? 1.0 : 0.4;
+                                            Text { text: "‹"; font-size: 13px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                            btn_top_prev := TouchArea {
+                                                mouse-cursor: AppData.cedulas_page_current > 1 ? pointer : default;
+                                                clicked => {
+                                                    if AppData.cedulas_page_current > 1 {
+                                                        AppLogic.cedulas_cambiar_pagina(AppData.cedulas_page_current - 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: AppData.cedulas_page_current + " / " + AppData.cedulas_page_total;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #1e3a8a;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Rectangle {
+                                            width: 24px;
+                                            height: 22px;
+                                            border-radius: 4px;
+                                            background: AppData.cedulas_page_current < AppData.cedulas_page_total ? (btn_top_next.has-hover ? #e2e8f0 : #ffffff) : #f8fafc;
+                                            border-width: 1px;
+                                            border-color: AppData.cedulas_page_current < AppData.cedulas_page_total ? #cbd5e1 : #e2e8f0;
+                                            opacity: AppData.cedulas_page_current < AppData.cedulas_page_total ? 1.0 : 0.4;
+                                            Text { text: "›"; font-size: 13px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                            btn_top_next := TouchArea {
+                                                mouse-cursor: AppData.cedulas_page_current < AppData.cedulas_page_total ? pointer : default;
+                                                clicked => {
+                                                    if AppData.cedulas_page_current < AppData.cedulas_page_total {
+                                                        AppLogic.cedulas_cambiar_pagina(AppData.cedulas_page_current + 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: center;
+
+                                // Buscador por NSS / Empleado
+                                Rectangle {
+                                    width: 280px;
+                                    height: 36px;
+                                    border-radius: 6px;
+                                    background: #f8fafc;
+                                    border-width: 1px;
+                                    border-color: #cbd5e1;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 8px;
+                                        alignment: center;
+
+                                        Text { text: "🔍"; font-size: 12px; vertical-alignment: center; }
+                                        search_input := TextInput {
+                                            font-size: 12px;
+                                            text: AppData.cedulas_detalle_search;
+                                            vertical-alignment: center;
+                                            edited => { AppLogic.cedulas_filtrar_busqueda(self.text); }
+                                        }
+                                    }
+                                }
+
+                                // Filtro Mes
+                                Rectangle {
+                                    height: 36px;
+                                    border-radius: 6px;
+                                    background: #f8fafc;
+                                    border-width: 1px;
+                                    border-color: #cbd5e1;
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: center;
+                                        Text { text: "📅"; font-size: 12px; vertical-alignment: center; }
+                                        Text { text: "Todos los Meses"; font-size: 11px; font-weight: 700; color: #334155; vertical-alignment: center; }
+                                    }
+                                }
+
+                                // Filtro Obra
+                                Rectangle {
+                                    height: 36px;
+                                    border-radius: 6px;
+                                    background: #f8fafc;
+                                    border-width: 1px;
+                                    border-color: #cbd5e1;
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: center;
+                                        Text { text: "🏗"; font-size: 12px; vertical-alignment: center; }
+                                        Text { text: "Todas las Obras"; font-size: 11px; font-weight: 700; color: #334155; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Tabla de Registros con Cabecera Fija y Scroll Interno
+                        Rectangle {
+                            background: #ffffff;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+                            clip: true;
+
+                            VerticalLayout {
+                                padding: 0px;
+                                spacing: 0px;
+
+                                // Cabecera Fija
+                                Rectangle {
+                                    height: 40px;
+                                    background: #f8fafc;
+
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 8px;
+                                        alignment: center;
+
+                                        Text { width: 50px; text: "# Reg."; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 75px; text: "Mes / Año"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 125px; text: "Reg. Patronal"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                        Text { width: 140px; text: "Reg. Obra"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                        Text { width: 115px; text: "NSS"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                        Text { width: 140px; text: "RFC / CURP"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                        Text { horizontal-stretch: 1; min-width: 170px; text: "Nombre del Trabajador"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                        Text { width: 45px; text: "Días"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 75px; text: "SDI"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 90px; text: "Cuota Pat."; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 85px; text: "Cuota Obr."; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 95px; text: "Total Liq."; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                    }
+                                }
+
+                                Rectangle { height: 1px; background: #e2e8f0; }
+
+                                // Contenedor con Scroll para las filas
+                                ScrollView {
+                                    height: 440px;
+
+                                    VerticalLayout {
+                                        padding: 0px;
+                                        spacing: 0px;
+
+                                        for row in AppData.cedulas_detalle_list : Rectangle {
+                                            height: 40px;
+                                            background: Math.mod(row.idx, 2) == 0 ? #ffffff : #f8fafc;
+
+                                            HorizontalLayout {
+                                                padding-left: 12px;
+                                                padding-right: 12px;
+                                                spacing: 8px;
+                                                alignment: center;
+
+                                                Text { width: 50px; text: row.reg_num_str; font-size: 12px; font-weight: 700; color: #64748b; horizontal-alignment: center; vertical-alignment: center; }
+                                                Text { width: 75px; text: row.mes_anio; font-size: 12px; font-weight: 600; color: #0f172a; horizontal-alignment: center; vertical-alignment: center; }
+                                                Text { width: 125px; text: row.registro_patronal; font-size: 12px; font-weight: 800; color: #1d4ed8; vertical-alignment: center; }
+                                                Text { width: 140px; text: row.registro_obra; font-size: 12px; font-family: "monospace"; color: #475569; overflow: elide; vertical-alignment: center; }
+                                                Text { width: 115px; text: row.nss; font-size: 12px; font-weight: 700; color: #0f172a; vertical-alignment: center; }
+                                                Text { width: 140px; text: row.rfc_curp; font-size: 11px; color: #64748b; overflow: elide; vertical-alignment: center; }
+                                                Text { horizontal-stretch: 1; min-width: 170px; text: row.nombre_trabajador; font-size: 12px; font-weight: 700; color: #0f172a; overflow: elide; vertical-alignment: center; }
+                                                Text { width: 45px; text: row.dias; font-size: 12px; font-weight: 600; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                                Text { width: 75px; text: row.sdi_str; font-size: 12px; color: #64748b; horizontal-alignment: right; vertical-alignment: center; }
+                                                Text { width: 90px; text: row.cuota_patronal_str; font-size: 12px; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                                Text { width: 85px; text: row.cuota_obrera_str; font-size: 12px; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                                Text { width: 95px; text: row.total_str; font-size: 12.5px; font-weight: 800; color: #059669; horizontal-alignment: right; vertical-alignment: center; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Barra de Paginación de 100 en 100
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            Text {
+                                text: "Filas por página: 100  |  Página " + AppData.cedulas_page_current + " de " + AppData.cedulas_page_total;
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #64748b;
+                                vertical-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: center;
+
+                                // Primera
+                                Rectangle {
+                                    height: 28px;
+                                    width: 72px;
+                                    border-radius: 4px;
+                                    background: AppData.cedulas_page_current > 1 ? (btn_first.has-hover ? #f1f5f9 : #ffffff) : #f8fafc;
+                                    border-width: 1px;
+                                    border-color: AppData.cedulas_page_current > 1 ? #cbd5e1 : #e2e8f0;
+                                    opacity: AppData.cedulas_page_current > 1 ? 1.0 : 0.45;
+                                    Text {
+                                        text: "« Primera";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: AppData.cedulas_page_current > 1 ? #1e293b : #94a3b8;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    btn_first := TouchArea {
+                                        mouse-cursor: AppData.cedulas_page_current > 1 ? pointer : default;
+                                        clicked => {
+                                            if AppData.cedulas_page_current > 1 {
+                                                AppLogic.cedulas_cambiar_pagina(1);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Anterior
+                                Rectangle {
+                                    height: 28px;
+                                    width: 68px;
+                                    border-radius: 4px;
+                                    background: AppData.cedulas_page_current > 1 ? (btn_prev.has-hover ? #f1f5f9 : #ffffff) : #f8fafc;
+                                    border-width: 1px;
+                                    border-color: AppData.cedulas_page_current > 1 ? #cbd5e1 : #e2e8f0;
+                                    opacity: AppData.cedulas_page_current > 1 ? 1.0 : 0.45;
+                                    Text {
+                                        text: "‹ Anterior";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: AppData.cedulas_page_current > 1 ? #1e293b : #94a3b8;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    btn_prev := TouchArea {
+                                        mouse-cursor: AppData.cedulas_page_current > 1 ? pointer : default;
+                                        clicked => {
+                                            if AppData.cedulas_page_current > 1 {
+                                                AppLogic.cedulas_cambiar_pagina(AppData.cedulas_page_current - 1);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Indicador de página activa
+                                Rectangle {
+                                    height: 28px;
+                                    width: 32px;
+                                    border-radius: 4px;
+                                    background: #1e3a8a;
+                                    Text { text: AppData.cedulas_page_current; font-size: 11px; font-weight: 800; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+
+                                // Siguiente
+                                Rectangle {
+                                    height: 28px;
+                                    width: 72px;
+                                    border-radius: 4px;
+                                    background: AppData.cedulas_page_current < AppData.cedulas_page_total ? (btn_next.has-hover ? #f1f5f9 : #ffffff) : #f8fafc;
+                                    border-width: 1px;
+                                    border-color: AppData.cedulas_page_current < AppData.cedulas_page_total ? #cbd5e1 : #e2e8f0;
+                                    opacity: AppData.cedulas_page_current < AppData.cedulas_page_total ? 1.0 : 0.45;
+                                    Text {
+                                        text: "Siguiente ›";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: AppData.cedulas_page_current < AppData.cedulas_page_total ? #1e293b : #94a3b8;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    btn_next := TouchArea {
+                                        mouse-cursor: AppData.cedulas_page_current < AppData.cedulas_page_total ? pointer : default;
+                                        clicked => {
+                                            if AppData.cedulas_page_current < AppData.cedulas_page_total {
+                                                AppLogic.cedulas_cambiar_pagina(AppData.cedulas_page_current + 1);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Última
+                                Rectangle {
+                                    height: 28px;
+                                    width: 64px;
+                                    border-radius: 4px;
+                                    background: AppData.cedulas_page_current < AppData.cedulas_page_total ? (btn_last.has-hover ? #f1f5f9 : #ffffff) : #f8fafc;
+                                    border-width: 1px;
+                                    border-color: AppData.cedulas_page_current < AppData.cedulas_page_total ? #cbd5e1 : #e2e8f0;
+                                    opacity: AppData.cedulas_page_current < AppData.cedulas_page_total ? 1.0 : 0.45;
+                                    Text {
+                                        text: "Última »";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: AppData.cedulas_page_current < AppData.cedulas_page_total ? #1e293b : #94a3b8;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    btn_last := TouchArea {
+                                        mouse-cursor: AppData.cedulas_page_current < AppData.cedulas_page_total ? pointer : default;
+                                        clicked => {
+                                            if AppData.cedulas_page_current < AppData.cedulas_page_total {
+                                                AppLogic.cedulas_cambiar_pagina(AppData.cedulas_page_total);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3.3. Estadísticas y Auditoría de Archivos Procesados
+                Rectangle {
+                    background: #ffffff;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: center;
+                                Text { text: "📊"; font-size: 15px; vertical-alignment: center; }
+                                Text {
+                                    text: "Estadísticas y Auditoría de Archivos Procesados";
+                                    font-size: 15px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 22px;
+                                border-radius: 4px;
+                                background: #eff6ff;
+                                HorizontalLayout {
+                                    padding-left: 8px; padding-right: 8px;
+                                    Text { text: "Auditoría Integral de Integridad Documental"; font-size: 10px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                                }
+                            }
+                        }
+
+                        // 4 Tarjetas de Métricas de Auditoría
+                        HorizontalLayout {
+                            spacing: 14px;
+
+                            // KPI 1: Total Archivos Analizados
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: #f8fafc;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: #e2e8f0;
+
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 6px;
+                                    Text { text: "TOTAL ARCHIVOS ANALIZADOS"; font-size: 10px; font-weight: 800; color: #64748b; }
+                                    Text {
+                                        text: AppData.cedulas_kpi_total_analizados + " archivos";
+                                        font-size: 20px;
+                                        font-weight: 800;
+                                        color: #0f172a;
+                                    }
+                                    Text {
+                                        text: "✓ " + AppData.cedulas_kpi_validos_sua + " Válidos SUA (" + AppData.cedulas_kpi_validos_pct + ")";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #059669;
+                                    }
+                                }
+                            }
+
+                            // KPI 2: Archivos No Procesados
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: #f8fafc;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: #e2e8f0;
+
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 6px;
+                                    Text { text: "ARCHIVOS NO PROCESADOS"; font-size: 10px; font-weight: 800; color: #64748b; }
+                                    Text {
+                                        text: AppData.cedulas_kpi_no_procesados + " archivos (" + AppData.cedulas_kpi_no_procesados_pct + ")";
+                                        font-size: 20px;
+                                        font-weight: 800;
+                                        color: AppData.cedulas_kpi_no_procesados > 0 ? #dc2626 : #0f172a;
+                                    }
+                                    Text {
+                                        text: AppData.cedulas_kpi_no_procesados_desc;
+                                        font-size: 11px;
+                                        color: #64748b;
+                                    }
+                                }
+                            }
+
+                            // KPI 3: Trabajadores Únicos
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: #f8fafc;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: #e2e8f0;
+
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 6px;
+                                    Text { text: "TRABAJADORES ÚNICOS"; font-size: 10px; font-weight: 800; color: #64748b; }
+                                    Text {
+                                        text: AppData.cedulas_kpi_trabajadores_unicos + " únicos";
+                                        font-size: 20px;
+                                        font-weight: 800;
+                                        color: #0f172a;
+                                    }
+                                    Text {
+                                        text: AppData.cedulas_kpi_repeticiones_mensuales + " repeticiones mensuales consolidadas";
+                                        font-size: 11px;
+                                        color: #475569;
+                                    }
+                                }
+                            }
+
+                            // KPI 4: Importe Total Liquidaciones
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: #f8fafc;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: #e2e8f0;
+
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 6px;
+                                    Text { text: "IMPORTE TOTAL LIQUIDACIONES"; font-size: 10px; font-weight: 800; color: #64748b; }
+                                    Text {
+                                        text: AppData.cedulas_kpi_importe_total_str;
+                                        font-size: 20px;
+                                        font-weight: 800;
+                                        color: #059669;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: "Patronal: " + AppData.cedulas_kpi_patronal_str; font-size: 10px; font-weight: 700; color: #475569; }
+                                        Text { text: "•"; font-size: 10px; color: #cbd5e1; }
+                                        Text { text: "Obrera: " + AppData.cedulas_kpi_obrera_str; font-size: 10px; font-weight: 700; color: #475569; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Callouts de Auditoría Avanzada (Superposiciones, Obras ajenas, Warnings)
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            // Superposiciones de fechas
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 42px;
+                                border-radius: 6px;
+                                background: AppData.cedulas_kpi_superposiciones_count > 0 ? #fef3c7 : #f0fdf4;
+                                border-width: 1px;
+                                border-color: AppData.cedulas_kpi_superposiciones_count > 0 ? #fde68a : #bbf7d0;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 8px;
+                                    alignment: center;
+                                    Text { text: AppData.cedulas_kpi_superposiciones_count > 0 ? "⚠️" : "✓"; font-size: 13px; vertical-alignment: center; }
+                                    Text {
+                                        text: AppData.cedulas_kpi_superposiciones_count > 0
+                                            ? "Superposición de fechas detectada: " + AppData.cedulas_kpi_superposiciones_count + " empleados asignados a 2 o más obras con fechas solapadas."
+                                            : "Validación de Superposición: 0 empleados con fechas superpuestas entre obras.";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: AppData.cedulas_kpi_superposiciones_count > 0 ? #b45309 : #15803d;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Obras fuera de revisión
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 42px;
+                                border-radius: 6px;
+                                background: AppData.cedulas_kpi_obras_fuera_revision_count > 0 ? #eff6ff : #f8fafc;
+                                border-width: 1px;
+                                border-color: AppData.cedulas_kpi_obras_fuera_revision_count > 0 ? #bfdbfe : #e2e8f0;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 8px;
+                                    alignment: center;
+                                    Text { text: "ℹ️"; font-size: 13px; vertical-alignment: center; }
+                                    Text {
+                                        text: "Obras no vinculadas a la revisión actual: " + AppData.cedulas_kpi_obras_fuera_revision_count + " obras (" + AppData.cedulas_kpi_empleados_obras_fuera_count + " empleados únicos registrados en DB).";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #1e40af;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3.4. SECCIÓN: TOTALES Y SUMATORIAS POR MES, REGISTRO PATRONAL Y REGISTRO DE OBRA
+                Rectangle {
+                    background: #ffffff;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: center;
+                                Text { text: "∑"; font-size: 18px; font-weight: 900; color: #1e3a8a; vertical-alignment: center; }
+                                Text {
+                                    text: "TOTALES Y SUMATORIAS POR MES, REGISTRO PATRONAL Y REGISTRO DE OBRA";
+                                    font-size: 14px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                    letter-spacing: 0.5px;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 22px;
+                                border-radius: 4px;
+                                background: #eff6ff;
+                                HorizontalLayout {
+                                    padding-left: 8px; padding-right: 8px;
+                                    Text { text: "Conciliación Matemática 100% Cuadrada"; font-size: 10px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                                }
+                            }
+                        }
+
+                        // Tabla de Sumatorias
+                        Rectangle {
+                            background: #ffffff;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+
+                            VerticalLayout {
+                                padding: 0px;
+                                spacing: 0px;
+
+                                // Header de sumatorias
+                                Rectangle {
+                                    height: 38px;
+                                    background: #f8fafc;
+
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 8px;
+                                        alignment: center;
+
+                                        Text { width: 125px; text: "REGISTRO PATRONAL"; font-size: 10px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                        Text { horizontal-stretch: 1; min-width: 180px; text: "RAZÓN SOCIAL"; font-size: 10px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                        Text { width: 55px; text: "AÑO"; font-size: 10px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 95px; text: "MES"; font-size: 10px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 150px; text: "REGISTRO DE OBRA"; font-size: 10px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                        Text { width: 110px; text: "TRABAJADORES"; font-size: 10px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 85px; text: "TOTAL DÍAS"; font-size: 10px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 125px; text: "CUOTA PATRONAL ($)"; font-size: 10px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 115px; text: "CUOTA OBRERA ($)"; font-size: 10px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 135px; text: "TOTAL LIQUIDACIÓN ($)"; font-size: 10px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                    }
+                                }
+
+                                Rectangle { height: 1px; background: #e2e8f0; }
+
+                                // Filas de la sumatoria
+                                for s_row in AppData.cedulas_sumatorias_list : Rectangle {
+                                    height: 38px;
+
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 8px;
+                                        alignment: center;
+
+                                        Text { width: 125px; text: s_row.registro_patronal; font-size: 11px; font-weight: 800; color: #1d4ed8; vertical-alignment: center; }
+                                        Text { horizontal-stretch: 1; min-width: 180px; text: s_row.razon_social; font-size: 11px; font-weight: 700; color: #0f172a; overflow: elide; vertical-alignment: center; }
+                                        Text { width: 55px; text: s_row.anio; font-size: 11px; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 95px; text: s_row.mes; font-size: 11px; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { width: 150px; text: s_row.registro_obra; font-size: 11px; font-family: "monospace"; color: #475569; overflow: elide; vertical-alignment: center; }
+                                        Text { width: 110px; text: s_row.trabajadores_count; font-size: 11px; font-weight: 700; color: #0f172a; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 85px; text: s_row.total_dias; font-size: 11px; font-weight: 700; color: #0f172a; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 125px; text: s_row.cuota_patronal_str; font-size: 11px; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 115px; text: s_row.cuota_obrera_str; font-size: 11px; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 135px; text: s_row.total_liquidacion_str; font-size: 11px; font-weight: 800; color: #059669; horizontal-alignment: right; vertical-alignment: center; }
+                                    }
+                                }
+
+                                // Fila Final: GRAN TOTAL CONSOLIDADO AUDITADO (Alineación exacta columna a columna)
+                                Rectangle {
+                                    height: 44px;
+                                    background: #eff6ff;
+
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        spacing: 8px;
+                                        alignment: center;
+
+                                        Text {
+                                            width: 125px;
+                                            text: "GRAN TOTAL";
+                                            font-size: 11px;
+                                            font-weight: 900;
+                                            color: #1e3a8a;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            min-width: 180px;
+                                            text: "CONSOLIDADO AUDITADO";
+                                            font-size: 11px;
+                                            font-weight: 900;
+                                            color: #1e3a8a;
+                                            letter-spacing: 0.5px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Rectangle { width: 55px; }
+                                        Rectangle { width: 95px; }
+                                        Rectangle { width: 150px; }
+
+                                        Text { width: 110px; text: AppData.cedulas_gran_total_trabajadores; font-size: 12px; font-weight: 900; color: #1e3a8a; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 85px; text: AppData.cedulas_gran_total_dias; font-size: 12px; font-weight: 900; color: #1e3a8a; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 125px; text: AppData.cedulas_gran_total_patronal_str; font-size: 12px; font-weight: 900; color: #1e3a8a; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 115px; text: AppData.cedulas_gran_total_obrera_str; font-size: 12px; font-weight: 900; color: #1e3a8a; horizontal-alignment: right; vertical-alignment: center; }
+                                        Text { width: 135px; text: AppData.cedulas_gran_total_str; font-size: 13px; font-weight: 900; color: #059669; horizontal-alignment: right; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal de Confirmación para "Borrar Todas las Cédulas" (Compacto y Homologado)
+    if AppData.show_delete_all_cedulas_modal : Rectangle {
+        background: #00000077;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 480px;
+            height: 230px;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #fecaca;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "⚠️";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "¿Borrar Todas las Cédulas?";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+                        Text {
+                            text: "Esta acción eliminará todas las liquidaciones y detalles procesados para esta revisión.";
+                            font-size: 12px;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Card resumen
+                Rectangle {
+                    border-radius: 6px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 4px;
+                        Text {
+                            text: "CÉDULAS Y LIQUIDACIONES SUA:";
+                            font-size: 10px;
+                            font-weight: 800;
+                            color: #065f46;
+                        }
+                        Text {
+                            text: "Se borrarán todos los registros procesados en esta revisión";
+                            font-size: 13px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    // Cancelar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_cancel_del.has-hover ? #f1f5f9 : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: center;
+                            Text {
+                                text: "Cancelar";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_cancel_del := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cancelar_borrar_todas_cedulas(); }
+                        }
+                    }
+
+                    // Sí, Borrar Todo
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_confirm_del.has-hover ? #b91c1c : #dc2626;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "🗑"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                            Text {
+                                text: "Sí, Borrar Todo";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_confirm_del := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.confirmar_borrar_todas_cedulas(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal de Alerta: Archivos no pertenecen a la empresa en revisión
+    if AppData.show_cedulas_client_mismatch_modal : Rectangle {
+        background: #00000088;
+
+        Rectangle {
+            width: 480px;
+            height: 220px;
+            border-radius: 12px;
+            background: #ffffff;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 18px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "⚠️";
+                            font-size: 22px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Empresa no Coincide";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: "No se pudieron procesar los archivos ya que no pertenecen a la empresa a la que se está realizando la revisión.";
+                            font-size: 13px;
+                            font-weight: 500;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+
+                    Rectangle {
+                        height: 38px;
+                        width: 110px;
+                        border-radius: 6px;
+                        background: btn_accept_mismatch.has-hover ? #1e40af : #1e3a8a;
+                        Text {
+                            text: "Aceptar";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_accept_mismatch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_cedulas_client_mismatch_modal(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal de Alerta: Archivos duplicados que ya contienen su información en la BD y RustFS
+    if AppData.show_cedulas_duplicate_modal : Rectangle {
+        background: #00000088;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 580px;
+            height: 320px;
+            border-radius: 12px;
+            background: #ffffff;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fffbeb;
+                        border-width: 1px;
+                        border-color: #fde68a;
+                        Text {
+                            text: "⚠️";
+                            font-size: 22px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Información ya Registrada en Base de Datos";
+                            font-size: 15px;
+                            font-weight: 800;
+                            color: #92400e;
+                        }
+                        Text {
+                            text: "Los siguientes archivos que intentas ingresar ya contienen su información guardada en la base de datos PostgreSQL y en RustFS. Se omitió su duplicación:";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                        Rectangle {
+                            height: 130px;
+                            background: #f8fafc;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+                            clip: true;
+                            VerticalLayout {
+                                padding: 8px;
+                                ScrollView {
+                                    Text {
+                                        text: AppData.cedulas_duplicate_files_msg;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        font-family: "monospace";
+                                        color: #334155;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+
+                    Rectangle {
+                        height: 36px;
+                        width: 120px;
+                        border-radius: 6px;
+                        background: btn_accept_dup.has-hover ? #d97706 : #b45309;
+                        Text {
+                            text: "Entendido";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_accept_dup := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_cedulas_duplicate_modal(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal Informativo: Qué información se actualizó en la base de datos por vista
+    if AppData.show_cedulas_success_modal : Rectangle {
+        background: #00000077;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 620px;
+            border-radius: 14px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                // Cabecera del modal
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #ecfdf5;
+                        border-width: 1px;
+                        border-color: #a7f3d0;
+                        Text {
+                            text: "✓";
+                            font-size: 22px;
+                            font-weight: 800;
+                            color: #059669;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "Cédulas Guardadas y Resumen de Actualizaciones";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: "Los datos de cuotas se subieron a las tablas correspondientes, respetando estrictamente las obras y revisiones creadas por el usuario.";
+                            font-size: 12px;
+                            color: #64748b;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Lista de actualizaciones detalladas por vista
+                Rectangle {
+                    border-radius: 8px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 12px;
+
+                        // 1. Vista Cédulas / Liquidaciones
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Text { text: "📊"; font-size: 14px; vertical-alignment: top; }
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Vista Cédulas y Liquidaciones:"; font-size: 11px; font-weight: 800; color: #1e3a8a; }
+                                Text { text: AppData.cedulas_success_liquidaciones_msg; font-size: 11px; color: #334155; wrap: word-wrap; }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #e2e8f0; }
+
+                        // 2. Vista Registros de Obra
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Text { text: "🏗️"; font-size: 14px; vertical-alignment: top; }
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Vista Registros de Obra:"; font-size: 11px; font-weight: 800; color: #065f46; }
+                                Text { text: AppData.cedulas_success_obras_msg; font-size: 11px; color: #334155; wrap: word-wrap; }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #e2e8f0; }
+
+                        // 3. Vista Revisiones Patronales
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Text { text: "📋"; font-size: 14px; vertical-alignment: top; }
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Vista Revisiones Patronales:"; font-size: 11px; font-weight: 800; color: #1e40af; }
+                                Text { text: AppData.cedulas_success_revision_msg; font-size: 11px; color: #334155; wrap: word-wrap; }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #e2e8f0; }
+
+                        // 4. Vista Empleados
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Text { text: "👥"; font-size: 14px; vertical-alignment: top; }
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Vista Empleados:"; font-size: 11px; font-weight: 800; color: #4338ca; }
+                                Text { text: AppData.cedulas_success_empleados_msg; font-size: 11px; color: #334155; wrap: word-wrap; }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #e2e8f0; }
+
+                        // 5. Vista Clientes y Registros Patronales
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Text { text: "🏢"; font-size: 14px; vertical-alignment: top; }
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Vista Clientes y Registros Patronales:"; font-size: 11px; font-weight: 800; color: #334155; }
+                                Text { text: AppData.cedulas_success_patronal_msg; font-size: 11px; color: #475569; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+
+                // Botón de Cierre
+                HorizontalLayout {
+                    alignment: end;
+
+                    Rectangle {
+                        height: 38px;
+                        width: 120px;
+                        border-radius: 6px;
+                        background: btn_accept_success.has-hover ? #1e40af : #1e3a8a;
+                        Text {
+                            text: "Entendido";
+                            font-size: 13px;
+                            font-weight: 800;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_accept_success := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_cedulas_success_modal(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

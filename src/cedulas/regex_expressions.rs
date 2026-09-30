@@ -76,7 +76,7 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
     let columns_in_file = Regex::new(r"c[li]ave[.]*")?;
 
     let business_registro_patronal = Regex::new(
-        r"(?i)reg(?:istro)?[\.\t ]*patronal[\.\t ]*:?[\.\t ]*(?P<registro_patronal>[a-z0-9][a-z0-9\-_ ]{7,20}[a-z0-9]|[a-z0-9\-]+)",
+        r"(?i)reg(?:istro)?[\.\t ]*patronal[\.\t ]*:?[\.\t ]*(?P<registro_patronal>[a-z0-9][a-z0-9\-_]{7,15}[a-z0-9]|[a-z0-9\-]+)",
     )?;
     let business_rfc = Regex::new(r"(?i)rfc\s*:\s*(?P<rfc>[a-z0-9\-]+)")?;
     let business_area_geografica =

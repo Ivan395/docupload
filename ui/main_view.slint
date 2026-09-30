@@ -1,220 +1,253 @@
 import { ScrollView } from "std-widgets.slint";
 import { NavBar } from "navbar.slint";
+import { Sidebar } from "sidebar.slint";
+import { TopBar } from "topbar.slint";
+import { BottomBar } from "bottom_bar.slint";
+import { ClientesView } from "clientes_view.slint";
+import { RegistrosPatronalesView } from "registros_patronales_view.slint";
+import { RevisionesView } from "revisiones_view.slint";
+import { RegistrosObrasView } from "registros_obras_view.slint";
+import { EmpleadosView } from "empleados_view.slint";
+import { CedulaCuotasView } from "cedula_cuotas_view.slint";
+import { ReporteLiquidacionesView } from "reporte_liquidaciones_view.slint";
 import { UploadCard } from "upload_card.slint";
 import { ActionPanel } from "action_panel.slint";
 import { ResultsPanel } from "results_panel.slint";
-export { AppData, AppLogic, FileItemData, UnprocessedItemData, ProcessingSummary } from "models.slint";
+export { AppData, AppLogic, DateHelper, DateDmy, FileItemData, UnprocessedItemData, ProcessingSummary, ClienteCardData, RegistroPatronalData, EmpleadoData, RevisionData, RegistroObraData, CedulaFileItem, CedulaDetalleRow, CedulaSumatoriaRow, ReporteObraItem, ReporteLiquidacionRow } from "models.slint";
 import { AppData, AppLogic } from "models.slint";
 
 export component MainWindow inherits Window {
-    title: "DocuUpload v0.5.0 - Procesamiento de Nóminas SAT y Cédulas SUA";
+    title: "CONSTRUAUDIT v0.5.0 - IMSS Native & Validación SAT Nóminas CFDI";
     icon: @image-url("assets/app_icon.png");
-    min-width: 1200px;
-    min-height: 850px;
+    min-width: 1240px;
+    min-height: 820px;
     background: #f4f6fa;
     default-font-family: "Segoe UI, sans-serif";
 
-    ScrollView {
-        content-width: max(root.width, 1200px);
-        content-height: main_layout.preferred-height;
+    HorizontalLayout {
+        padding: 0px;
+        spacing: 0px;
 
-        main_layout := VerticalLayout {
-            width: max(root.width, 1200px);
+        // 1. Barra Lateral de Navegación (Sidebar)
+        Sidebar {}
+
+        // 2. Contenedor Principal Derecho (TopBar + Vista Activa + BottomBar)
+        VerticalLayout {
+            horizontal-stretch: 1;
             padding: 0px;
             spacing: 0px;
 
-                // 1. Barra superior de navegación y estado
-                NavBar {}
+            // Barra Superior de Contexto y Breadcrumbs
+            TopBar {}
 
-                // 2. Contenedor principal de la aplicación
+            // Toast flotante para notificaciones
+            if AppData.show_toast : Rectangle {
+                height: 38px;
+                background: #0f172a;
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 8px;
+
+                    Text { text: "✓"; font-size: 13px; color: #10b981; font-weight: 800; vertical-alignment: center; }
+                    Text {
+                        text: AppData.toast_message;
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: #ffffff;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // VISTA 0: Carga y Procesamiento de Nóminas y Cédulas (Auditoría General)
+            if AppData.current_view == 0 : ScrollView {
+                vertical-stretch: 1;
+
                 VerticalLayout {
-                    width: 100%;
-                    padding: 32px;
-                    spacing: 24px;
+                    padding: 28px;
+                    spacing: 20px;
 
-                    // Títulos y subtítulos principales
+                    // Títulos
                     HorizontalLayout {
                         alignment: space-between;
 
                         VerticalLayout {
-                            spacing: 8px;
+                            spacing: 6px;
                             Text {
-                                text: "Carga de Nóminas y Cédulas de Cuotas Determinadas";
-                            font-size: 26px;
-                            font-weight: 800;
-                            color: #0f172a;
-                        }
-                        Text {
-                            text: "Selecciona las nóminas del periodo para validar su UUID ante el SAT (SOAP) y las cédulas SUA para extraer cuotas y amortizaciones.";
-                            font-size: 13px;
-                            color: #475569;
+                                text: "Auditoría General: Carga de Nóminas y Cédulas SUA";
+                                font-size: 24px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+                            Text {
+                                text: "Valida UUIDs vigentes ante el SAT (SOAP), extrae cuotas IMSS e inserta concurrentemente en PostgreSQL.";
+                                font-size: 13px;
+                                color: #475569;
+                            }
                         }
                     }
-                }
 
-                // Banner Informativo de Formatos y Operación
-                Rectangle {
-                    height: 56px;
-                    background: #ebf5ff;
-                    border-radius: 10px;
-                    border-width: 1px;
-                    border-color: #bfdbfe;
+                    // Banner Informativo
+                    Rectangle {
+                        height: 52px;
+                        background: #ebf5ff;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
 
-                    HorizontalLayout {
-                        padding-left: 18px;
-                        padding-right: 18px;
-                        spacing: 12px;
-                        alignment: start;
+                        HorizontalLayout {
+                            padding-left: 18px;
+                            padding-right: 18px;
+                            spacing: 12px;
+                            alignment: start;
 
-                        Rectangle {
-                            width: 28px;
-                            height: 28px;
-                            border-radius: 14px;
-                            background: #dbeafe;
-                            y: (parent.height - self.height) / 2;
+                            Rectangle {
+                                width: 26px;
+                                height: 26px;
+                                border-radius: 13px;
+                                background: #dbeafe;
+                                y: (parent.height - self.height) / 2;
+
+                                Text {
+                                    text: "ℹ";
+                                    font-size: 13px;
+                                    font-weight: 800;
+                                    color: #1d4ed8;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
 
                             Text {
-                                text: "ℹ";
-                                font-size: 14px;
-                                font-weight: 800;
-                                color: #1d4ed8;
-                                horizontal-alignment: center;
+                                text: "Puedes ingresar Nóminas (.XML, .ZIP, .RAR) y/o Cédulas SUA (.PDF, .ZIP, .RAR). Se vincularán automáticamente a los Clientes.";
+                                font-size: 13px;
+                                font-weight: 600;
+                                color: #1e3a8a;
                                 vertical-alignment: center;
                             }
                         }
-
-                        Text {
-                            text: "Puedes ingresar una o ambas opciones: Nóminas (.XML, .ZIP, .RAR) y/o Cédulas SUA (.PDF, .ZIP, .RAR). Se generará 1 o 2 Excels automáticamente.";
-                            font-size: 13px;
-                            font-weight: 600;
-                            color: #1e3a8a;
-                            vertical-alignment: center;
-                        }
                     }
-                }
 
-                // Toast flotante para notificaciones (ej. Copiado al portapapeles)
-                if AppData.show_toast : Rectangle {
-                    height: 40px;
-                    background: #0f172a;
-                    border-radius: 8px;
-
+                    // Tarjetas de Carga
                     HorizontalLayout {
-                        padding-left: 16px;
-                        padding-right: 16px;
-                        alignment: center;
-                        spacing: 8px;
+                        width: 100%;
+                        spacing: 20px;
 
-                        Text { text: "✓"; font-size: 13px; color: #10b981; font-weight: 800; vertical-alignment: center; }
-                        Text {
-                            text: AppData.toast_message;
-                            font-size: 12px;
-                            font-weight: 600;
-                            color: #ffffff;
-                            vertical-alignment: center;
+                        // Nóminas
+                        UploadCard {
+                            horizontal-stretch: 1;
+                            step-number: "1";
+                            step-color-bg: #e0e7ff;
+                            step-color-fg: #1d4ed8;
+                            title: "Nóminas de Sueldos y Salarios";
+                            subtitle: "Archivos XML timbrados. Validados ante el WS SOAP del SAT.";
+                            drop-icon: "☁";
+                            drop-icon-bg: #e0e7ff;
+                            drop-icon-fg: #2563eb;
+                            drop-action-text: "haz clic para explorar";
+                            drop-info-text: "Valida UUID vigente en el SAT y filtra cancelados";
+                            primary-format: ".XML";
+                            total-badge: AppData.nominas_total_size;
+                            count-label: AppData.nominas_files.length + " archivos cargados";
+                            files: AppData.nominas_files;
+
+                            is-processing: AppData.nominas_is_processing;
+                            progress-fraction: AppData.nominas_progress_fraction;
+                            progress-text: AppData.nominas_progress_text;
+                            ready-to-download: AppData.nominas_ready_to_download;
+                            download-button-text: "Descargar Excel Nóminas";
+                            process-button-text: "Procesar Nóminas";
+
+                            add-files => { AppLogic.select_nominas_files(); }
+                            add-folder => { AppLogic.select_nominas_folder(); }
+                            clear-files => { AppLogic.clear_nominas(); }
+                            remove-file(id) => { AppLogic.remove_nomina_file(id); }
+                            download => { AppLogic.download_nominas_excel(); }
+                            process => { AppLogic.process_nominas(); }
+                            open-folder => { AppLogic.open_nominas_folder(); }
+                        }
+
+                        // Cédulas
+                        UploadCard {
+                            horizontal-stretch: 1;
+                            step-number: "2";
+                            step-color-bg: #ccfbf1;
+                            step-color-fg: #0f766e;
+                            title: "Cédulas de Determinación de Cuotas";
+                            subtitle: "Cédulas generadas por el SUA en formato PDF (mensuales/bimestrales).";
+                            drop-icon: "📥";
+                            drop-icon-bg: #ccfbf1;
+                            drop-icon-fg: #0f766e;
+                            drop-action-text: "haz clic para examinar";
+                            drop-info-text: "Extracción automática mediante motor de layout SUA";
+                            primary-format: ".PDF";
+                            total-badge: AppData.cedulas_total_size;
+                            count-label: AppData.cedulas_files.length + " archivos cargados";
+                            files: AppData.cedulas_files;
+
+                            is-processing: AppData.cedulas_is_processing;
+                            progress-fraction: AppData.cedulas_progress_fraction;
+                            progress-text: AppData.cedulas_progress_text;
+                            ready-to-download: AppData.cedulas_ready_to_download;
+                            download-button-text: "Descargar Excel Cédulas";
+                            process-button-text: "Procesar Cédulas";
+
+                            add-files => { AppLogic.select_cedulas_files(); }
+                            add-folder => { AppLogic.select_cedulas_folder(); }
+                            clear-files => { AppLogic.clear_cedulas(); }
+                            remove-file(id) => { AppLogic.remove_cedula_file(id); }
+                            download => { AppLogic.download_cedulas_excel(); }
+                            process => { AppLogic.process_cedulas(); }
+                            open-folder => { AppLogic.open_cedulas_folder(); }
                         }
                     }
-                }
 
-                // 3. Grid de Carga (Tarjetas modulares para Nóminas y Cédulas)
-                HorizontalLayout {
-                    width: 100%;
-                    spacing: 24px;
+                    // Panel de Acción
+                    ActionPanel {}
 
-                    // Columna 1: Nóminas
-                    UploadCard {
-                        width: (parent.width - 24px) / 2;
-                        step-number: "1";
-                        step-color-bg: #e0e7ff;
-                        step-color-fg: #1d4ed8;
-                        title: "Nóminas de Sueldos y Salarios";
-                        subtitle: "Archivos XML de nómina timbrados (o comprimidos en ZIP / RAR). Validados con el WS del SAT.";
-                        drop-icon: "☁";
-                        drop-icon-bg: #e0e7ff;
-                        drop-icon-fg: #2563eb;
-                        drop-action-text: "haz clic para explorar";
-                        drop-info-text: "Valida UUID vigente en el SAT y filtra cancelados";
-                        primary-format: ".XML";
-                        total-badge: AppData.nominas_total_size;
-                        count-label: AppData.nominas_files.length + " archivos cargados";
-                        files: AppData.nominas_files;
-
-                        is-processing: AppData.nominas_is_processing;
-                        progress-fraction: AppData.nominas_progress_fraction;
-                        progress-text: AppData.nominas_progress_text;
-                        ready-to-download: AppData.nominas_ready_to_download;
-                        download-button-text: "Descargar Excel Nóminas";
-                        process-button-text: "Procesar Nóminas";
-
-                        add-files => { AppLogic.select_nominas_files(); }
-                        add-folder => { AppLogic.select_nominas_folder(); }
-                        clear-files => { AppLogic.clear_nominas(); }
-                        remove-file(id) => { AppLogic.remove_nomina_file(id); }
-                        download => { AppLogic.download_nominas_excel(); }
-                        process => { AppLogic.process_nominas(); }
-                        open-folder => { AppLogic.open_nominas_folder(); }
-                    }
-
-                    // Columna 2: Cédulas
-                    UploadCard {
-                        width: (parent.width - 24px) / 2;
-                        step-number: "2";
-                        step-color-bg: #ccfbf1;
-                        step-color-fg: #0f766e;
-                        title: "Cédulas de Determinación de Cuotas";
-                        subtitle: "Cédulas de liquidación generadas por el SUA en formato PDF (mensuales o bimestrales).";
-                        drop-icon: "📥";
-                        drop-icon-bg: #ccfbf1;
-                        drop-icon-fg: #0f766e;
-                        drop-action-text: "haz clic para examinar";
-                        drop-info-text: "Extracción automática mediante motor de layout SUA";
-                        primary-format: ".PDF";
-                        total-badge: AppData.cedulas_total_size;
-                        count-label: AppData.cedulas_files.length + " archivos cargados";
-                        files: AppData.cedulas_files;
-
-                        is-processing: AppData.cedulas_is_processing;
-                        progress-fraction: AppData.cedulas_progress_fraction;
-                        progress-text: AppData.cedulas_progress_text;
-                        ready-to-download: AppData.cedulas_ready_to_download;
-                        download-button-text: "Descargar Excel Cédulas";
-                        process-button-text: "Procesar Cédulas";
-
-                        add-files => { AppLogic.select_cedulas_files(); }
-                        add-folder => { AppLogic.select_cedulas_folder(); }
-                        clear-files => { AppLogic.clear_cedulas(); }
-                        remove-file(id) => { AppLogic.remove_cedula_file(id); }
-                        download => { AppLogic.download_cedulas_excel(); }
-                        process => { AppLogic.process_cedulas(); }
-                        open-folder => { AppLogic.open_cedulas_folder(); }
-                    }
-                }
-
-                // 4. Panel de acción inferior (Procesar / Progreso)
-                ActionPanel {}
-
-                // 5. Panel de Resultados y Resumen (Visible tras procesar)
-                if AppData.has_results : ResultsPanel {}
-
-                // 6. Pie de página regulatorio
-                HorizontalLayout {
-                    alignment: space-between;
-                    padding-top: 10px;
-                    padding-bottom: 24px;
-
-                    Text {
-                        text: "DocuUpload Enterprise • Entorno Fiscal Regulado • Validación Anexo 20 SAT";
-                        font-size: 11px;
-                        color: #64748b;
-                    }
-
-                    Text {
-                        text: "Firma Fiscal ACD • Versión 0.5";
-                        font-size: 11px;
-                        color: #64748b;
-                    }
+                    // Panel de Resultados
+                    if AppData.has_results : ResultsPanel {}
                 }
             }
+
+            // VISTA 1: Catálogo Maestro de Clientes (F2)
+            if AppData.current_view == 1 : ClientesView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 2: Registros Patronales IMSS (F3)
+            if AppData.current_view == 2 : RegistrosPatronalesView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 3: Revisiones Patronales IMSS (F4)
+            if AppData.current_view == 3 : RevisionesView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 4: Registros de Obras (F5)
+            if AppData.current_view == 4 : RegistrosObrasView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 5: Padrón de Empleados (F6)
+            if AppData.current_view == 5 : EmpleadosView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 6: Cédula de Determinación de Cuotas SUA (F7)
+            if AppData.current_view == 6 : CedulaCuotasView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 7: Reporte de Liquidaciones y Prorrateo por Obra (F8)
+            if AppData.current_view == 7 : ReporteLiquidacionesView {
+                vertical-stretch: 1;
+            }
+
+            // 3. Barra Inferior de Estado Global (BottomBar)
+            BottomBar {}
         }
     }
 }

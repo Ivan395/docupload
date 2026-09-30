@@ -29,6 +29,12 @@ tempfile = "3"
 anyhow = "1.0"
 arboard = "3"
 mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-uuid-1"] }
+uuid = { version = "1.10", features = ["v4", "v7"] }
+r2d2 = "0.8.10"
+r2d2_postgres = "0.18.2"
+sha2 = "0.10"
+rust-s3 = { version = "0.37.2", default-features = false, features = ["sync-rustls-tls"] }
 
 [build-dependencies]
 slint-build = "1.18.1"

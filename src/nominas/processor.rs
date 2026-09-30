@@ -31,6 +31,7 @@ pub struct NominasStats {
     pub parse_error_count: usize,
     pub other_invalid_count: usize,
     pub total_sueldos_validos: f64,
+    pub total_septimo_dia_validos: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +321,8 @@ pub fn process_nominas(
     // Sort valid employees using dedicated CPU pool
     cpu_pool.install(|| {
         valid_employees.par_sort_unstable_by(|a, b| {
+            let (year_a, month_a) = a.get_year_month();
+            let (year_b, month_b) = b.get_year_month();
             let date_a = a
                 .nomina
                 .fechafinalpago
@@ -328,19 +331,22 @@ pub fn process_nominas(
                 .nomina
                 .fechafinalpago
                 .unwrap_or_else(|| NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
-            date_a.cmp(&date_b).then(a.nombre.cmp(&b.nombre))
+            year_a
+                .cmp(&year_b)
+                .then(month_a.cmp(&month_b))
+                .then(date_a.cmp(&date_b))
+                .then(a.nombre.cmp(&b.nombre))
         });
     });
 
     let total_sueldos: f64 = valid_employees
         .iter()
-        .map(|e| {
-            e.nomina
-                .percepciones
-                .iter()
-                .find(|p| p.concepto.contains("SUELDO"))
-                .map_or(0.0, |p| p.importe)
-        })
+        .map(|e| e.get_sueldo_total_con_septimo())
+        .sum();
+
+    let total_septimo: f64 = valid_employees
+        .iter()
+        .map(|e| e.get_septimo_dia_importe())
         .sum();
 
     let stats = NominasStats {
@@ -352,6 +358,7 @@ pub fn process_nominas(
         parse_error_count,
         other_invalid_count: other_inv,
         total_sueldos_validos: total_sueldos,
+        total_septimo_dia_validos: total_septimo,
     };
 
     let mut generated_excel_path = None;
@@ -367,6 +374,68 @@ pub fn process_nominas(
         generate_excel(&valid_employees, &invalid_items, &stats, output_excel_path)
             .map_err(|e| format!("Error generando Excel de Nóminas: {}", e))?;
         generated_excel_path = Some(output_excel_path.to_path_buf());
+    }
+
+    // Guardar en la base de datos PostgreSQL si hay empleados válidos
+    if !valid_employees.is_empty() {
+        let total_val = valid_employees.len();
+        progress_callback(
+            0,
+            total_val,
+            "Conectando a PostgreSQL y preparando guardado concurrente de nóminas...",
+        );
+
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let pool_size = (num_cpus * 2).clamp(4, 32) as u32;
+
+        match crate::db::create_pool(pool_size) {
+            Ok(pool) => {
+                match pool.get() {
+                    Ok(mut init_client) => {
+                        if let Err(e) = crate::db::ensure_schema(&mut init_client) {
+                            log::error!("Error al verificar esquema en PostgreSQL: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("No se pudo obtener cliente inicial del pool: {}", e);
+                    }
+                }
+
+                let cb = |done: usize, total: usize| {
+                    progress_callback(
+                        done,
+                        total,
+                        &format!("Guardando nóminas en PostgreSQL de forma concurrente ({}/{})...", done, total),
+                    );
+                };
+
+                match crate::db::save_nominas_concurrent(&pool, &valid_employees, Some(&cb)) {
+                    Ok(db_stats) => {
+                        log::info!(
+                            "Nóminas guardadas en PostgreSQL concurrentemente: {} nóminas, {} cfdis, {} contratos, {} detalles, {} empleados",
+                            db_stats.nominas_guardadas,
+                            db_stats.cfdis_guardados,
+                            db_stats.contratos_guardados,
+                            db_stats.detalles_guardados,
+                            db_stats.empleados_guardados
+                        );
+                        if !db_stats.errores.is_empty() {
+                            for err in db_stats.errores {
+                                log::warn!("Advertencia al guardar nóminas concurrentemente en BD: {}", err);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error al guardar nóminas concurrentes en PostgreSQL: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("No se pudo inicializar pool de PostgreSQL para guardar nóminas: {}", e);
+            }
+        }
     }
 
     Ok(NominasProcessResult {

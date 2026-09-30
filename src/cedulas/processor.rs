@@ -42,7 +42,7 @@ pub struct CedulasProcessResult {
     pub excel_path: Option<PathBuf>,
 }
 
-fn get_employee_data(data: &str, patterns: &OCRPatterns) -> Vec<Employee> {
+pub fn get_employee_data(data: &str, patterns: &OCRPatterns) -> Vec<Employee> {
     let mut employees = Vec::new();
     let mut columns = Columns::new();
     columns.get_column_names(data, &patterns.column_names, &patterns.columns_in_file);
@@ -445,12 +445,76 @@ pub fn process_cedulas(
             total_cuotas,
         };
 
+        let system_lang = crate::cedulas::excel::detect_system_language();
         let mut excel = Excel::new(&output_excel_path.to_string_lossy());
         excel
-            .create_excel_full(&sheets, &invalid_items, &stats, "spanish")
+            .create_excel_full(&sheets, &invalid_items, &stats, system_lang)
             .map_err(|e| format!("Error creando archivo Excel de Cédulas: {}", e))?;
 
         generated_excel_path = Some(output_excel_path.to_path_buf());
+
+        // Guardar en la base de datos PostgreSQL de manera concurrente
+        if !sheets.is_empty() {
+            let total_workers = valid_workers;
+            progress_callback(
+                0,
+                total_workers,
+                "Conectando a PostgreSQL y preparando guardado concurrente de cédulas...",
+            );
+
+            let num_cpus = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            let pool_size = (num_cpus * 2).clamp(4, 32) as u32;
+
+            match crate::db::create_pool(pool_size) {
+                Ok(pool) => {
+                    match pool.get() {
+                        Ok(mut init_client) => {
+                            if let Err(e) = crate::db::ensure_schema(&mut init_client) {
+                                log::error!("Error al verificar esquema en PostgreSQL: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("No se pudo obtener cliente inicial del pool para cédulas: {}", e);
+                        }
+                    }
+
+                    let cb = |done: usize, total: usize| {
+                        progress_callback(
+                            done,
+                            total,
+                            &format!("Guardando cédulas en PostgreSQL de forma concurrente ({}/{})...", done, total),
+                        );
+                    };
+
+                    let biz_list: Vec<Business> = sheets.iter().map(|(_, b)| b.clone()).collect();
+                    match crate::db::save_cedulas_concurrent(&pool, &biz_list, Some(&cb)) {
+                        Ok(db_stats) => {
+                            log::info!(
+                                "Cédulas guardadas en PostgreSQL concurrentemente: {} liquidaciones, {} detalles, {} vinculaciones obras, {} empleados, {} registros obras",
+                                db_stats.liquidaciones_guardadas,
+                                db_stats.detalles_guardados,
+                                db_stats.vinculaciones_guardadas,
+                                db_stats.empleados_guardados,
+                                db_stats.registros_obras_guardados
+                            );
+                            if !db_stats.errores.is_empty() {
+                                for err in db_stats.errores {
+                                    log::warn!("Advertencia al guardar cédula concurrentemente en BD: {}", err);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Error al guardar cédulas concurrentes en PostgreSQL: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("No se pudo inicializar pool de PostgreSQL para guardar cédulas: {}", e);
+                }
+            }
+        }
     }
 
     Ok(CedulasProcessResult {

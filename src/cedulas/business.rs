@@ -25,7 +25,13 @@ fn merge_field(
 }
 
 pub fn month_to_num(month: &str) -> u32 {
-    match month.to_lowercase().trim() {
+    let trimmed = month.trim();
+    if let Ok(n) = trimmed.parse::<u32>() {
+        if (1..=12).contains(&n) {
+            return n;
+        }
+    }
+    match trimmed.to_lowercase().as_str() {
         "enero" | "january" | "jan" => 1,
         "febrero" | "february" | "feb" => 2,
         "marzo" | "march" | "mar" => 3,
@@ -39,6 +45,24 @@ pub fn month_to_num(month: &str) -> u32 {
         "noviembre" | "november" | "nov" => 11,
         "diciembre" | "december" | "dic" => 12,
         _ => 0,
+    }
+}
+
+pub fn month_num_to_name(month: u32) -> &'static str {
+    match month {
+        1 => "ENERO",
+        2 => "FEBRERO",
+        3 => "MARZO",
+        4 => "ABRIL",
+        5 => "MAYO",
+        6 => "JUNIO",
+        7 => "JULIO",
+        8 => "AGOSTO",
+        9 => "SEPTIEMBRE",
+        10 => "OCTUBRE",
+        11 => "NOVIEMBRE",
+        12 => "DICIEMBRE",
+        _ => "SIN_MES",
     }
 }
 
@@ -105,7 +129,14 @@ impl Business {
         if self.registro_patronal.is_none() {
             if let Ok(Some(caps)) = patterns.business_registro_patronal.captures(page) {
                 if let Some(m) = caps.name("registro_patronal") {
-                    self.registro_patronal = Some(m.as_str().trim().to_uppercase());
+                    let mut s = m.as_str().trim().to_uppercase();
+                    if let Some(idx) = s.find(" RFC") {
+                        s = s[..idx].trim().to_string();
+                    }
+                    if s.ends_with("RFC") {
+                        s = s.trim_end_matches("RFC").trim().to_string();
+                    }
+                    self.registro_patronal = Some(s);
                 }
             }
         }
@@ -126,7 +157,17 @@ impl Business {
         if self.razon_social.is_none() {
             if let Ok(Some(caps)) = patterns.business_razon_social.captures(page) {
                 if let Some(m) = caps.name("razon_social") {
-                    self.razon_social = Some(m.as_str().trim().to_uppercase());
+                    let mut rz = m.as_str().trim().to_uppercase();
+                    if let Some(idx) = rz.find(" DELEGACIÓN") {
+                        rz = rz[..idx].trim().to_string();
+                    }
+                    if let Some(idx) = rz.find(" DELEGACION") {
+                        rz = rz[..idx].trim().to_string();
+                    }
+                    if let Some(idx) = rz.find(" RFC") {
+                        rz = rz[..idx].trim().to_string();
+                    }
+                    self.razon_social = Some(rz);
                 }
             }
         }

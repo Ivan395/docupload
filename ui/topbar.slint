@@ -1,0 +1,193 @@
+import { AppData, AppLogic } from "models.slint";
+
+export component TopBar inherits Rectangle {
+    height: 60px;
+    background: #ffffff;
+    border-width: 1px;
+    border-color: #e2e8f0;
+
+    HorizontalLayout {
+        padding-left: 24px;
+        padding-right: 24px;
+        alignment: space-between;
+
+        // Izquierda: Breadcrumbs y Contexto
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: center;
+
+            if AppData.current_view != 0 && AppData.current_view != 1 : Rectangle {
+                height: 34px;
+                border-radius: 6px;
+                background: back_touch.has-hover ? #eff6ff : #f8fafc;
+                border-width: 1px;
+                border-color: #dbeafe;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    alignment: center;
+
+                    Text { text: "←"; font-size: 14px; font-weight: 800; color: #1d4ed8; }
+                    Text {
+                        text: "Volver a Clientes (F2)";
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: #1d4ed8;
+                        vertical-alignment: center;
+                    }
+                }
+
+                back_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { AppLogic.navigate_view(1); }
+                }
+            }
+
+            if AppData.current_view == 1 : HorizontalLayout {
+                spacing: 8px;
+                alignment: center;
+                Text {
+                    text: "CORRECCIONES PATRONALES  ›  CATÁLOGO MAESTRO DE CLIENTES";
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #475569;
+                    letter-spacing: 0.5px;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    height: 20px;
+                    border-radius: 4px;
+                    background: #f1f5f9;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        Text {
+                            text: "F2";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #64748b;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            if AppData.current_view >= 2 : HorizontalLayout {
+                spacing: 10px;
+                alignment: center;
+
+                Rectangle {
+                    width: 2px;
+                    height: 20px;
+                    background: #cbd5e1;
+                    y: (parent.height - self.height) / 2;
+                }
+
+                Text {
+                    text: AppData.selected_cliente_nombre != "" ? AppData.selected_cliente_nombre : "Cliente Seleccionado";
+                    font-size: 15px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    vertical-alignment: center;
+                }
+
+                if AppData.selected_cliente_rfc != "" : Rectangle {
+                    height: 24px;
+                    border-radius: 4px;
+                    background: #eff6ff;
+                    border-width: 1px;
+                    border-color: #bfdbfe;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        Text {
+                            text: "RFC: " + AppData.selected_cliente_rfc;
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #1d4ed8;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Derecha: Quick Info, DB Status, Usuario
+        HorizontalLayout {
+            spacing: 16px;
+            alignment: center;
+
+            // DB Sincronizada badge
+            Rectangle {
+                height: 30px;
+                border-radius: 15px;
+                background: #ecfdf5;
+                border-width: 1px;
+                border-color: #a7f3d0;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    alignment: center;
+
+                    Rectangle {
+                        width: 7px;
+                        height: 7px;
+                        border-radius: 3.5px;
+                        background: #059669;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: "DB Sincronizada";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #065f46;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Auditor Profile
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: center;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 1px;
+                    Text {
+                        text: "Firma Fiscal ACD";
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: #1e293b;
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        text: "Auditor Sr. IMSS";
+                        font-size: 11px;
+                        color: #64748b;
+                        horizontal-alignment: right;
+                    }
+                }
+
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: 16px;
+                    background: #1e3a8a;
+
+                    Text {
+                        text: "👤";
+                        font-size: 14px;
+                        color: #ffffff;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
