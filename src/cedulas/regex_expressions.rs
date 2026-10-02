@@ -106,7 +106,7 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
     )?;
 
     let employee_no_seguro_social_nombre_curp_rfc = Regex::new(
-        r"(?m)(?P<no_seguro_social>\d{2}[-\.]?\d{2}[-\.]?\d{2}[-\.]?\d{4}[-\.]?\d)[\t ]+(?P<nombre>.+?)(?:[\t ]+(?P<curp>\w{17,18})|[\t ]+(?P<rfc>\w{3,4}-?\w{6}-?\w{0,3}))?(?:[\t ]+(?P<clave_ubicacion>[\w\(\)]+))?[\t ]*$",
+        r"(?i)(?m)(?P<no_seguro_social>\d{2}[-\.]?\d{2}[-\.]?\d{2}[-\.]?\d{4}[-\.]?\d)[\t ]+(?P<nombre>.+?)(?:(?:[\t ]+(?P<curp>\b[a-z]{4}\d{6}[a-z0-9]{7,8}\b))|(?:[\t ]+(?P<rfc>\b[a-zñ&]{3,4}-?\d{6}(?:-?[a-z0-9]{3})?\b)))?(?:(?:[\t ]+(?P<curp_alt>\b[a-z]{4}\d{6}[a-z0-9]{7,8}\b))|(?:[\t ]+(?P<rfc_alt>\b[a-zñ&]{3,4}-?\d{6}(?:-?[a-z0-9]{3})?\b)))?(?:[\t ]+(?P<clave_ubicacion>[a-z0-9\(\)\-]*\d[a-z0-9\(\)\-]*))?[\t ]*$",
     )?;
 
     let employee_data = Regex::new(

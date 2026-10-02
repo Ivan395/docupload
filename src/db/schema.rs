@@ -30,6 +30,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             fecha date NOT NULL,
             dia char(10),
             motivo varchar(100),
+            es_sistema boolean DEFAULT false,
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -160,6 +161,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             monto double precision,
             delegacion varchar(100),
             subdelegacion varchar(100),
+            creado_usuario boolean DEFAULT false,
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT uq_registros_obras_id_revision_numero UNIQUE (id_revision, numero)
         );
@@ -420,6 +422,8 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS clave_ubicacion varchar(50);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS esta_activo boolean DEFAULT true;
+        ALTER TABLE public.registros_obras ADD COLUMN IF NOT EXISTS creado_usuario boolean;
+        ALTER TABLE IF EXISTS revision_history.registros_obras ADD COLUMN IF NOT EXISTS creado_usuario boolean;
         ALTER TABLE public.reportes_vinculaciones_obras_liquidaciones ALTER COLUMN id_registro_obra DROP NOT NULL;
         ALTER TABLE IF EXISTS revision_history.reportes_vinculaciones_obras_liquidaciones ALTER COLUMN id_registro_obra DROP NOT NULL;
         ALTER TABLE public.liquidaciones DROP COLUMN IF EXISTS dias;
@@ -427,6 +431,67 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         ALTER TABLE IF EXISTS revision_history.liquidaciones DROP COLUMN IF EXISTS dias;
         ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones DROP COLUMN IF EXISTS dias;
         DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_registro_obra IS NULL;
+
+        -- Ensure imss_inhabiles es_sistema column and unique constraint
+        ALTER TABLE public.imss_inhabiles ADD COLUMN IF NOT EXISTS es_sistema boolean DEFAULT false;
+        ALTER TABLE IF EXISTS revision_history.imss_inhabiles ADD COLUMN IF NOT EXISTS es_sistema boolean DEFAULT false;
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'uq_imss_inhabiles_fecha'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'imss_inhabiles_fecha_key'
+            ) THEN
+                DELETE FROM public.imss_inhabiles a USING public.imss_inhabiles b
+                WHERE a.id > b.id AND a.fecha = b.fecha;
+
+                ALTER TABLE public.imss_inhabiles ADD CONSTRAINT uq_imss_inhabiles_fecha UNIQUE (fecha);
+            END IF;
+        END $$;
+
+        -- Seed standard official IMSS holidays
+        INSERT INTO public.imss_inhabiles (fecha, dia, motivo, es_sistema) VALUES
+            ('2024-01-01', 'LUNES', 'Año Nuevo', true),
+            ('2024-02-05', 'LUNES', 'Aniversario de la Constitución', true),
+            ('2024-03-18', 'LUNES', 'Natalicio de Benito Juárez', true),
+            ('2024-03-28', 'JUEVES', 'Jueves Santo (Inhábil IMSS)', true),
+            ('2024-03-29', 'VIERNES', 'Viernes Santo (Inhábil IMSS)', true),
+            ('2024-05-01', 'MIÉRCOLES', 'Día del Trabajo', true),
+            ('2024-09-16', 'LUNES', 'Día de la Independencia', true),
+            ('2024-10-01', 'MARTES', 'Transmisión del Poder Ejecutivo Federal', true),
+            ('2024-11-18', 'LUNES', 'Revolución Mexicana', true),
+            ('2024-12-25', 'MIÉRCOLES', 'Navidad', true),
+
+            ('2025-01-01', 'MIÉRCOLES', 'Año Nuevo', true),
+            ('2025-02-03', 'LUNES', 'Aniversario de la Constitución', true),
+            ('2025-03-17', 'LUNES', 'Natalicio de Benito Juárez', true),
+            ('2025-04-17', 'JUEVES', 'Jueves Santo (Inhábil IMSS)', true),
+            ('2025-04-18', 'VIERNES', 'Viernes Santo (Inhábil IMSS)', true),
+            ('2025-05-01', 'JUEVES', 'Día del Trabajo', true),
+            ('2025-09-16', 'MARTES', 'Día de la Independencia', true),
+            ('2025-11-17', 'LUNES', 'Revolución Mexicana', true),
+            ('2025-12-25', 'JUEVES', 'Navidad', true),
+
+            ('2026-01-01', 'JUEVES', 'Año Nuevo', true),
+            ('2026-02-02', 'LUNES', 'Aniversario de la Constitución', true),
+            ('2026-03-16', 'LUNES', 'Natalicio de Benito Juárez', true),
+            ('2026-04-02', 'JUEVES', 'Jueves Santo (Inhábil IMSS)', true),
+            ('2026-04-03', 'VIERNES', 'Viernes Santo (Inhábil IMSS)', true),
+            ('2026-05-01', 'VIERNES', 'Día del Trabajo', true),
+            ('2026-09-16', 'MIÉRCOLES', 'Día de la Independencia', true),
+            ('2026-11-16', 'LUNES', 'Revolución Mexicana', true),
+            ('2026-12-25', 'VIERNES', 'Navidad', true),
+
+            ('2027-01-01', 'VIERNES', 'Año Nuevo', true),
+            ('2027-02-01', 'LUNES', 'Aniversario de la Constitución', true),
+            ('2027-03-15', 'LUNES', 'Natalicio de Benito Juárez', true),
+            ('2027-03-25', 'JUEVES', 'Jueves Santo (Inhábil IMSS)', true),
+            ('2027-03-26', 'VIERNES', 'Viernes Santo (Inhábil IMSS)', true),
+            ('2027-05-01', 'SÁBADO', 'Día del Trabajo', true),
+            ('2027-09-16', 'JUEVES', 'Día de la Independencia', true),
+            ('2027-11-15', 'LUNES', 'Revolución Mexicana', true),
+            ('2027-12-25', 'SÁBADO', 'Navidad', true)
+        ON CONFLICT (fecha) DO UPDATE SET es_sistema = true;
 
         -- Add columns to revision_history if exists
         DO $$
@@ -438,6 +503,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'revision_history' AND table_name = 'empleados') THEN
                 ALTER TABLE revision_history.empleados ADD COLUMN IF NOT EXISTS clave_ubicacion varchar(50);
                 ALTER TABLE revision_history.empleados ADD COLUMN IF NOT EXISTS esta_activo boolean DEFAULT true;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'revision_history' AND table_name = 'registros_obras') THEN
+                ALTER TABLE revision_history.registros_obras ADD COLUMN IF NOT EXISTS creado_usuario boolean;
             END IF;
         END $$;
 
@@ -554,6 +622,151 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_revision ON public.reportes_liquidaciones(id_revision);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_rep ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion);
         CREATE INDEX IF NOT EXISTS idx_reportes_vinc_obras_id_rep ON public.reportes_vinculaciones_obras_liquidaciones(id_reporte_liquidacion);
+
+        -- Migración: columna creado_usuario en public.registros_obras
+        ALTER TABLE public.registros_obras ADD COLUMN IF NOT EXISTS creado_usuario boolean;
+        ALTER TABLE IF EXISTS revision_history.registros_obras ADD COLUMN IF NOT EXISTS creado_usuario boolean;
+        UPDATE public.registros_obras SET creado_usuario = true WHERE creado_usuario IS NULL;
+        ALTER TABLE public.registros_obras ALTER COLUMN creado_usuario SET DEFAULT false;
+
+        -- Limpiar registros de obra inválidos (RFC/CURP guardados por error o no conformes a SIROC/SATIC).
+        -- `numero` es char(15): PostgreSQL lo rellena con espacios, y un patrón anclado con `$` NUNCA
+        -- coincide contra el valor con relleno. Por eso hay que comparar siempre sobre TRIM(numero):
+        -- sin TRIM esta sentencia borraba TODAS las obras válidas en cada arranque y arrastraba
+        -- en cascada sus vinculaciones.
+        DELETE FROM public.registros_obras
+        WHERE TRIM(numero) ~* '^[A-Z]{3,4}[0-9]{6}'
+           OR (TRIM(numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(numero) !~* '^[0-9]{8,10}$');
+
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'revision_history' AND table_name = 'registros_obras') THEN
+                DELETE FROM revision_history.registros_obras
+                WHERE TRIM(numero) ~* '^[A-Z]{3,4}[0-9]{6}'
+                   OR (TRIM(numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(numero) !~* '^[0-9]{8,10}$');
+            END IF;
+        END $$;
+
+        -- Corregir empleados donde la CURP o RFC se guardó erróneamente en clave_ubicacion
+        UPDATE public.empleados
+        SET curp = TRIM(clave_ubicacion), clave_ubicacion = NULL
+        WHERE (curp IS NULL OR TRIM(curp) = '')
+          AND TRIM(clave_ubicacion) ~* '^[A-Z]{4}[0-9]{6}[A-Z0-9]{7,8}$';
+
+        UPDATE public.empleados
+        SET rfc = TRIM(clave_ubicacion), clave_ubicacion = NULL
+        WHERE (rfc IS NULL OR TRIM(rfc) = '')
+          AND TRIM(clave_ubicacion) ~* '^[A-Z&Ñ]{3,4}-?[0-9]{6}(-[A-Z0-9]{3})?$';
+
+        UPDATE public.empleados
+        SET clave_ubicacion = NULL
+        WHERE TRIM(clave_ubicacion) ~* '^[A-Z]{4}[0-9]{6}[A-Z0-9]{7,8}$'
+           OR TRIM(clave_ubicacion) ~* '^[A-Z&Ñ]{3,4}-?[0-9]{6}(-[A-Z0-9]{3})?$';
+
+        -- Descartar RFC que en realidad son palabras del nombre del trabajador.
+        -- El parser antiguo tenía un grupo opcional demasiado permisivo que capturaba
+        -- tokens alfabéticos finales (p. ej. "JIMENEZ DE LA FUENTE MARIA ALEJANDRA" ->
+        -- rfc = 'ALEJANDRA'), porque las alternativas RFC/CURP/clave_ubicacion eran
+        -- todas opcionales. Un RFC de persona física siempre contiene dígitos y
+        -- mide 12 o 13 caracteres una vez normalizado.
+        -- `rfc` es char(13): hay que comparar sobre TRIM(rfc) por el relleno.
+        UPDATE public.empleados
+        SET rfc = NULL
+        WHERE rfc IS NOT NULL
+          AND TRIM(rfc) <> ''
+          AND (TRIM(rfc) !~ '[0-9]' OR LENGTH(TRIM(rfc)) NOT IN (12, 13));
+
+        UPDATE public.empleados
+        SET curp = NULL
+        WHERE curp IS NOT NULL
+          AND TRIM(curp) <> ''
+          AND LENGTH(TRIM(curp)) <> 18;
+
+        -- Backfill: insertar registros de obra desde clave_ubicacion de empleados si no existen
+        INSERT INTO public.registros_obras (
+            id, id_revision, id_registro_patronal, numero, tipo_obra, fecha_inicio, fecha_fin, creado_usuario
+        )
+        SELECT 
+            uuidv7(),
+            l.id_revision,
+            r.id_registro_patronal,
+            LEFT(TRIM(e.clave_ubicacion), 15),
+            'REGISTRO DE OBRA CÉDULA',
+            COALESCE(
+                TO_DATE(l.anio_periodo::text || '-' || 
+                    CASE UPPER(TRIM(l.mes_periodo))
+                        WHEN 'ENERO' THEN '01'
+                        WHEN 'FEBRERO' THEN '02'
+                        WHEN 'MARZO' THEN '03'
+                        WHEN 'ABRIL' THEN '04'
+                        WHEN 'MAYO' THEN '05'
+                        WHEN 'JUNIO' THEN '06'
+                        WHEN 'JULIO' THEN '07'
+                        WHEN 'AGOSTO' THEN '08'
+                        WHEN 'SEPTIEMBRE' THEN '09'
+                        WHEN 'OCTUBRE' THEN '10'
+                        WHEN 'NOVIEMBRE' THEN '11'
+                        WHEN 'DICIEMBRE' THEN '12'
+                        ELSE '01'
+                    END || '-01', 'YYYY-MM-DD'),
+                CURRENT_DATE
+            ),
+            COALESCE(
+                TO_DATE(l.anio_periodo::text || '-' || 
+                    CASE UPPER(TRIM(l.mes_periodo))
+                        WHEN 'ENERO' THEN '01'
+                        WHEN 'FEBRERO' THEN '02'
+                        WHEN 'MARZO' THEN '03'
+                        WHEN 'ABRIL' THEN '04'
+                        WHEN 'MAYO' THEN '05'
+                        WHEN 'JUNIO' THEN '06'
+                        WHEN 'JULIO' THEN '07'
+                        WHEN 'AGOSTO' THEN '08'
+                        WHEN 'SEPTIEMBRE' THEN '09'
+                        WHEN 'OCTUBRE' THEN '10'
+                        WHEN 'NOVIEMBRE' THEN '11'
+                        WHEN 'DICIEMBRE' THEN '12'
+                        ELSE '01'
+                    END || '-01', 'YYYY-MM-DD') + INTERVAL '1 month' - INTERVAL '1 day',
+                CURRENT_DATE
+            ),
+            false
+        FROM public.liquidaciones l
+        JOIN public.revisiones r ON r.id = l.id_revision
+        JOIN public.empleados e ON e.id = l.id_empleado
+        WHERE e.clave_ubicacion IS NOT NULL 
+          AND TRIM(e.clave_ubicacion) <> '' 
+          AND TRIM(e.clave_ubicacion) <> '—'
+          AND TRIM(e.clave_ubicacion) <> '-'
+          AND (
+              TRIM(e.clave_ubicacion) ~* '^C-?[0-9]{7,8}$'
+              OR TRIM(e.clave_ubicacion) ~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$'
+              OR TRIM(e.clave_ubicacion) ~* '^[0-9]{8,10}$'
+          )
+        ON CONFLICT (id_revision, numero) DO NOTHING;
+
+        -- Backfill: asegurar vinculaciones de obras para liquidaciones
+        INSERT INTO public.vinculaciones_obras_liquidaciones (id, id_registro_obra, id_liquidacion, dias_registro_obra)
+        SELECT uuidv7(), ro.id, l.id, 30
+        FROM public.liquidaciones l
+        JOIN public.empleados e ON e.id = l.id_empleado
+        JOIN public.registros_obras ro ON ro.id_revision = l.id_revision AND ro.numero = LEFT(TRIM(e.clave_ubicacion), 15)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol 
+            WHERE vol.id_liquidacion = l.id
+        );
+
+        -- Backfill: asegurar vinculaciones en reportes_vinculaciones_obras_liquidaciones
+        INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra)
+        SELECT uuidv7(), ro.id, rl.id, 30
+        FROM public.reportes_liquidaciones rl
+        JOIN public.liquidaciones l ON l.id = rl.id_liquidacion
+        JOIN public.empleados e ON e.id = l.id_empleado
+        JOIN public.registros_obras ro ON ro.id_revision = rl.id_revision AND ro.numero = LEFT(TRIM(e.clave_ubicacion), 15)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM public.reportes_vinculaciones_obras_liquidaciones rvol 
+            WHERE rvol.id_reporte_liquidacion = rl.id
+        );
         "#,
     )?;
 

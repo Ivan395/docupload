@@ -717,7 +717,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                     Rectangle {
                         x: table_scroll.content-x;
-                        width: 2750px;
+                        width: 3250px;
                         height: 40px;
 
                         HorizontalLayout {
@@ -753,12 +753,18 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             Text { width: 35px; text: "#"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
                             Text { width: 105px; text: "Mes / Año"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
                             Text { width: 105px; text: "NSS"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
-                            Text { width: 105px; text: "RFC / CURP"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                            Text { width: 165px; text: "RFC / CURP"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
                             Text { width: 220px; text: "Nombre del Trabajador"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
                             Text { width: 105px; text: "Reg. Patronal"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
-                            Text { width: 210px; text: "✏️ Registro de Obra (SIROC)"; font-size: 12px; font-weight: 800; color: #1e40af; vertical-alignment: center; }
+                            Text { width: 210px; text: "✏️ Registro de Obra"; font-size: 12px; font-weight: 800; color: #1e40af; vertical-alignment: center; }
                             Text { width: 65px; text: "Días Céd."; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
                             Text { width: 65px; text: "Días Obra"; font-size: 12px; font-weight: 800; color: #1e40af; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { width: 75px; text: "Clave"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { width: 90px; text: "Fecha"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { width: 85px; text: "SDI"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                            Text { width: 50px; text: "Lic."; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { width: 50px; text: "Inc."; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { width: 50px; text: "Aus."; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
                             Text { width: 85px; text: "Cuota Fija"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
                             Text { width: 85px; text: "Exc. Pat."; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
                             Text { width: 85px; text: "Exc. Obr."; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
@@ -784,11 +790,11 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 // Cuerpo de la tabla con scroll vertical y horizontal
                 table_scroll := ScrollView {
                     vertical-stretch: 1;
-                    content-width: 2750px;
+                    content-width: 3250px;
                     content-height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + 20px) : 180px;
 
                     Rectangle {
-                        width: 2750px;
+                        width: 3250px;
                         height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + 20px) : 180px;
 
                         VerticalLayout {
@@ -872,7 +878,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                                 // 5. RFC / CURP
                                 TextInput {
-                                    width: 105px;
+                                    width: 165px;
                                     text: item.rfc_curp;
                                     read-only: true;
                                     single-line: true;
@@ -990,6 +996,81 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             AppLogic.reporte_open_unified_modal(item.id_reporte_liq);
                                         }
                                     }
+                                }
+
+                                // Clave
+                                TextInput {
+                                    width: 75px;
+                                    text: item.clave;
+                                    read-only: true;
+                                    single-line: true;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: #334155;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                // Fecha
+                                TextInput {
+                                    width: 90px;
+                                    text: item.fecha;
+                                    read-only: true;
+                                    single-line: true;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: #334155;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                // SDI
+                                TextInput {
+                                    width: 85px;
+                                    text: item.sdi_str;
+                                    read-only: true;
+                                    single-line: true;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: #334155;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+
+                                // Licencia
+                                TextInput {
+                                    width: 50px;
+                                    text: item.lic_str;
+                                    read-only: true;
+                                    single-line: true;
+                                    font-size: 12px;
+                                    color: #64748b;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                // Incapacidad
+                                TextInput {
+                                    width: 50px;
+                                    text: item.inc_str;
+                                    read-only: true;
+                                    single-line: true;
+                                    font-size: 12px;
+                                    color: #64748b;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                // Ausentismo
+                                TextInput {
+                                    width: 50px;
+                                    text: item.aus_str;
+                                    read-only: true;
+                                    single-line: true;
+                                    font-size: 12px;
+                                    color: #64748b;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
                                 }
 
                                 // 11. Cuota Fija
@@ -1173,7 +1254,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                 Rectangle {
                     x: table_scroll.content-x;
-                    width: 2750px;
+                    width: 3250px;
                     height: 40px;
 
                     HorizontalLayout {
@@ -1183,9 +1264,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         alignment: start;
                         cross-axis-alignment: center;
 
-                        // Bloque de Título / Etiqueta de Totales alineado con las columnas no numéricas (30+35+105*3+220+105+210 + 7*8 = 971px)
+                        // Bloque de Título / Etiqueta de Totales alineado con las columnas no numéricas (30+35+105+105+165+220+105+210 + 7*8 = 1031px)
                         Rectangle {
-                            width: 971px;
+                            width: 1031px;
                             height: 40px;
 
                             HorizontalLayout {
@@ -1216,6 +1297,24 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                         // Días Obra
                         Text { width: 65px; text: AppData.reporte_footer_total_dias_obr_str; font-size: 12.5px; font-weight: 800; color: #1d4ed8; horizontal-alignment: center; vertical-alignment: center; }
+
+                        // Clave (espacio sin total)
+                        Rectangle { width: 75px; }
+
+                        // Fecha (espacio sin total)
+                        Rectangle { width: 90px; }
+
+                        // SDI (espacio sin total)
+                        Rectangle { width: 85px; }
+
+                        // Lic.
+                        Text { width: 50px; text: AppData.reporte_footer_total_lic_str; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+
+                        // Inc.
+                        Text { width: 50px; text: AppData.reporte_footer_total_inc_str; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+
+                        // Aus.
+                        Text { width: 50px; text: AppData.reporte_footer_total_aus_str; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
 
                         // Cuota Fija
                         Text { width: 85px; text: AppData.reporte_footer_total_cf_str; font-size: 12.5px; font-weight: 800; color: #1e293b; horizontal-alignment: right; vertical-alignment: center; }

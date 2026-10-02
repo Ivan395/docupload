@@ -929,7 +929,7 @@ pub fn load_cedulas_from_db(
 
     // 1. Obras registradas en la revisión
     let obra_rows = client
-        .query("SELECT numero FROM public.registros_obras WHERE id_revision = $1", &[&rev_uuid])
+        .query("SELECT numero FROM public.registros_obras WHERE id_revision = $1 AND COALESCE(creado_usuario, false) = true", &[&rev_uuid])
         .map_err(|e| format!("Error consultando obras de la revisión: {}", e))?;
     let mut revision_obras = HashSet::new();
     for r in obra_rows {

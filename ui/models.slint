@@ -131,6 +131,7 @@ export struct RegistroObraData {
     subdelegacion: string,
     created_at_str: string,
     is_valid_structure: bool,
+    creado_usuario: bool,
 }
 
 export struct CedulaFileItem {
@@ -215,6 +216,12 @@ export struct ReporteLiquidacionRow {
     is_assigned: bool,
     dias_cedula: int,
     dias_obra: int,
+    clave: string,
+    fecha: string,
+    sdi_str: string,
+    lic_str: string,
+    inc_str: string,
+    aus_str: string,
     row_bg_color: color,
     row_hover_color: color,
     row_accent_color: color,
@@ -248,6 +255,168 @@ export struct ReporteLiquidacionRow {
     patronal_orig_str: string,
     obrera_orig_str: string,
     subtotal_orig_str: string,
+}
+
+// ─── NÓMINAS ────────────────────────────────────────────────────────────────
+// Una fila por nómina (trabajador + periodo). El total de días del trabajador
+// viaja desglosado por mes para poder contrastarlo contra la cédula sin abrir
+// otra vista.
+
+export struct NominaEmpleadoDiaItem {
+    periodo: string,
+    anio: int,
+    dias_nomina: string,
+    dias_cedula: string,
+    delta_str: string,
+    coincide: bool,
+}
+
+export struct NominaPercepcionItem {
+    clave: string,
+    concepto: string,
+    tipo_sat: string,
+    importe_str: string,
+    gravado_str: string,
+    exento_str: string,
+}
+
+export struct NominaRow {
+    idx: int,
+    id_nomina: string,
+    id_empleado: string,
+    nombre_trabajador: string,
+    nss: string,
+    rfc_curp: string,
+    registro_patronal: string,
+
+    periodo_str: string,
+    semana_fiscal: int,
+    semana_fiscal_str: string,
+
+    // Todas las fechas de pago del CFDI
+    fecha_inicial_pago_str: string,
+    fecha_final_pago_str: string,
+    fecha_pago_str: string,
+    fecha_inicio_rel_str: string,
+    fecha_emision_str: string,
+    fecha_timbrado_str: string,
+
+    // Días: nómina vs cédula del mismo periodo
+    num_dias_pagados_str: string,
+    dias_cedula_str: string,
+    dias_delta_str: string,
+    dias_coinciden: bool,
+    sin_cedula: bool,
+
+    // Percepciones (sin deducciones)
+    total_percepciones_str: string,
+    total_gravado_str: string,
+    total_exento_str: string,
+    num_percepciones: int,
+    percepcion_detalle_str: string,
+
+    salario_diario_str: string,
+    tipo_nomina: string,
+    periodicidad: string,
+
+    // Total de días del trabajador, desglosado por mes
+    total_dias_empleado: string,
+    total_dias_meses: int,
+    meses: [NominaEmpleadoDiaItem],
+
+    row_bg_color: color,
+    row_hover_color: color,
+}
+
+export struct NominaMesTotalItem {
+    periodo: string,
+    nominas: int,
+    dias_pagados_str: string,
+    dias_cedula_str: string,
+    percepciones_str: string,
+}
+
+export struct CalendarDayMilestone {
+    rev_id: string,
+    folio: string,
+    nombre: string,
+    rp_numero: string,
+    cliente_nombre: string,
+    milestone_name: string,
+    milestone_desc: string,
+    color_fg: color,
+    color_bg: color,
+    color_border: color,
+}
+
+export struct CalendarDayCell {
+    day_number: int,
+    month: int,
+    year: int,
+    date_str: string,
+    date_iso: string,
+    is_current_month: bool,
+    is_today: bool,
+    is_weekend: bool,
+    is_holiday: bool,
+    holiday_motivo: string,
+    holiday_is_system: bool,
+    holiday_id: string,
+    has_milestones: bool,
+    milestone_count: int,
+    summary_label: string,
+    color_cell_bg: color,
+    color_cell_border: color,
+    has_events: bool,
+    badge1_label: string,
+    badge1_color_fg: color,
+    badge1_color_bg: color,
+    badge2_label: string,
+    badge2_color_fg: color,
+    badge2_color_bg: color,
+    badge3_label: string,
+    badge3_color_fg: color,
+    badge3_color_bg: color,
+    more_count: int,
+    is_highlighted: bool,
+    highlight_color: color,
+    highlight_label: string,
+}
+
+export struct CalendarHolidayItem {
+    id: string,
+    fecha_str: string,
+    fecha_iso: string,
+    dia_semana: string,
+    motivo: string,
+    es_sistema: bool,
+}
+
+export struct CalendarRevisionItem {
+    id: string,
+    nombre: string,
+    folio: string,
+    cliente_nombre: string,
+    rp_numero: string,
+    estatus: string,
+    estatus_imss: string,
+    f_entrega_imss: string,
+    f_max_aprobacion_imss: string,
+    f_aprobacion_imss: string,
+    f_max_entrega_revision: string,
+    f_entrega_revision: string,
+    f_max_entrega_imss: string,
+    f_aprobacion_prorroga: string,
+    f_entrega_con_prorroga: string,
+    pidio_prorroga: bool,
+    has_entrega_imss: bool,
+    has_max_aprobacion_imss: bool,
+    has_aprobacion_imss: bool,
+    has_max_entrega_rev: bool,
+    has_entrega_rev: bool,
+    has_max_entrega_imss: bool,
+    has_aprobacion_prorroga: bool,
+    has_entrega_con_prorroga: bool,
 }
 
 export global AppData {
@@ -675,6 +844,9 @@ export global AppData {
     // Totales del Footer Fijo de la Tabla
     in-out property <string> reporte_footer_total_dias_ced_str: "0";
     in-out property <string> reporte_footer_total_dias_obr_str: "0";
+    in-out property <string> reporte_footer_total_lic_str: "-";
+    in-out property <string> reporte_footer_total_inc_str: "-";
+    in-out property <string> reporte_footer_total_aus_str: "-";
     in-out property <string> reporte_footer_total_cf_str: "$0.00";
     in-out property <string> reporte_footer_total_exc_pat_str: "$0.00";
     in-out property <string> reporte_footer_total_exc_obr_str: "$0.00";
@@ -693,6 +865,94 @@ export global AppData {
     // Resumen de Totales por Mes (sólo para "Todos los meses")
     in-out property <bool> show_reporte_totales_por_mes: true;
     in-out property <[ReporteMesTotalItem]> reporte_totales_por_mes: [];
+
+    // Calendario Fiscal & Revisiones IMSS
+    in-out property <int> cal_view_year: 2026;
+    in-out property <int> cal_view_month: 9;
+    in-out property <string> cal_month_name: "Septiembre 2026";
+    in-out property <[CalendarDayCell]> cal_day_cells: [];
+    in-out property <[CalendarRevisionItem]> cal_revisions_list: [];
+    in-out property <[CalendarHolidayItem]> cal_holidays_list: [];
+    in-out property <string> cal_selected_revision_id: "";
+    in-out property <CalendarRevisionItem> cal_selected_revision;
+    in-out property <bool> cal_has_selected_revision: false;
+    in-out property <string> cal_search_text: "";
+    in-out property <int> cal_active_tab: 0; // 0: Cuadrícula Calendario, 1: Días Festivos IMSS
+    in-out property <int> cal_total_holidays_count: 0;
+    in-out property <int> cal_total_revisions_count: 0;
+    in-out property <int> cal_month_milestones_count: 0;
+
+    // Catálogo de Días Inhábiles (Pestaña 1)
+    in-out property <int> cal_holiday_catalog_year: 2026;
+    in-out property <int> cal_holiday_catalog_count: 0;
+    in-out property <string> cal_holiday_search_text: "";
+
+    // Modal Detalle de Día del Calendario (al hacer clic en cualquier día con eventos)
+    in-out property <bool> cal_show_day_detail_modal: false;
+    in-out property <string> cal_detail_date_str: "";
+    in-out property <string> cal_detail_date_weekday: "";
+    in-out property <bool> cal_detail_is_today: false;
+    in-out property <bool> cal_detail_is_holiday: false;
+    in-out property <string> cal_detail_holiday_motivo: "";
+    in-out property <bool> cal_detail_holiday_is_system: false;
+    in-out property <[CalendarDayMilestone]> cal_detail_milestones: [];
+    in-out property <int> cal_detail_milestones_count: 0;
+
+    // Modal Agregar Día Festivo
+    in-out property <bool> cal_show_add_holiday_modal: false;
+    in-out property <string> cal_new_holiday_date: "";
+    in-out property <string> cal_new_holiday_motivo: "";
+    in-out property <string> cal_holiday_error_msg: "";
+
+    // Modal Confirmar Eliminación Día Festivo
+    in-out property <bool> cal_show_delete_holiday_modal: false;
+    in-out property <string> cal_delete_holiday_id: "";
+    in-out property <string> cal_delete_holiday_motivo: "";
+    in-out property <string> cal_delete_holiday_fecha: "";
+
+    // ─── NÓMINAS (reporte) ────────────────────────────────────────────────
+    in-out property <bool> nominas_access_allowed: false;
+
+    // Ancho actual de la ventana, publicado por MainWindow al redimensionar.
+    // Lo consumen las vistas responsivas para decidir qué columnas mostrar.
+    in-out property <length> window_width: 1240px;
+
+    in-out property <[NominaRow]> nominas_list: [];
+    in-out property <[NominaPercepcionItem]> nominas_percepciones_detalle: [];
+    in-out property <[NominaMesTotalItem]> nominas_totales_por_mes: [];
+    in-out property <[string]> nominas_periodo_options: [];
+    in-out property <[string]> nominas_anio_options: [];
+
+    // KPIs
+    in-out property <string> nominas_kpi_total_str: "0";
+    in-out property <string> nominas_kpi_empleados_str: "0";
+    in-out property <string> nominas_kpi_dias_pagados_str: "0";
+    in-out property <string> nominas_kpi_dias_cedula_str: "0";
+    in-out property <string> nominas_kpi_dias_delta_str: "0";
+    in-out property <string> nominas_kpi_percepciones_str: "$0.00";
+    in-out property <string> nominas_kpi_sin_cedula_str: "0";
+    in-out property <string> nominas_subtitle: "";
+
+    // Filtros
+    in-out property <string> nominas_search_query: "";
+    in-out property <int> nominas_filter_periodo_idx: 0;
+    in-out property <int> nominas_filter_anio_idx: 0;
+    in-out property <int> nominas_filter_dias_idx: 0;
+    in-out property <bool> nominas_only_sin_cedula: false;
+    in-out property <bool> nominas_mostrar_detalle: true;
+
+    // Paginación
+    in-out property <int> nominas_page_current: 0;
+    in-out property <int> nominas_page_total: 0;
+    in-out property <int> nominas_page_start_row: 0;
+    in-out property <int> nominas_page_end_row: 0;
+    in-out property <int> nominas_total_filtered: 0;
+
+    // Panel de percepciones de la fila seleccionada
+    in-out property <bool> nominas_show_percepciones: false;
+    in-out property <string> nominas_percepciones_empleado: "";
+    in-out property <string> nominas_percepciones_periodo: "";
+    in-out property <string> nominas_percepciones_total_str: "$0.00";
 }
 
 export global AppLogic {
@@ -815,6 +1075,12 @@ export global AppLogic {
 
     // Reporte Liquidaciones
     callback open_reporte_liquidaciones();
+
+    // Reporte Nóminas
+    callback open_nominas_view();
+
+    // Redimensionado de la ventana (alimenta las vistas responsivas)
+    callback view_resized(length);
     callback reload_reporte_liquidaciones();
     callback reporte_filtrar_busqueda(string);
     callback reporte_filtrar_obra(int);
@@ -872,4 +1138,42 @@ export global AppLogic {
     callback reporte_toggle_quick_select_obra(string);
     callback reporte_quick_select_all_obras(bool);
     callback reporte_apply_quick_select_obras();
+
+    // Calendario Fiscal & Revisiones Callbacks
+    callback cal_prev_month();
+    callback cal_next_month();
+    callback cal_today();
+    callback cal_set_year(int);
+    callback cal_select_revision(string);
+    callback cal_clear_selected_revision();
+    callback cal_day_clicked(string);
+    callback cal_close_day_detail_modal();
+    callback cal_inspect_revision_from_detail(string);
+    callback cal_holiday_catalog_prev_year();
+    callback cal_holiday_catalog_next_year();
+    callback cal_holiday_search(string);
+    callback cal_search_revisions(string);
+    callback cal_switch_tab(int);
+    callback cal_open_add_holiday_modal();
+    callback cal_close_add_holiday_modal();
+    callback cal_submit_add_holiday(string, string);
+    callback cal_prompt_delete_holiday(string, string, string);
+    callback cal_confirm_delete_holiday();
+    callback cal_cancel_delete_holiday();
+    callback cal_go_to_revision_view(string);
+
+    // Nóminas Callbacks
+    callback nominas_reload();
+    callback nominas_set_search(string);
+    callback nominas_clear_search();
+    callback nominas_filter_periodo(int);
+    callback nominas_filter_anio(int);
+    callback nominas_filter_dias(int);
+    callback nominas_toggle_only_sin_cedula();
+    callback nominas_toggle_detalle();
+    callback nominas_prev_page();
+    callback nominas_next_page();
+    callback nominas_open_percepciones(string, string, string);
+    callback nominas_close_percepciones();
+    callback nominas_export_excel();
 }

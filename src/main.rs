@@ -1,19 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod archives;
+pub mod calendario_view_logic;
 pub mod cedulas;
 pub mod db;
 pub mod nominas;
+pub mod nominas_view_logic;
 pub mod rustfs;
 pub mod reporte_view_logic;
 pub mod sat;
 pub mod validation;
 
+use crate::calendario_view_logic::*;
 use crate::db::{create_pool, ensure_schema, DbPool, CedulasDbStats};
 use crate::db::catalogos::*;
 use crate::db::revisiones::*;
 use crate::cedulas::view_logic::*;
 use crate::reporte_view_logic::*;
+use crate::nominas_view_logic::*;
 use crate::validation::*;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
@@ -22,7 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use sha2::{Digest, Sha256};
 
@@ -822,6 +826,7 @@ fn load_obras_ui(ui: &MainWindow, pool: &DbPool, revision_id: &str) {
                 subdelegacion: o.subdelegacion.into(),
                 created_at_str: o.created_at.into(),
                 is_valid_structure: is_valid,
+                creado_usuario: o.creado_usuario,
             }
         })
         .collect();
@@ -840,7 +845,7 @@ fn update_global_stats(ui: &MainWindow, pool: &DbPool) {
 
             let (rev_cnt, obr_cnt): (i32, i32) = client
                 .query_one(
-                    "SELECT (SELECT COUNT(*) FROM public.revisiones)::int, (SELECT COUNT(*) FROM public.registros_obras)::int",
+                    "SELECT (SELECT COUNT(*) FROM public.revisiones)::int, (SELECT COUNT(*) FROM public.registros_obras WHERE COALESCE(creado_usuario, false) = true)::int",
                     &[],
                 )
                 .map(|r| (r.get(0), r.get(1)))
@@ -2351,6 +2356,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let cedulas_list = Rc::new(RefCell::new(Vec::<SelectedFileEntry>::new()));
     let cedulas_session = Arc::new(Mutex::new(CedulasViewState::default()));
     let reporte_session = Arc::new(Mutex::new(ReporteSessionState::default()));
+    let nominas_session = Arc::new(Mutex::new(NominasSessionState::default()));
 
     // Store generated Excel file paths for direct download/saving
     let last_nominas_excel = Arc::new(Mutex::new(Option::<PathBuf>::None));
@@ -2404,11 +2410,11 @@ fn main() -> Result<(), slint::PlatformError> {
                     inhabiles_set = set;
                 }
             }
-            (Some(Arc::new(pool)), Arc::new(inhabiles_set))
+            (Some(Arc::new(pool)), Arc::new(RwLock::new(inhabiles_set)))
         }
         Err(e) => {
             eprintln!("Advertencia: No se pudo conectar a PostgreSQL: {}", e);
-            (None, Arc::new(HashSet::new()))
+            (None, Arc::new(RwLock::new(HashSet::new())))
         }
     };
 
@@ -2944,6 +2950,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let pool_clone = db_pool.clone();
         let cedulas_session_clone = cedulas_session.clone();
         let reporte_session_clone = reporte_session.clone();
+        let nominas_session_clone = nominas_session.clone();
         app_logic.on_navigate_view(move |view_idx| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
@@ -2977,6 +2984,11 @@ fn main() -> Result<(), slint::PlatformError> {
                     app_data.set_current_view(if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
+                // View 9 (Reporte Nóminas) requiere que existan nóminas cargadas
+                if view_idx == 9 && !app_data.get_nominas_access_allowed() {
+                    app_data.set_current_view(0);
+                    return;
+                }
 
                 app_data.set_current_view(view_idx);
 
@@ -2999,6 +3011,18 @@ fn main() -> Result<(), slint::PlatformError> {
 
                 if view_idx == 7 {
                     sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &rev_id);
+                }
+
+                if view_idx == 8 {
+                    if let Some(ref pool) = pool_clone {
+                        load_calendar_ui(&ui, pool, None, None, None);
+                    }
+                }
+
+                if view_idx == 9 {
+                    if let Some(ref pool) = pool_clone {
+                        let _ = sync_and_load_nominas_data(&ui, pool, &nominas_session_clone, None);
+                    }
                 }
 
                 if let Some(ref pool) = pool_clone {
@@ -3239,17 +3263,18 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_rev_form_fecha_entrega_imss(format_date_opt(r.fecha_entrega_imss).into());
                                 app_data.set_rev_form_fecha_aprobacion_imss(format_date_opt(r.fecha_aprobacion_imss).into());
 
+                                let holidays_set = holidays_clone.read().unwrap();
                                 let f_max_aprob = if let Some(d_ent) = r.fecha_entrega_imss {
-                                    Some(add_business_days(d_ent, 15, Some(&holidays_clone)))
+                                    Some(add_business_days(d_ent, 15, Some(&*holidays_set)))
                                 } else if let Some(d_aprob) = r.fecha_aprobacion_imss {
-                                    Some(add_business_days(d_aprob, 15, Some(&holidays_clone)))
+                                    Some(add_business_days(d_aprob, 15, Some(&*holidays_set)))
                                 } else {
                                     r.fecha_maxima_aprobacion_imss
                                 };
                                 app_data.set_rev_form_fecha_max_aprobacion_imss(format_date_opt(f_max_aprob).into());
 
                                 let f_max_rev = if let Some(d_aprob) = r.fecha_aprobacion_imss {
-                                    Some(add_business_days(d_aprob, 40, Some(&holidays_clone)))
+                                    Some(add_business_days(d_aprob, 40, Some(&*holidays_set)))
                                 } else {
                                     r.fecha_maxima_entrega_revision
                                 };
@@ -3257,7 +3282,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
                                 app_data.set_rev_form_fecha_entrega_rev(format_date_opt(r.fecha_entrega_revision).into());
                                 let f_max_imss = if let Some(d_rev) = r.fecha_entrega_revision {
-                                    Some(d_rev + chrono::Duration::days(120))
+                                    Some(add_business_days(d_rev, 120, Some(&*holidays_set)))
                                 } else {
                                     r.fecha_maxima_entrega_imss
                                 };
@@ -3266,7 +3291,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_rev_form_pidio_prorroga(r.pidio_prorroga);
                                 app_data.set_rev_form_fecha_aprobacion_prorroga(format_date_opt(r.fecha_aprobacion_prorroga).into());
                                 let f_ent_pror = if let Some(d_max) = f_max_rev {
-                                    Some(add_business_days(d_max, 10, Some(&holidays_clone)))
+                                    Some(add_business_days(d_max, 10, Some(&*holidays_set)))
                                 } else {
                                     r.fecha_entrega_con_prorroga
                                 };
@@ -3340,12 +3365,13 @@ fn main() -> Result<(), slint::PlatformError> {
                         None
                     };
 
+                    let holidays_set = holidays_clone.read().unwrap();
                     let d_aprob = parse_date_opt(f_aprob_imss.as_str());
                     let d_max_ent_rev = parse_date_opt(f_max_ent_rev.as_str())
-                        .or_else(|| d_aprob.map(|d| add_business_days(d, 40, Some(&holidays_clone))));
+                        .or_else(|| d_aprob.map(|d| add_business_days(d, 40, Some(&*holidays_set))));
                     let d_aprob_pror = parse_date_opt(f_aprob_pror.as_str());
                     let d_ent_pror = if pidio_pror {
-                        d_max_ent_rev.map(|d_max| add_business_days(d_max, 10, Some(&holidays_clone)))
+                        d_max_ent_rev.map(|d_max| add_business_days(d_max, 10, Some(&*holidays_set)))
                             .or_else(|| parse_date_opt(f_ent_pror.as_str()))
                     } else {
                         None
@@ -3481,8 +3507,8 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 if let Some(d) = parse_date_opt(date_str.as_str()) {
-                    // 15 días hábiles (a partir del día siguiente, sin fines de semana ni festivos IMSS)
-                    let max_aprob = add_business_days(d, 15, Some(&holidays_clone));
+                    let holidays_set = holidays_clone.read().unwrap();
+                    let max_aprob = add_business_days(d, 15, Some(&*holidays_set));
                     app_data.set_rev_form_fecha_max_aprobacion_imss(format_date_opt(Some(max_aprob)).into());
                 } else {
                     app_data.set_rev_form_fecha_max_aprobacion_imss("".into());
@@ -3498,18 +3524,19 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 if let Some(d) = parse_date_opt(date_str.as_str()) {
+                    let holidays_set = holidays_clone.read().unwrap();
                     // 1. 40 días hábiles para Fecha Máxima Entrega Revisión (a partir del día siguiente)
-                    let max_ent_rev = add_business_days(d, 40, Some(&holidays_clone));
+                    let max_ent_rev = add_business_days(d, 40, Some(&*holidays_set));
                     app_data.set_rev_form_fecha_max_entrega_rev(format_date_opt(Some(max_ent_rev)).into());
 
                     // Fecha de Entrega con Prórroga: 10 días hábiles después de Fecha Máxima de Entrega Revisión
-                    let ent_pror = add_business_days(max_ent_rev, 10, Some(&holidays_clone));
+                    let ent_pror = add_business_days(max_ent_rev, 10, Some(&*holidays_set));
                     app_data.set_rev_form_fecha_entrega_con_prorroga(format_date_opt(Some(ent_pror)).into());
 
                     // 2. Si Fecha Máx Aprobación IMSS no se había calculado (o fecha entrega imss vacía):
                     let f_ent_imss_str = app_data.get_rev_form_fecha_entrega_imss().to_string();
                     if parse_date_opt(&f_ent_imss_str).is_none() {
-                        let max_aprob = add_business_days(d, 15, Some(&holidays_clone));
+                        let max_aprob = add_business_days(d, 15, Some(&*holidays_set));
                         app_data.set_rev_form_fecha_max_aprobacion_imss(format_date_opt(Some(max_aprob)).into());
                     }
                 } else {
@@ -3522,12 +3549,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = main_window.as_weak();
+        let holidays_clone = imss_inhabiles.clone();
         app_logic.on_on_fecha_entrega_rev_changed(move |date_str| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 if let Some(d) = parse_date_opt(date_str.as_str()) {
-                    // 120 días para Fecha Máxima Entrega IMSS
-                    let max_ent_imss = d + chrono::Duration::days(120);
+                    let holidays_set = holidays_clone.read().unwrap();
+                    // 120 días hábiles para Fecha Máxima Entrega IMSS (sin fines de semana ni días festivos)
+                    let max_ent_imss = add_business_days(d, 120, Some(&*holidays_set));
                     app_data.set_rev_form_fecha_max_entrega_imss(format_date_opt(Some(max_ent_imss)).into());
                 } else {
                     app_data.set_rev_form_fecha_max_entrega_imss("".into());
@@ -3544,7 +3573,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 let app_data = ui.global::<AppData>();
                 let f_max_str = app_data.get_rev_form_fecha_max_entrega_rev().to_string();
                 if let Some(d_max) = parse_date_opt(&f_max_str) {
-                    let ent_pror = add_business_days(d_max, 10, Some(&holidays_clone));
+                    let holidays_set = holidays_clone.read().unwrap();
+                    let ent_pror = add_business_days(d_max, 10, Some(&*holidays_set));
                     app_data.set_rev_form_fecha_entrega_con_prorroga(format_date_opt(Some(ent_pror)).into());
                 }
             }
@@ -3734,7 +3764,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 if next {
                     let f_max_str = app_data.get_rev_form_fecha_max_entrega_rev().to_string();
                     if let Some(d_max) = parse_date_opt(&f_max_str) {
-                        let ent_pror = add_business_days(d_max, 10, Some(&holidays_clone));
+                        let holidays_set = holidays_clone.read().unwrap();
+                        let ent_pror = add_business_days(d_max, 10, Some(&*holidays_set));
                         app_data.set_rev_form_fecha_entrega_con_prorroga(format_date_opt(Some(ent_pror)).into());
                     }
                 }
@@ -5291,6 +5322,56 @@ fn main() -> Result<(), slint::PlatformError> {
     // 55. Callbacks de Reporte Liquidaciones
     wire_reporte_liquidaciones_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
 
+    // 56. Callbacks de Calendario Fiscal & Revisiones IMSS
+    register_calendar_callbacks(&main_window, db_pool.clone(), imss_inhabiles.clone());
+
+    // 57. Callbacks de Reporte Nóminas
+    wire_nominas_callbacks(&main_window, db_pool.clone(), nominas_session.clone());
+
+    // 58. Redimensionado: publica el ancho del área de contenido para que las
+    // tablas adaptativas (nóminas) ajusten qué columnas muestran.
+    {
+        let ui_weak_resize = main_window.as_weak();
+        app_logic.on_view_resized(move |w| {
+            if let Some(ui) = ui_weak_resize.upgrade() {
+                let d = ui.global::<AppData>();
+                if d.get_window_width() != w {
+                    d.set_window_width(w);
+                }
+            }
+        });
+    }
+
+    // La vista de nóminas no depende de una revisión seleccionada (las nóminas
+    // viven en revisiones sintéticas por periodo), así que se habilita siempre
+    // que el reporte tenga datos que mostrar.
+    if let Some(pool_nom) = db_pool.clone() {
+        let ui_weak = main_window.as_weak();
+        let sess = nominas_session.clone();
+        std::thread::spawn(move || {
+            // Se reintenta hasta que el pool tenga una conexión disponible.
+            for _ in 0..30 {
+                let tiene = pool_nom
+                    .get()
+                    .ok()
+                    .and_then(|mut client| {
+                        crate::db::nominas_reporte::fetch_nominas_reporte(&mut client, None).ok()
+                    })
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.global::<AppData>().set_nominas_access_allowed(tiene);
+                    if tiene {
+                        let _ = sync_and_load_nominas_data(&ui, &pool_nom, &sess, None);
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
+    }
+
     main_window.run()
 }
 
@@ -5527,6 +5608,14 @@ mod tests_ui {
                 obra_numero: obra_num,
                 obra_label: obra_lbl,
                 dias_obra: dias_obr,
+
+                clave: "08".to_string(),
+                fecha: None,
+                fecha_str: "-".to_string(),
+                sdi: 250.0,
+                lic: 0.0,
+                inc: 0.0,
+                aus: 0.0,
 
                 cf: 0.0,
                 exc_pat: 0.0,

@@ -189,7 +189,7 @@ fn save_single_nomina_tx(
     }
     if empleado_id.is_none() {
         if let Some(ref curp) = emp_curp {
-            if !curp.is_empty() {
+            if !curp.is_empty() && !crate::validation::is_generic_sat_identifier(curp) {
                 let row = tx.query_opt(
                     "SELECT id FROM public.empleados WHERE id_cliente = $1 AND curp = $2 LIMIT 1",
                     &[&id_cliente, &truncate_str(Some(curp), 18)],
@@ -202,7 +202,7 @@ fn save_single_nomina_tx(
     }
     if empleado_id.is_none() {
         if let Some(ref rfc) = emp_rfc {
-            if !rfc.is_empty() {
+            if !rfc.is_empty() && !crate::validation::is_generic_sat_identifier(rfc) {
                 let row = tx.query_opt(
                     "SELECT id FROM public.empleados WHERE id_cliente = $1 AND rfc = $2 LIMIT 1",
                     &[&id_cliente, &truncate_str(Some(rfc), 13)],

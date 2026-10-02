@@ -108,6 +108,31 @@ impl Default for ReporteSessionState {
     }
 }
 
+/// Etiqueta de la columna RFC/CURP.
+///
+/// Solo une los identificadores presentes, de modo que un RFC vacío nunca
+/// produce una línea en blanco delante de la CURP. Cuando no hay ninguno se
+/// devuelve un marcador visible en lugar de una celda en blanco.
+pub fn build_rfc_curp_label(rfc: &str, curp: &str) -> String {
+    let rfc = rfc.trim();
+    let curp = curp.trim();
+
+    if !curp.is_empty() && curp.eq_ignore_ascii_case(rfc) {
+        return rfc.to_string();
+    }
+
+    let parts: Vec<&str> = [rfc, curp]
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        "SIN RFC/CURP".to_string()
+    } else {
+        parts.join("\n")
+    }
+}
+
 pub fn format_curr(val: f64) -> String {
     let is_neg = val < -0.001;
     let abs_val = val.abs();
@@ -486,11 +511,7 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
         }
 
         let is_assigned = r.id_registro_obra.is_some();
-        let rfc_curp_str = if !r.curp.is_empty() && r.curp != r.rfc {
-            format!("{}\n{}", r.rfc, r.curp)
-        } else {
-            r.rfc.clone()
-        };
+        let rfc_curp_str = build_rfc_curp_label(&r.rfc, &r.curp);
 
         let (row_bg_color, row_hover_color, row_accent_color) = if let Some(oid) = r.id_registro_obra {
             let color_idx = state.obras_options.iter().position(|o| o.id == oid).unwrap_or(0);
@@ -508,6 +529,18 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             || (r.dias_obra != r.dias_cedula)
         );
 
+        let fmt_days_or_dash = |v: f64| {
+            if v > 0.001 {
+                if (v.fract()).abs() < 0.001 {
+                    format!("{:.0}", v)
+                } else {
+                    format!("{:.2}", v)
+                }
+            } else {
+                "-".to_string()
+            }
+        };
+
         page_rows.push(ReporteLiquidacionRow {
             selected: is_selected,
             idx: (start_idx + page_offset + 1) as i32,
@@ -524,6 +557,12 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             is_assigned,
             dias_cedula: r.dias_cedula as i32,
             dias_obra: r.dias_obra as i32,
+            clave: if r.clave.trim().is_empty() { "-".into() } else { r.clave.trim().into() },
+            fecha: r.fecha_str.as_str().into(),
+            sdi_str: if r.sdi > 0.001 { format_curr(r.sdi).into() } else { "-".into() },
+            lic_str: fmt_days_or_dash(r.lic).into(),
+            inc_str: fmt_days_or_dash(r.inc).into(),
+            aus_str: fmt_days_or_dash(r.aus).into(),
             row_bg_color,
             row_hover_color,
             row_accent_color,
@@ -612,6 +651,9 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
     // 7. Totales para el Pie de Tabla Fijo (calculados sobre filtered_rows)
     let mut total_dias_ced: i32 = 0;
     let mut total_dias_obr: i32 = 0;
+    let mut total_lic: f64 = 0.0;
+    let mut total_inc: f64 = 0.0;
+    let mut total_aus: f64 = 0.0;
     let mut total_cf: f64 = 0.0;
     let mut total_exc_pat: f64 = 0.0;
     let mut total_exc_obr: f64 = 0.0;
@@ -630,6 +672,9 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
     for r in &state.filtered_rows {
         total_dias_ced += r.dias_cedula as i32;
         total_dias_obr += if r.id_registro_obra.is_some() { r.dias_obra as i32 } else { 0 };
+        total_lic += r.lic;
+        total_inc += r.inc;
+        total_aus += r.aus;
         total_cf += r.cf;
         total_exc_pat += r.exc_pat;
         total_exc_obr += r.exc_obr;
@@ -646,8 +691,23 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
         total_subtotal += r.subtotal;
     }
 
+    let fmt_days_or_dash = |v: f64| {
+        if v > 0.001 {
+            if (v.fract()).abs() < 0.001 {
+                format!("{:.0}", v)
+            } else {
+                format!("{:.2}", v)
+            }
+        } else {
+            "-".to_string()
+        }
+    };
+
     app_data.set_reporte_footer_total_dias_ced_str(total_dias_ced.to_string().into());
     app_data.set_reporte_footer_total_dias_obr_str(total_dias_obr.to_string().into());
+    app_data.set_reporte_footer_total_lic_str(fmt_days_or_dash(total_lic).into());
+    app_data.set_reporte_footer_total_inc_str(fmt_days_or_dash(total_inc).into());
+    app_data.set_reporte_footer_total_aus_str(fmt_days_or_dash(total_aus).into());
     app_data.set_reporte_footer_total_cf_str(format_curr(total_cf).into());
     app_data.set_reporte_footer_total_exc_pat_str(format_curr(total_exc_pat).into());
     app_data.set_reporte_footer_total_exc_obr_str(format_curr(total_exc_obr).into());
@@ -2000,5 +2060,53 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_rfc_curp_label;
+
+    #[test]
+    fn rfc_vacio_no_deja_linea_en_blanco_antes_de_curp() {
+        // Caso JIMENEZ DE LA FUENTE MARIA ALEJANDRA: solo CURP
+        assert_eq!(
+            build_rfc_curp_label("", "jifa981012mclmnl01"),
+            "jifa981012mclmnl01"
+        );
+    }
+
+    #[test]
+    fn rfc_nulo_tratado_como_vacio() {
+        assert_eq!(
+            build_rfc_curp_label("   ", "jifa981012mclmnl01"),
+            "jifa981012mclmnl01"
+        );
+    }
+
+    #[test]
+    fn rfc_y_curp_se_unen_en_dos_lineas() {
+        assert_eq!(
+            build_rfc_curp_label("JIFA981012A12", "JIFA981012MCLMNL01"),
+            "JIFA981012A12\nJIFA981012MCLMNL01"
+        );
+    }
+
+    #[test]
+    fn rfc_igual_a_curp_no_se_duplica() {
+        assert_eq!(
+            build_rfc_curp_label("JIFA981012MCLMNL01", "JIFA981012MCLMNL01"),
+            "JIFA981012MCLMNL01"
+        );
+    }
+
+    #[test]
+    fn solo_rfc() {
+        assert_eq!(build_rfc_curp_label("JIFA981012A12", ""), "JIFA981012A12");
+    }
+
+    #[test]
+    fn sin_identificadores_muestra_marcador() {
+        assert_eq!(build_rfc_curp_label("", ""), "SIN RFC/CURP");
     }
 }

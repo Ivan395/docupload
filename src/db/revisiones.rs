@@ -44,6 +44,7 @@ pub struct RegistroObraItem {
     pub delegacion: String,
     pub subdelegacion: String,
     pub created_at: String,
+    pub creado_usuario: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -138,7 +139,7 @@ pub fn fetch_revisiones_by_rp(client: &mut Client, id_rp: &str) -> Result<Vec<Re
             r.fecha_aprobacion_prorroga,
             r.fecha_entrega_con_prorroga,
             COALESCE(r.pidio_prorroga, false) AS pidio_prorroga,
-            (SELECT COUNT(*)::int FROM public.registros_obras ro WHERE ro.id_revision = r.id) AS obras_count,
+            (SELECT COUNT(*)::int FROM public.registros_obras ro WHERE ro.id_revision = r.id AND COALESCE(ro.creado_usuario, false) = true) AS obras_count,
             TO_CHAR(r.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at_str
         FROM public.revisiones r
         LEFT JOIN public.conceptos c ON c.id = r.id_concepto_diferencia
@@ -220,9 +221,10 @@ pub fn fetch_obras_by_revision(client: &mut Client, id_revision: &str) -> Result
             COALESCE(monto, 0.0) AS monto,
             COALESCE(delegacion, '') AS delegacion,
             COALESCE(subdelegacion, '') AS subdelegacion,
-            TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at_str
+            TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at_str,
+            COALESCE(creado_usuario, false) AS creado_usuario
         FROM public.registros_obras
-        WHERE id_revision = $1
+        WHERE id_revision = $1 AND COALESCE(creado_usuario, false) = true
         ORDER BY created_at DESC;
     "#;
 
@@ -244,6 +246,7 @@ pub fn fetch_obras_by_revision(client: &mut Client, id_revision: &str) -> Result
         let delegacion: String = row.get(11);
         let subdelegacion: String = row.get(12);
         let created_at: String = row.get(13);
+        let creado_usuario: bool = row.get(14);
 
         list.push(RegistroObraItem {
             id: id_u.to_string(),
@@ -260,6 +263,7 @@ pub fn fetch_obras_by_revision(client: &mut Client, id_revision: &str) -> Result
             delegacion: delegacion.trim().to_string(),
             subdelegacion: subdelegacion.trim().to_string(),
             created_at,
+            creado_usuario,
         });
     }
 
@@ -521,8 +525,20 @@ pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
             superficie_construido,
             monto,
             delegacion,
-            subdelegacion
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            subdelegacion,
+            creado_usuario
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true)
+        ON CONFLICT (id_revision, numero) DO UPDATE SET
+            clase = EXCLUDED.clase,
+            tipo_obra = EXCLUDED.tipo_obra,
+            fecha_inicio = EXCLUDED.fecha_inicio,
+            fecha_fin = EXCLUDED.fecha_fin,
+            ubicacion = EXCLUDED.ubicacion,
+            superficie_construido = EXCLUDED.superficie_construido,
+            monto = EXCLUDED.monto,
+            delegacion = EXCLUDED.delegacion,
+            subdelegacion = EXCLUDED.subdelegacion,
+            creado_usuario = true
         RETURNING id, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS');
     "#;
 
@@ -560,6 +576,7 @@ pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
     res.fecha_inicio = Some(f_ini);
     res.fecha_fin = Some(f_fin);
     res.created_at = created_at;
+    res.creado_usuario = true;
     Ok(res)
 }
 
@@ -591,7 +608,8 @@ pub fn update_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
             superficie_construido = $8,
             monto = $9,
             delegacion = $10,
-            subdelegacion = $11
+            subdelegacion = $11,
+            creado_usuario = true
         WHERE id = $1;
     "#;
 
@@ -623,6 +641,7 @@ pub fn update_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
     res.subdelegacion = clean_subdelegacion;
     res.fecha_inicio = Some(f_ini);
     res.fecha_fin = Some(f_fin);
+    res.creado_usuario = true;
     Ok(res)
 }
 

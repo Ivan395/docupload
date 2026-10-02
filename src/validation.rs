@@ -69,6 +69,30 @@ pub fn clean_alphanumeric_input(s: &str) -> String {
         .to_uppercase()
 }
 
+/// Identificadores provisionales que el SAT asigna a personas SIN RFC/CURP propio
+/// (residentes en el extranjero, datos incompletos, etc.).
+///
+/// Varias personas distintas comparten el mismo valor (por ejemplo `XAXX010101000`),
+/// por lo que nunca deben usarse para emparejar un empleado con un registro existente:
+/// hacerlo fusiona personas diferentes en un mismo registro y arrastra sus liquidaciones
+/// (y sus registros de obra) al del primero encontrado.
+pub fn is_generic_sat_identifier(value: &str) -> bool {
+    let clean = clean_alphanumeric_input(value);
+    matches!(
+        clean.as_str(),
+        // RFC genéricos para persona física y moral sin RFC propio
+        "XAXX010101000"
+            | "XXXX010101XXX"
+            | "XEXX010101000"
+            | "XEXX010101XXX"
+            | "XAXA010101000"
+            | "XXXX010101000"
+            // CURP genérica para residentes en el extranjero
+            | "XEXX010101HNEXXXA4"
+            | "XXXX010101XXXXXX"
+    )
+}
+
 /// Verifica si un año de 2 dígitos es bisiesto (considerando siglo 1900-2099)
 fn is_leap_year(yy: u32) -> bool {
     // Si yy es divisible por 4, en el rango 1901-2099 es bisiesto (2000 fue bisiesto)
@@ -710,6 +734,21 @@ pub fn validate_registro_obra(obra: &str) -> Result<RegistroObraInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_generic_sat_identifier() {
+        // Genéricos del SAT: los comparten varias personas, nunca son clave de identidad
+        assert!(is_generic_sat_identifier("XAXX010101000"));
+        assert!(is_generic_sat_identifier("xaxx-010101-000"));
+        assert!(is_generic_sat_identifier("XAXX 010101 000"));
+        assert!(is_generic_sat_identifier("XEXX010101HNEXXXA4"));
+
+        // RFC/CURP reales: sí identifican a una persona
+        assert!(!is_generic_sat_identifier("JIFA981012MCLMNL01"));
+        assert!(!is_generic_sat_identifier("CULM980326HPLRNG00"));
+        assert!(!is_generic_sat_identifier("GON2110075C9"));
+        assert!(!is_generic_sat_identifier(""));
+    }
 
     #[test]
     fn test_valid_rfc_moral() {

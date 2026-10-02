@@ -1,0 +1,2092 @@
+import { ScrollView, LineEdit, Button, ComboBox } from "std-widgets.slint";
+import { AppData, AppLogic, CalendarDayCell, CalendarHolidayItem, CalendarRevisionItem } from "models.slint";
+import { DatePickerField } from "date_picker.slint";
+
+export component CalendarioView inherits Rectangle {
+    background: #f8fafc;
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 16px;
+
+        // 1. Header Banner & KPIs
+        Rectangle {
+            height: 80px;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                alignment: space-between;
+
+                // Título y Subtítulo
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 10px;
+                        background: #1e3a8a;
+                        y: (parent.height - self.height) / 2;
+
+                        Text {
+                            text: "📅";
+                            font-size: 24px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 3px;
+
+                        Text {
+                            text: "Calendario Fiscal & Revisiones Patronales IMSS";
+                            font-size: 19px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+
+                        Text {
+                            text: "Cálculo exacto de plazos legales en días hábiles (15d, 40d, 120d, 10d), días inhábiles IMSS y cronograma por revisión.";
+                            font-size: 12px;
+                            color: #64748b;
+                        }
+                    }
+                }
+
+                // KPIs & Botones de Acción
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+
+                    // KPI Días Festivos
+                    Rectangle {
+                        height: 44px;
+                        border-radius: 8px;
+                        background: #fef3c7;
+                        border-width: 1px;
+                        border-color: #fde68a;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            alignment: center;
+                            Text { text: "🎉"; font-size: 16px; vertical-alignment: center; }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 1px;
+                                Text {
+                                    text: AppData.cal_total_holidays_count + " Inhábiles IMSS";
+                                    font-size: 12.5px;
+                                    font-weight: 800;
+                                    color: #92400e;
+                                }
+                                Text {
+                                    text: "Días festivos oficiales";
+                                    font-size: 10px;
+                                    color: #b45309;
+                                }
+                            }
+                        }
+                    }
+
+                    // KPI Revisiones
+                    Rectangle {
+                        height: 44px;
+                        border-radius: 8px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            alignment: center;
+                            Text { text: "📋"; font-size: 16px; vertical-alignment: center; }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 1px;
+                                Text {
+                                    text: AppData.cal_total_revisions_count + " Revisiones";
+                                    font-size: 12.5px;
+                                    font-weight: 800;
+                                    color: #1e40af;
+                                }
+                                Text {
+                                    text: "En seguimiento";
+                                    font-size: 10px;
+                                    color: #3b82f6;
+                                }
+                            }
+                        }
+                    }
+
+                    // Botón Agregar Día Festivo
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 8px;
+                        background: btn_add_hol.has-hover ? #1d4ed8 : #1e3a8a;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "➕";
+                                font-size: 13px;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Agregar Día Festivo";
+                                font-size: 12.5px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_add_hol := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_open_add_holiday_modal(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Barra de Navegación de Vistas y Mes
+        Rectangle {
+            height: 52px;
+            border-radius: 10px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                alignment: space-between;
+
+                // Tabs: Cuadrícula Calendario vs Catálogo Festivos
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    // Tab Cuadrícula
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: AppData.cal_active_tab == 0 ? #1e3a8a : (tab_cal.has-hover ? #f1f5f9 : transparent);
+                        border-width: AppData.cal_active_tab == 0 ? 0px : 1px;
+                        border-color: #cbd5e1;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "🗓️";
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Cuadrícula Calendario";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: AppData.cal_active_tab == 0 ? #ffffff : #334155;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        tab_cal := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_switch_tab(0); }
+                        }
+                    }
+
+                    // Tab Catálogo Festivos
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: AppData.cal_active_tab == 1 ? #1e3a8a : (tab_fest.has-hover ? #f1f5f9 : transparent);
+                        border-width: AppData.cal_active_tab == 1 ? 0px : 1px;
+                        border-color: #cbd5e1;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "📜";
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Catálogo Días Festivos IMSS";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: AppData.cal_active_tab == 1 ? #ffffff : #334155;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        tab_fest := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_switch_tab(1); }
+                        }
+                    }
+                }
+
+                // Navegación de Mes/Año (cuando está en Cuadrícula)
+                if AppData.cal_active_tab == 0 : HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+
+                    // Botón Mes Anterior
+                    Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_prev.has-hover ? #e2e8f0 : #f1f5f9;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+                        y: (parent.height - self.height) / 2;
+
+                        Text {
+                            text: "◀";
+                            font-size: 11px;
+                            color: #334155;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        btn_prev := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_prev_month(); }
+                        }
+                    }
+
+                    // Mes y Año Actual
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: #f8fafc;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "📆";
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: AppData.cal_month_name;
+                                font-size: 14px;
+                                font-weight: 800;
+                                color: #0f172a;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Botón Mes Siguiente
+                    Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_next.has-hover ? #e2e8f0 : #f1f5f9;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+                        y: (parent.height - self.height) / 2;
+
+                        Text {
+                            text: "▶";
+                            font-size: 11px;
+                            color: #334155;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        btn_next := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_next_month(); }
+                        }
+                    }
+
+                    // Botón Hoy
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_today.has-hover ? #dbeafe : #eff6ff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            alignment: center;
+
+                            Text {
+                                text: "Ir a Hoy";
+                                font-size: 11.5px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_today := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_today(); }
+                        }
+                    }
+
+                    // Chips de Año Rápido
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: center;
+
+                        Rectangle {
+                            height: 28px;
+                            border-radius: 4px;
+                            background: AppData.cal_view_year == 2024 ? #1e3a8a : (y24.has-hover ? #f1f5f9 : transparent);
+                            y: (parent.height - self.height) / 2;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                alignment: center;
+                                Text { text: "2024"; font-size: 11px; font-weight: 700; color: AppData.cal_view_year == 2024 ? #ffffff : #64748b; vertical-alignment: center; }
+                            }
+                            y24 := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.cal_set_year(2024); } }
+                        }
+                        Rectangle {
+                            height: 28px;
+                            border-radius: 4px;
+                            background: AppData.cal_view_year == 2025 ? #1e3a8a : (y25.has-hover ? #f1f5f9 : transparent);
+                            y: (parent.height - self.height) / 2;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                alignment: center;
+                                Text { text: "2025"; font-size: 11px; font-weight: 700; color: AppData.cal_view_year == 2025 ? #ffffff : #64748b; vertical-alignment: center; }
+                            }
+                            y25 := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.cal_set_year(2025); } }
+                        }
+                        Rectangle {
+                            height: 28px;
+                            border-radius: 4px;
+                            background: AppData.cal_view_year == 2026 ? #1e3a8a : (y26.has-hover ? #f1f5f9 : transparent);
+                            y: (parent.height - self.height) / 2;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                alignment: center;
+                                Text { text: "2026"; font-size: 11px; font-weight: 700; color: AppData.cal_view_year == 2026 ? #ffffff : #64748b; vertical-alignment: center; }
+                            }
+                            y26 := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.cal_set_year(2026); } }
+                        }
+                        Rectangle {
+                            height: 28px;
+                            border-radius: 4px;
+                            background: AppData.cal_view_year == 2027 ? #1e3a8a : (y27.has-hover ? #f1f5f9 : transparent);
+                            y: (parent.height - self.height) / 2;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                alignment: center;
+                                Text { text: "2027"; font-size: 11px; font-weight: 700; color: AppData.cal_view_year == 2027 ? #ffffff : #64748b; vertical-alignment: center; }
+                            }
+                            y27 := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.cal_set_year(2027); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. CUERPO PRINCIPAL: VISTA TAB 0 (CUADRÍCULA DE CALENDARIO + TIMELINE DE REVISIÓN)
+        if AppData.cal_active_tab == 0 : HorizontalLayout {
+            spacing: 16px;
+            vertical-stretch: 1;
+
+            // Panel Izquierdo: CUADRÍCULA DEL CALENDARIO (Grande y responsiva)
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 8px;
+
+                // Fila de Encabezados de Días (Lunes a Domingo)
+                HorizontalLayout {
+                    spacing: 6px;
+                    height: 32px;
+
+                    Rectangle { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; border-radius: 6px; background: #e2e8f0; Text { text: "LUNES"; font-size: 11px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; border-radius: 6px; background: #e2e8f0; Text { text: "MARTES"; font-size: 11px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; border-radius: 6px; background: #e2e8f0; Text { text: "MIÉRCOLES"; font-size: 11px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; border-radius: 6px; background: #e2e8f0; Text { text: "JUEVES"; font-size: 11px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; border-radius: 6px; background: #e2e8f0; Text { text: "VIERNES"; font-size: 11px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; border-radius: 6px; background: #e0f2fe; Text { text: "SÁBADO"; font-size: 11px; font-weight: 800; color: #0369a1; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; border-radius: 6px; background: #fee2e2; Text { text: "DOMINGO"; font-size: 11px; font-weight: 800; color: #b91c1c; horizontal-alignment: center; vertical-alignment: center; } }
+                }
+
+                // Matriz de 6 Filas x 7 Días (42 celdas calculadas en Rust)
+                VerticalLayout {
+                    spacing: 6px;
+                    vertical-stretch: 1;
+
+                    for row_idx in 6 : HorizontalLayout {
+                        spacing: 6px;
+                        vertical-stretch: 1;
+
+                        for col_idx in 7 : Rectangle {
+                            property <int> cell_index: row_idx * 7 + col_idx;
+                            property <CalendarDayCell> cell: AppData.cal_day_cells[cell_index];
+
+                            horizontal-stretch: 1;
+                            preferred-width: 0px;
+                            min-width: 0px;
+                            vertical-stretch: 1;
+                            min-height: 84px;
+                            border-radius: 8px;
+                            clip: true;
+
+                            // Fondo condicional
+                            background: cell.is_highlighted ? (cell_touch.has-hover ? #e0f2fe : #f0f9ff) :
+                                        (cell.is_today ? (cell_touch.has-hover ? #dbeafe : #eff6ff) :
+                                        (cell.is_holiday ? (cell_touch.has-hover ? #fef3c7 : #fffbeb) :
+                                        (cell.is_weekend ? #f8fafc :
+                                        (cell_touch.has-hover ? #f1f5f9 : #ffffff))));
+
+                            // Borde condicional
+                            border-width: cell.is_highlighted ? 2px : (cell.is_today ? 2px : 1px);
+                            border-color: cell.is_highlighted ? cell.highlight_color :
+                                         (cell.is_today ? #2563eb :
+                                         (cell.is_holiday ? #fde68a : #e2e8f0));
+
+                            // Contenido de la Celda del Día
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 4px;
+                                alignment: space-between;
+
+                                // Encabezado de la celda: Número del día y badges de estado
+                                HorizontalLayout {
+                                    alignment: space-between;
+
+                                    // Número de día
+                                    Text {
+                                        text: "" + cell.day_number;
+                                        font-size: cell.is_today ? 13.5px : 12px;
+                                        font-weight: cell.is_today || cell.is_highlighted ? 800 : 600;
+                                        color: !cell.is_current_month ? #94a3b8 :
+                                               (cell.is_today ? #1d4ed8 :
+                                               (col_idx == 6 ? #dc2626 : #0f172a));
+                                        vertical-alignment: center;
+                                    }
+
+                                    // Indicador "HOY"
+                                    if cell.is_today : Rectangle {
+                                        height: 18px;
+                                        border-radius: 4px;
+                                        background: #2563eb;
+                                        HorizontalLayout {
+                                            padding-left: 5px;
+                                            padding-right: 5px;
+                                            alignment: center;
+                                            Text {
+                                                text: "HOY";
+                                                font-size: 9px;
+                                                font-weight: 800;
+                                                color: #ffffff;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Si tiene eventos / festivos / hitos
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    alignment: end;
+
+                                    // Indicador de Día Festivo IMSS (si aplica)
+                                    if cell.is_holiday : Rectangle {
+                                        height: 18px;
+                                        border-radius: 4px;
+                                        background: #fef3c7;
+                                        border-width: 1px;
+                                        border-color: #fde68a;
+                                        clip: true;
+
+                                        HorizontalLayout {
+                                            padding-left: 4px;
+                                            padding-right: 4px;
+                                            spacing: 3px;
+                                            alignment: start;
+                                            Text { text: "🎉"; font-size: 8.5px; vertical-alignment: center; }
+                                            Text {
+                                                text: cell.holiday_motivo != "" ? cell.holiday_motivo : "Inhábil IMSS";
+                                                font-size: 8.5px;
+                                                font-weight: 700;
+                                                color: #92400e;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Si hay resumen compacto (cuando hay muchos eventos)
+                                    if cell.summary_label != "" : Rectangle {
+                                        height: 18px;
+                                        border-radius: 3px;
+                                        background: #eff6ff;
+                                        border-width: 1px;
+                                        border-color: #bfdbfe;
+                                        clip: true;
+
+                                        HorizontalLayout {
+                                            padding-left: 4px;
+                                            padding-right: 4px;
+                                            alignment: center;
+                                            Text {
+                                                text: cell.summary_label;
+                                                font-size: 8.5px;
+                                                font-weight: 800;
+                                                color: #1e40af;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Si no hay summary_label pero sí badge1
+                                    if cell.summary_label == "" && cell.badge1_label != "" : Rectangle {
+                                        height: 18px;
+                                        border-radius: 3px;
+                                        background: cell.badge1_color_bg;
+                                        clip: true;
+
+                                        HorizontalLayout {
+                                            padding-left: 4px;
+                                            padding-right: 4px;
+                                            spacing: 3px;
+                                            alignment: start;
+                                            Rectangle {
+                                                width: 4px;
+                                                height: 4px;
+                                                border-radius: 2px;
+                                                background: cell.badge1_color_fg;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+                                            Text {
+                                                text: cell.badge1_label;
+                                                font-size: 8.5px;
+                                                font-weight: 700;
+                                                color: cell.badge1_color_fg;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Indicador de más hitos si no hay summary
+                                    if cell.summary_label == "" && cell.more_count > 0 : Text {
+                                        text: "+" + cell.more_count + " más";
+                                        font-size: 8.5px;
+                                        font-weight: 700;
+                                        color: #64748b;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                            }
+
+                            cell_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.cal_day_clicked(cell.date_iso); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Panel Derecho: INSPECTOR DE REVISIÓN / TIMELINE DE HITOS COLOREADOS
+            Rectangle {
+                width: 380px;
+                border-radius: 12px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 14px;
+
+                    // Si una revisión está seleccionada -> Mostramos su Cronograma Completo de Hitos
+                    if AppData.cal_has_selected_revision : VerticalLayout {
+                        spacing: 12px;
+                        vertical-stretch: 1;
+
+                        // Cabecera de la Revisión Seleccionada
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            VerticalLayout {
+                                spacing: 2px;
+                                horizontal-stretch: 1;
+
+                                Text {
+                                    text: AppData.cal_selected_revision.nombre;
+                                    font-size: 15px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: "Folio: " + AppData.cal_selected_revision.folio + " • " + AppData.cal_selected_revision.cliente_nombre;
+                                    font-size: 11.5px;
+                                    color: #475569;
+                                    overflow: elide;
+                                }
+                            }
+
+                            // Botón Limpiar Selección
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 14px;
+                                background: btn_clear_rev.has-hover ? #fee2e2 : #f1f5f9;
+                                y: (parent.height - self.height) / 2;
+
+                                Text {
+                                    text: "✕";
+                                    font-size: 12px;
+                                    font-weight: 800;
+                                    color: btn_clear_rev.has-hover ? #dc2626 : #64748b;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                btn_clear_rev := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { AppLogic.cal_clear_selected_revision(); }
+                                }
+                            }
+                        }
+
+                        // Badge Estatus y Registro Patronal
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                height: 24px;
+                                border-radius: 4px;
+                                background: #eff6ff;
+                                border-width: 1px;
+                                border-color: #bfdbfe;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text {
+                                        text: "RP: " + AppData.cal_selected_revision.rp_numero;
+                                        font-size: 10.5px;
+                                        font-weight: 700;
+                                        color: #1e40af;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 24px;
+                                border-radius: 4px;
+                                background: #ecfdf5;
+                                border-width: 1px;
+                                border-color: #a7f3d0;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text {
+                                        text: AppData.cal_selected_revision.estatus_imss;
+                                        font-size: 10.5px;
+                                        font-weight: 700;
+                                        color: #065f46;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #e2e8f0; }
+
+                        Text {
+                            text: "CRONOGRAMA Y CÓDIGO DE COLORES:";
+                            font-size: 11px;
+                            font-weight: 800;
+                            color: #64748b;
+                            letter-spacing: 0.5px;
+                        }
+
+                        // Lista vertical de hitos coloreados exactamente según los requisitos del usuario
+                        ScrollView {
+                            vertical-stretch: 1;
+
+                            VerticalLayout {
+                                spacing: 8px;
+
+                                // 1. Fecha Entrega IMSS (Azul #2563eb)
+                                Rectangle {
+                                    border-radius: 8px;
+                                    background: #eff6ff;
+                                    border-width: 1px;
+                                    border-color: #bfdbfe;
+
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        spacing: 10px;
+                                        Rectangle { width: 4px; border-radius: 2px; background: #2563eb; }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text { text: "Fecha Entrega IMSS"; font-size: 11px; font-weight: 700; color: #1e40af; }
+                                            Text {
+                                                text: AppData.cal_selected_revision.f_entrega_imss != "" ? AppData.cal_selected_revision.f_entrega_imss : "Pendiente";
+                                                font-size: 13.5px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                            }
+                                            Text { text: "Base de inicio de plazos legales"; font-size: 10px; color: #64748b; }
+                                        }
+                                    }
+                                }
+
+                                // 2. Fecha Máxima Aprobación IMSS (Cian #0284c7)
+                                Rectangle {
+                                    border-radius: 8px;
+                                    background: #f0f9ff;
+                                    border-width: 1px;
+                                    border-color: #bae6fd;
+
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        spacing: 10px;
+                                        Rectangle { width: 4px; border-radius: 2px; background: #0284c7; }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text { text: "Fecha Máx. Aprobación IMSS (Auto: 15 días hábiles)"; font-size: 11px; font-weight: 700; color: #0369a1; }
+                                            Text {
+                                                text: AppData.cal_selected_revision.f_max_aprobacion_imss != "" ? AppData.cal_selected_revision.f_max_aprobacion_imss : "Pendiente";
+                                                font-size: 13.5px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                            }
+                                            Text { text: "Calculado sin fines de semana ni festivos IMSS"; font-size: 10px; color: #64748b; }
+                                        }
+                                    }
+                                }
+
+                                // 3. Fecha Aprobación IMSS (Verde Esmeralda #059669)
+                                Rectangle {
+                                    border-radius: 8px;
+                                    background: #ecfdf5;
+                                    border-width: 1px;
+                                    border-color: #a7f3d0;
+
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        spacing: 10px;
+                                        Rectangle { width: 4px; border-radius: 2px; background: #059669; }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text { text: "Fecha Aprobación IMSS"; font-size: 11px; font-weight: 700; color: #047857; }
+                                            Text {
+                                                text: AppData.cal_selected_revision.f_aprobacion_imss != "" ? AppData.cal_selected_revision.f_aprobacion_imss : "Pendiente";
+                                                font-size: 13.5px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                            }
+                                            Text { text: "Fecha real en la que fue aprobada por el Instituto"; font-size: 10px; color: #64748b; }
+                                        }
+                                    }
+                                }
+
+                                // 4. Fecha Máxima Entrega Revisión (Púrpura #7c3aed)
+                                Rectangle {
+                                    border-radius: 8px;
+                                    background: #f5f3ff;
+                                    border-width: 1px;
+                                    border-color: #ddd6fe;
+
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        spacing: 10px;
+                                        Rectangle { width: 4px; border-radius: 2px; background: #7c3aed; }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text { text: "Fecha Máx. Entrega Revisión (Auto: 40 días hábiles)"; font-size: 11px; font-weight: 700; color: #6d28d9; }
+                                            Text {
+                                                text: AppData.cal_selected_revision.f_max_entrega_revision != "" ? AppData.cal_selected_revision.f_max_entrega_revision : "Pendiente";
+                                                font-size: 13.5px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                            }
+                                            Text { text: "A partir de aprobación IMSS, sin fines de semana ni festivos"; font-size: 10px; color: #64748b; }
+                                        }
+                                    }
+                                }
+
+                                // 5. Fecha Entrega Revisión (Teal #0d9488)
+                                Rectangle {
+                                    border-radius: 8px;
+                                    background: #f0fdfa;
+                                    border-width: 1px;
+                                    border-color: #99f6e4;
+
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        spacing: 10px;
+                                        Rectangle { width: 4px; border-radius: 2px; background: #0d9488; }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text { text: "Fecha Entrega Revisión"; font-size: 11px; font-weight: 700; color: #0f766e; }
+                                            Text {
+                                                text: AppData.cal_selected_revision.f_entrega_revision != "" ? AppData.cal_selected_revision.f_entrega_revision : "Pendiente";
+                                                font-size: 13.5px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                            }
+                                            Text { text: "Fecha real de entrega del dictamen/revisión"; font-size: 10px; color: #64748b; }
+                                        }
+                                    }
+                                }
+
+                                // 6. Fecha Máxima Entrega IMSS (Rosa/Rojo #e11d48)
+                                Rectangle {
+                                    border-radius: 8px;
+                                    background: #fff1f2;
+                                    border-width: 1px;
+                                    border-color: #fecdd3;
+
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        spacing: 10px;
+                                        Rectangle { width: 4px; border-radius: 2px; background: #e11d48; }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text { text: "Fecha Máx. Entrega IMSS (Auto: 120 días hábiles)"; font-size: 11px; font-weight: 700; color: #be123c; }
+                                            Text {
+                                                text: AppData.cal_selected_revision.f_max_entrega_imss != "" ? AppData.cal_selected_revision.f_max_entrega_imss : "Pendiente";
+                                                font-size: 13.5px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                            }
+                                            Text { text: "A partir de entrega de revisión, sin festivos"; font-size: 10px; color: #64748b; }
+                                        }
+                                    }
+                                }
+
+                                // 7. Fecha Aprobación Prórroga (Naranja #ea580c)
+                                Rectangle {
+                                    border-radius: 8px;
+                                    background: #fff7ed;
+                                    border-width: 1px;
+                                    border-color: #fed7aa;
+
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        spacing: 10px;
+                                        Rectangle { width: 4px; border-radius: 2px; background: #ea580c; }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text { text: "Fecha Aprobación Prórroga"; font-size: 11px; font-weight: 700; color: #c2410c; }
+                                            Text {
+                                                text: AppData.cal_selected_revision.f_aprobacion_prorroga != "" ? AppData.cal_selected_revision.f_aprobacion_prorroga : (AppData.cal_selected_revision.pidio_prorroga ? "Prórroga Solicitada" : "No solicitada");
+                                                font-size: 13.5px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                            }
+                                            Text { text: "Ampliación de plazo otorgada"; font-size: 10px; color: #64748b; }
+                                        }
+                                    }
+                                }
+
+                                // 8. Fecha Entrega con Prórroga (Fucsia #c026d3)
+                                Rectangle {
+                                    border-radius: 8px;
+                                    background: #fdf4ff;
+                                    border-width: 1px;
+                                    border-color: #f5d0fe;
+
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        spacing: 10px;
+                                        Rectangle { width: 4px; border-radius: 2px; background: #c026d3; }
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            Text { text: "Fecha Entrega con Prórroga (Auto: +10 días hábiles)"; font-size: 11px; font-weight: 700; color: #a21caf; }
+                                            Text {
+                                                text: AppData.cal_selected_revision.f_entrega_con_prorroga != "" ? AppData.cal_selected_revision.f_entrega_con_prorroga : "Pendiente";
+                                                font-size: 13.5px;
+                                                font-weight: 800;
+                                                color: #0f172a;
+                                            }
+                                            Text { text: "A partir de Fecha Máx. Entrega Revisión"; font-size: 10px; color: #64748b; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Botón Ir a Pantalla Revisiones
+                        Rectangle {
+                            height: 38px;
+                            border-radius: 8px;
+                            background: btn_goto_rev.has-hover ? #f1f5f9 : #f8fafc;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: center;
+
+                                Text { text: "📋"; font-size: 13px; vertical-alignment: center; }
+                                Text {
+                                    text: "Ver Detalles en Pantalla de Revisiones (F4)";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: #334155;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            btn_goto_rev := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.cal_go_to_revision_view(AppData.cal_selected_revision.id); }
+                            }
+                        }
+                    }
+
+                    // Si NO hay revisión seleccionada -> Mostramos Selector y Lista de Revisiones
+                    if !AppData.cal_has_selected_revision : VerticalLayout {
+                        spacing: 12px;
+                        vertical-stretch: 1;
+
+                        Text {
+                            text: "Seleccionar Revisión para Resaltar Cronograma:";
+                            font-size: 13.5px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+
+                        Text {
+                            text: "Haga clic en una revisión de la lista para colorear sus fechas y plazos legales en la cuadrícula mensual.";
+                            font-size: 11.5px;
+                            color: #64748b;
+                        }
+
+                        // Buscador de Revisiones
+                        Rectangle {
+                            height: 38px;
+                            border-radius: 8px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+                                alignment: center;
+
+                                Text { text: "🔍"; font-size: 13px; vertical-alignment: center; }
+
+                                LineEdit {
+                                    placeholder-text: "Buscar por nombre, folio o cliente...";
+                                    text: AppData.cal_search_text;
+                                    edited(val) => { AppLogic.cal_search_revisions(val); }
+                                }
+                            }
+                        }
+
+                        // Lista de Revisiones
+                        ScrollView {
+                            vertical-stretch: 1;
+
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 8px;
+
+                                for rev in AppData.cal_revisions_list : Rectangle {
+                                    height: 105px;
+                                    border-radius: 8px;
+                                    background: rev_touch.has-hover ? #eff6ff : #f8fafc;
+                                    border-width: 1px;
+                                    border-color: rev_touch.has-hover ? #93c5fd : #e2e8f0;
+
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 4px;
+
+                                        HorizontalLayout {
+                                            alignment: space-between;
+
+                                            Text {
+                                                text: rev.folio != "" && rev.folio != "S/F" ? rev.folio : rev.nombre;
+                                                font-size: 13px;
+                                                font-weight: 800;
+                                                color: #1e3a8a;
+                                                overflow: elide;
+                                            }
+
+                                            Rectangle {
+                                                height: 20px;
+                                                border-radius: 4px;
+                                                background: #dbeafe;
+                                                HorizontalLayout {
+                                                    padding-left: 6px;
+                                                    padding-right: 6px;
+                                                    alignment: center;
+                                                    Text {
+                                                        text: "RP: " + rev.rp_numero;
+                                                        font-size: 10px;
+                                                        font-weight: 700;
+                                                        color: #1e40af;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: rev.nombre;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: #334155;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            text: "Cliente: " + rev.cliente_nombre;
+                                            font-size: 11px;
+                                            color: #64748b;
+                                            overflow: elide;
+                                        }
+
+                                        HorizontalLayout {
+                                            alignment: space-between;
+
+                                            Text {
+                                                text: rev.f_entrega_imss != "" ? ("Entrega IMSS: " + rev.f_entrega_imss) : "Sin fecha entrega";
+                                                font-size: 10.5px;
+                                                font-weight: 600;
+                                                color: #2563eb;
+                                            }
+
+                                            Text {
+                                                text: rev.estatus;
+                                                font-size: 10.5px;
+                                                font-weight: 700;
+                                                color: #059669;
+                                            }
+                                        }
+                                    }
+
+                                    rev_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.cal_select_revision(rev.id); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. CUERPO PRINCIPAL: VISTA TAB 1 (CATÁLOGO DE DÍAS FESTIVOS IMSS)
+        if AppData.cal_active_tab == 1 : Rectangle {
+            vertical-stretch: 1;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "Catálogo Maestro de Días Inhábiles IMSS & Días Festivos";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: "Los días festivos no cuentan como días hábiles para el cálculo legal. Solo se pueden eliminar los creados por usuarios.";
+                            font-size: 12px;
+                            color: #64748b;
+                        }
+                    }
+
+                    // Selector de Año mediante Flechas, Buscador y Botón Agregar
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: end;
+
+                        // Navegación de Año con Flechas
+                        Rectangle {
+                            height: 38px;
+                            border-radius: 8px;
+                            background: #f1f5f9;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                spacing: 8px;
+                                alignment: center;
+
+                                // Flecha Izquierda
+                                Rectangle {
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 4px;
+                                    background: btn_yr_prev.has-hover ? #e2e8f0 : transparent;
+                                    Text { text: "◀"; font-size: 11px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                    btn_yr_prev := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.cal_holiday_catalog_prev_year(); } }
+                                }
+
+                                Text {
+                                    text: "Año " + AppData.cal_holiday_catalog_year + " (" + AppData.cal_holiday_catalog_count + " inhábiles)";
+                                    font-size: 12.5px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                    vertical-alignment: center;
+                                }
+
+                                // Flecha Derecha
+                                Rectangle {
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 4px;
+                                    background: btn_yr_next.has-hover ? #e2e8f0 : transparent;
+                                    Text { text: "▶"; font-size: 11px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                    btn_yr_next := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.cal_holiday_catalog_next_year(); } }
+                                }
+                            }
+                        }
+
+                        // Buscador de Festivos
+                        Rectangle {
+                            width: 220px;
+                            height: 38px;
+                            border-radius: 8px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
+                                alignment: center;
+                                Text { text: "🔍"; font-size: 12px; vertical-alignment: center; }
+                                LineEdit {
+                                    placeholder-text: "Buscar festivo...";
+                                    text: AppData.cal_holiday_search_text;
+                                    edited(val) => { AppLogic.cal_holiday_search(val); }
+                                }
+                            }
+                        }
+
+                        // Botón Agregar Nuevo Festivo
+                        Rectangle {
+                            height: 38px;
+                            border-radius: 8px;
+                            background: btn_add_hol2.has-hover ? #1d4ed8 : #1e3a8a;
+
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 6px;
+                                alignment: center;
+                                Text { text: "➕"; font-size: 13px; color: #ffffff; vertical-alignment: center; }
+                                Text { text: "Agregar Nuevo Festivo"; font-size: 12.5px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                            }
+
+                            btn_add_hol2 := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.cal_open_add_holiday_modal(); }
+                            }
+                        }
+                    }
+                }
+
+                // Encabezados de Tabla
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: #f1f5f9;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 16px;
+
+                        Rectangle { width: 140px; Text { text: "FECHA"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                        Rectangle { width: 140px; Text { text: "DÍA"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                        Rectangle { horizontal-stretch: 1; min-width: 150px; Text { text: "MOTIVO / FESTIVIDAD"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                        Rectangle { width: 210px; Text { text: "TIPO / ORIGEN"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                        Rectangle { width: 130px; Text { text: "ACCIONES"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                    }
+                }
+
+                // Lista de Días Festivos
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 4px;
+
+                        if AppData.cal_holidays_list.length == 0 : Rectangle {
+                            height: 180px;
+                            border-radius: 8px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 8px;
+                                Text { text: "📅"; font-size: 32px; horizontal-alignment: center; }
+                                Text {
+                                    text: "No se encontraron días inhábiles o festivos para el año " + AppData.cal_holiday_catalog_year;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Usa las flechas para explorar otros años o haz clic en \"+ Agregar Nuevo Festivo\".";
+                                    font-size: 11.5px;
+                                    color: #94a3b8;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        for hol in AppData.cal_holidays_list : Rectangle {
+                            height: 48px;
+                            border-radius: 6px;
+                            background: hol_touch.has-hover ? #f8fafc : (hol.es_sistema ? #ffffff : #fffbeb);
+                            border-width: 1px;
+                            border-color: hol.es_sistema ? #e2e8f0 : #fde68a;
+
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 16px;
+
+                                // Fecha
+                                Rectangle {
+                                    width: 140px;
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        alignment: start;
+                                        Text { text: "📅"; font-size: 12px; vertical-alignment: center; }
+                                        Text {
+                                            text: hol.fecha_str;
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            color: #0f172a;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                // Día de la semana
+                                Rectangle {
+                                    width: 140px;
+                                    Text {
+                                        text: hol.dia_semana;
+                                        font-size: 12.5px;
+                                        font-weight: 700;
+                                        color: #475569;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Motivo
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    min-width: 150px;
+                                    Text {
+                                        text: hol.motivo;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: #1e293b;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Origen: Sistema vs Usuario
+                                Rectangle {
+                                    width: 210px;
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        Rectangle {
+                                            height: 26px;
+                                            border-radius: 13px;
+                                            background: hol.es_sistema ? #f1f5f9 : #ecfdf5;
+                                            border-width: 1px;
+                                            border-color: hol.es_sistema ? #cbd5e1 : #a7f3d0;
+                                            y: (parent.height - self.height) / 2;
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                spacing: 5px;
+                                                alignment: center;
+                                                Text {
+                                                    text: hol.es_sistema ? "🔒" : "👤";
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                }
+                                                Text {
+                                                    text: hol.es_sistema ? "Oficial / Sistema" : "Usuario (Personalizado)";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: hol.es_sistema ? #475569 : #15803d;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Acciones
+                                Rectangle {
+                                    width: 130px;
+                                    HorizontalLayout {
+                                        alignment: center;
+
+                                        // Si es del sistema: No se puede eliminar
+                                        if hol.es_sistema : Rectangle {
+                                            height: 26px;
+                                            border-radius: 6px;
+                                            background: #f8fafc;
+                                            border-width: 1px;
+                                            border-color: #e2e8f0;
+                                            y: (parent.height - self.height) / 2;
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                alignment: center;
+                                                Text {
+                                                    text: "Protegido";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #94a3b8;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+
+                                        // Si es del usuario: Botón de eliminar
+                                        if !hol.es_sistema : Rectangle {
+                                            height: 28px;
+                                            border-radius: 6px;
+                                            background: btn_del_hol.has-hover ? #dc2626 : #fee2e2;
+                                            border-width: 1px;
+                                            border-color: btn_del_hol.has-hover ? #b91c1c : #fca5a5;
+                                            y: (parent.height - self.height) / 2;
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                spacing: 5px;
+                                                alignment: center;
+                                                Text { text: "🗑️"; font-size: 11px; vertical-alignment: center; }
+                                                Text {
+                                                    text: "Eliminar";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: btn_del_hol.has-hover ? #ffffff : #b91c1c;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            btn_del_hol := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { AppLogic.cal_prompt_delete_holiday(hol.id, hol.motivo, hol.fecha_str); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            hol_touch := TouchArea {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. MODAL: AGREGAR DÍA FESTIVO
+    if AppData.cal_show_add_holiday_modal : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: #00000066;
+
+        Rectangle {
+            width: 460px;
+            height: 320px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: #ffffff;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                alignment: space-between;
+
+                // Cabecera Modal
+                HorizontalLayout {
+                    alignment: space-between;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "🎉"; font-size: 20px; vertical-alignment: center; }
+                        Text {
+                            text: "Nuevo Día Festivo IMSS";
+                            font-size: 17px;
+                            font-weight: 800;
+                            color: #0f172a;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: btn_close_add_hol.has-hover ? #fee2e2 : #f1f5f9;
+                        Text {
+                            text: "✕";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #64748b;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_close_add_hol := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_close_add_holiday_modal(); }
+                        }
+                    }
+                }
+
+                // Campos
+                VerticalLayout {
+                    spacing: 12px;
+
+                    // Campo Fecha
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text { text: "Fecha del Festivo (DD/MM/YYYY):"; font-size: 11.5px; font-weight: 700; color: #334155; }
+                        DatePickerField {
+                            date-val <=> AppData.cal_new_holiday_date;
+                            placeholder-text: "DD/MM/YYYY";
+                        }
+                    }
+
+                    // Campo Motivo
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text { text: "Motivo / Festividad:"; font-size: 11.5px; font-weight: 700; color: #334155; }
+                        Rectangle {
+                            height: 36px;
+                            border-radius: 6px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                LineEdit {
+                                    placeholder-text: "ej. Suspensión Local de Labores";
+                                    text <=> AppData.cal_new_holiday_motivo;
+                                }
+                            }
+                        }
+                    }
+
+                    // Mensaje de Error (si fecha duplicada o vacía)
+                    if AppData.cal_holiday_error_msg != "" : Rectangle {
+                        height: 32px;
+                        border-radius: 6px;
+                        background: #fee2e2;
+                        border-width: 1px;
+                        border-color: #fca5a5;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            alignment: start;
+                            Text { text: "⚠️"; font-size: 12px; vertical-alignment: center; }
+                            Text {
+                                text: AppData.cal_holiday_error_msg;
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #b91c1c;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Botones de acción
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+
+                    Rectangle {
+                        height: 38px;
+                        border-radius: 6px;
+                        background: btn_cancel_add.has-hover ? #e2e8f0 : #f1f5f9;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            alignment: center;
+                            Text {
+                                text: "Cancelar";
+                                font-size: 12.5px;
+                                font-weight: 700;
+                                color: #475569;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_cancel_add := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_close_add_holiday_modal(); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 38px;
+                        border-radius: 6px;
+                        background: btn_save_add.has-hover ? #1d4ed8 : #1e3a8a;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "💾"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                            Text {
+                                text: "Guardar Día Festivo";
+                                font-size: 12.5px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_save_add := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_submit_add_holiday(AppData.cal_new_holiday_date, AppData.cal_new_holiday_motivo); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. MODAL: CONFIRMAR ELIMINACIÓN DE DÍA FESTIVO
+    if AppData.cal_show_delete_holiday_modal : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: #00000066;
+
+        Rectangle {
+            width: 440px;
+            height: 220px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: #ffffff;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    Rectangle {
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 8px;
+                        background: #fee2e2;
+                        Text { text: "⚠️"; font-size: 20px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "¿Eliminar Día Festivo del Usuario?";
+                            font-size: 15px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: "¿Está seguro de eliminar el día festivo '" + AppData.cal_delete_holiday_motivo + "' del " + AppData.cal_delete_holiday_fecha + "? Los plazos en días hábiles se recalcularán automáticamente.";
+                            font-size: 12px;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+
+                    Rectangle {
+                        height: 38px;
+                        border-radius: 6px;
+                        background: btn_cancel_del.has-hover ? #e2e8f0 : #f1f5f9;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            alignment: center;
+                            Text {
+                                text: "Cancelar";
+                                font-size: 12.5px;
+                                font-weight: 700;
+                                color: #475569;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_cancel_del := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_cancel_delete_holiday(); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 38px;
+                        border-radius: 6px;
+                        background: btn_confirm_del.has-hover ? #b91c1c : #dc2626;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "🗑️"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                            Text {
+                                text: "Sí, Eliminar Festivo";
+                                font-size: 12.5px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_confirm_del := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_confirm_delete_holiday(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 7. MODAL DETALLE DE DÍA (Al hacer clic en cualquier día del calendario)
+    if AppData.cal_show_day_detail_modal : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: #00000066;
+
+        Rectangle {
+            width: 580px;
+            height: 520px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 14px;
+            background: #ffffff;
+            drop-shadow-blur: 28px;
+            drop-shadow-color: #00000045;
+
+            VerticalLayout {
+                padding: 22px;
+                spacing: 16px;
+
+                // Cabecera Modal
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            width: 40px;
+                            height: 40px;
+                            border-radius: 10px;
+                            background: #eff6ff;
+                            Text { text: "📅"; font-size: 20px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: AppData.cal_detail_date_weekday + ", " + AppData.cal_detail_date_str;
+                                font-size: 16px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                if AppData.cal_detail_is_today : Rectangle {
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    background: #2563eb;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Text { text: "DÍA DE HOY"; font-size: 9px; font-weight: 800; color: #ffffff; vertical-alignment: center; }
+                                    }
+                                }
+                                if AppData.cal_detail_is_holiday : Rectangle {
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    background: #fef3c7;
+                                    border-width: 1px;
+                                    border-color: #fde68a;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Text { text: "🎉 DÍA INHÁBIL IMSS"; font-size: 9px; font-weight: 800; color: #92400e; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: btn_close_detail.has-hover ? #fee2e2 : #f1f5f9;
+                        Text {
+                            text: "✕";
+                            font-size: 13px;
+                            font-weight: 800;
+                            color: btn_close_detail.has-hover ? #dc2626 : #64748b;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_close_detail := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_close_day_detail_modal(); }
+                        }
+                    }
+                }
+
+                // Cuerpo con scroll
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 12px;
+
+                        // Tarjeta de Día Inhábil IMSS (si aplica)
+                        if AppData.cal_detail_is_holiday : Rectangle {
+                            border-radius: 8px;
+                            background: #fffbeb;
+                            border-width: 1px;
+                            border-color: #fde68a;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 4px;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text { text: "🎉"; font-size: 14px; vertical-alignment: center; }
+                                    Text { text: "Día Festivo Oficial IMSS"; font-size: 12.5px; font-weight: 800; color: #92400e; }
+                                    Rectangle {
+                                        height: 18px;
+                                        border-radius: 4px;
+                                        background: AppData.cal_detail_holiday_is_system ? #e2e8f0 : #dcfce7;
+                                        HorizontalLayout {
+                                            padding-left: 6px;
+                                            padding-right: 6px;
+                                            Text {
+                                                text: AppData.cal_detail_holiday_is_system ? "Por Ley / Oficial" : "Registrado por Usuario";
+                                                font-size: 9.5px;
+                                                font-weight: 700;
+                                                color: AppData.cal_detail_holiday_is_system ? #475569 : #15803d;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: AppData.cal_detail_holiday_motivo;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: #78350f;
+                                }
+                                Text {
+                                    text: "Este día no computa como hábil en el cálculo de plazos legales (15d aprobación, 40d entrega revisión, 120d informe patronal, 10d prórroga).";
+                                    font-size: 10.5px;
+                                    color: #b45309;
+                                }
+                            }
+                        }
+
+                        // Lista de Hitos
+                        if AppData.cal_detail_milestones_count > 0 : VerticalLayout {
+                            spacing: 8px;
+
+                            Text {
+                                text: "Hitos y Plazos Legales en esta fecha (" + AppData.cal_detail_milestones_count + "):";
+                                font-size: 12.5px;
+                                font-weight: 800;
+                                color: #334155;
+                            }
+
+                            for ms in AppData.cal_detail_milestones : Rectangle {
+                                border-radius: 8px;
+                                background: ms.color_bg;
+                                border-width: 1px;
+                                border-color: ms.color_border;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 6px;
+
+                                    HorizontalLayout {
+                                        alignment: space-between;
+
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            Text {
+                                                text: ms.milestone_name;
+                                                font-size: 13px;
+                                                font-weight: 800;
+                                                color: ms.color_fg;
+                                            }
+                                            Text {
+                                                text: "Folio: " + ms.folio + " • RP: " + ms.rp_numero + " • " + ms.cliente_nombre;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                color: #334155;
+                                            }
+                                        }
+
+                                        // Botón Inspeccionar Revisión
+                                        Rectangle {
+                                            height: 28px;
+                                            border-radius: 6px;
+                                            background: btn_insp.has-hover ? ms.color_fg : #ffffff;
+                                            border-width: 1px;
+                                            border-color: ms.color_fg;
+                                            y: (parent.height - self.height) / 2;
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                alignment: center;
+                                                Text {
+                                                    text: "Inspeccionar";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: btn_insp.has-hover ? #ffffff : ms.color_fg;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            btn_insp := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { AppLogic.cal_inspect_revision_from_detail(ms.rev_id); }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: ms.nombre;
+                                        font-size: 11.5px;
+                                        color: #475569;
+                                    }
+
+                                    Text {
+                                        text: ms.milestone_desc;
+                                        font-size: 10.5px;
+                                        color: #64748b;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Si no hay hitos y no es festivo
+                        if AppData.cal_detail_milestones_count == 0 && !AppData.cal_detail_is_holiday : Rectangle {
+                            height: 120px;
+                            border-radius: 8px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 4px;
+                                Text { text: "🗓️"; font-size: 24px; horizontal-alignment: center; }
+                                Text {
+                                    text: "Sin eventos ni plazos programados para este día";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: #64748b;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Puede utilizar el botón inferior para registrar este día como inhábil IMSS si corresponde.";
+                                    font-size: 10.5px;
+                                    color: #94a3b8;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Botones Pie Modal
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    if !AppData.cal_detail_is_holiday : Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_add_from_det.has-hover ? #eff6ff : #ffffff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "➕"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Marcar día como Festivo IMSS";
+                                font-size: 11.5px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_add_from_det := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.cal_close_day_detail_modal();
+                                AppLogic.cal_open_add_holiday_modal();
+                            }
+                        }
+                    }
+
+                    if AppData.cal_detail_is_holiday : Rectangle { width: 10px; }
+
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_close_det_ft.has-hover ? #e2e8f0 : #f1f5f9;
+
+                        HorizontalLayout {
+                            padding-left: 18px;
+                            padding-right: 18px;
+                            alignment: center;
+                            Text {
+                                text: "Cerrar";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_close_det_ft := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cal_close_day_detail_modal(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

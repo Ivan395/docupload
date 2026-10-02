@@ -353,7 +353,7 @@ pub fn save_single_cedula_employee_tx(
     let mut empleados_count = 0;
     let mut liquidaciones_count = 0;
     let mut detalles_count = 0;
-    let registros_obras_count = 0;
+    let mut registros_obras_count = 0;
     let mut vinculaciones_count = 0;
 
     let emp_nombre = emp.nombre.as_deref().map(|s| s.trim().to_uppercase());
@@ -366,7 +366,14 @@ pub fn save_single_cedula_employee_tx(
     let emp_nss = emp.no_seguro_social.as_deref().map(|s| {
         s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()
     });
-    let emp_clave_ubicacion = truncate_str(emp.clave_ubicacion.as_deref(), 50);
+    let emp_clave_ubicacion = truncate_str(emp.clave_ubicacion.as_deref(), 50).filter(|ub| {
+        let clean = ub.trim();
+        !clean.is_empty()
+            && clean != "—"
+            && clean != "-"
+            && !crate::cedulas::employees::is_curp_candidate(clean)
+            && !crate::cedulas::employees::is_rfc_candidate(clean)
+    });
 
     let mut empleado_id: Option<Uuid> = None;
     if let Some(ref nss) = emp_nss {
@@ -382,7 +389,7 @@ pub fn save_single_cedula_employee_tx(
     }
     if empleado_id.is_none() {
         if let Some(ref curp) = emp_curp {
-            if !curp.is_empty() {
+            if !curp.is_empty() && !crate::validation::is_generic_sat_identifier(curp) {
                 let row = tx.query_opt(
                     "SELECT id FROM public.empleados WHERE id_cliente = $1 AND curp = $2 LIMIT 1",
                     &[&ctx.id_cliente, &truncate_str(Some(curp), 18)],
@@ -395,7 +402,7 @@ pub fn save_single_cedula_employee_tx(
     }
     if empleado_id.is_none() {
         if let Some(ref rfc) = emp_rfc {
-            if !rfc.is_empty() {
+            if !rfc.is_empty() && !crate::validation::is_generic_sat_identifier(rfc) {
                 let row = tx.query_opt(
                     "SELECT id FROM public.empleados WHERE id_cliente = $1 AND rfc = $2 LIMIT 1",
                     &[&ctx.id_cliente, &truncate_str(Some(rfc), 13)],
@@ -691,71 +698,148 @@ pub fn save_single_cedula_employee_tx(
     }
 
     // Registros de Obra y Vinculaciones
+    let mut obras_to_process: Vec<(String, i16)> = Vec::new();
     for ro in &emp.registro_obras {
-        let num_obra = truncate_str(Some(&ro.registro_obra), 15).unwrap();
-        if num_obra.trim().is_empty() {
-            continue;
-        }
-
-        let obra_id_opt = tx.query_opt(
-            "SELECT id FROM public.registros_obras WHERE id_revision = $1 AND numero = $2 LIMIT 1",
-            &[&ctx.id_revision, &num_obra],
-        )?;
-
-        if let Some(r) = obra_id_opt {
-            let id_registro_obra: Uuid = r.get(0);
-
-            // Evitar duplicar vinculación obra - liquidación
-            let existing_vinc = tx.query_opt(
-                "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE id_registro_obra = $1 AND id_liquidacion = $2 LIMIT 1",
-                &[&id_registro_obra, &id_liquidacion],
-            )?;
-
-            let dias_vinc = (ro.dias_registro_obra as i16).clamp(1, 31);
-
-            if existing_vinc.is_none() {
-                let id_vinc = Uuid::now_v7();
-                tx.execute(
-                    r#"
-                    INSERT INTO public.vinculaciones_obras_liquidaciones (
-                        id, id_registro_obra, id_liquidacion, dias_registro_obra
-                    ) VALUES ($1, $2, $3, $4)
-                    "#,
-                    &[&id_vinc, &id_registro_obra, &id_liquidacion, &dias_vinc],
-                )?;
-                vinculaciones_count += 1;
+        let num_obra = truncate_str(Some(&ro.registro_obra), 15).unwrap_or_default();
+        let clean_num = num_obra.trim();
+        if !clean_num.is_empty() {
+            match crate::validation::validate_registro_obra(clean_num) {
+                Ok(info) => {
+                    obras_to_process.push((info.clean, (ro.dias_registro_obra as i16).clamp(1, 31)));
+                }
+                Err(err) => {
+                    log::warn!("Ignorando registro de obra no válido desde cédula '{}': {}", clean_num, err);
+                }
             }
-
-            // Asegurar vinculación en reportes_vinculaciones_obras_liquidaciones si aplica
-            if let Some(id_rep_liq) = id_rep_liq_opt {
-                let existing_rep_vinc = tx.query_opt(
-                    "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 LIMIT 1",
-                    &[&id_rep_liq],
-                )?;
-
-                if let Some(erv) = existing_rep_vinc {
-                    let vid: Uuid = erv.get(0);
-                    let _ = tx.execute(
-                        "UPDATE public.reportes_vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
-                        &[&vid, &Some(id_registro_obra), &Some(dias_vinc)],
-                    );
-                } else {
-                    let id_rep_vinc = Uuid::now_v7();
-                    tx.execute(
-                        r#"
-                        INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (
-                            id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra
-                        ) VALUES ($1, $2, $3, $4)
-                        "#,
-                        &[&id_rep_vinc, &Some(id_registro_obra), &id_rep_liq, &Some(dias_vinc)],
-                    )?;
+        }
+    }
+    if obras_to_process.is_empty() {
+        if let Some(ref ub) = emp.clave_ubicacion {
+            let num_obra = truncate_str(Some(ub), 15).unwrap_or_default();
+            let clean_num = num_obra.trim();
+            if !clean_num.is_empty() && clean_num != "—" && clean_num != "-" {
+                match crate::validation::validate_registro_obra(clean_num) {
+                    Ok(info) => {
+                        obras_to_process.push((info.clean, 30));
+                    }
+                    Err(err) => {
+                        log::warn!("Ignorando clave_ubicacion como registro de obra porque no cumple verificación '{}': {}", clean_num, err);
+                    }
                 }
             }
         }
     }
 
+    let mut final_rep_liq_id = id_rep_liq_opt;
+
+    for (num_obra, dias_vinc) in obras_to_process {
+        let m_num = month_to_num(&mes_norm);
+        let y_val = anio_norm as i32;
+        let valid_m = if (1..=12).contains(&m_num) { m_num } else { 1 };
+        let fecha_inicio = chrono::NaiveDate::from_ymd_opt(y_val, valid_m, 1)
+            .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap());
+        let last_day = match valid_m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => if (y_val % 4 == 0 && y_val % 100 != 0) || (y_val % 400 == 0) { 29 } else { 28 },
+            _ => 30,
+        };
+        let fecha_fin = chrono::NaiveDate::from_ymd_opt(y_val, valid_m, last_day)
+            .unwrap_or(fecha_inicio);
+
+        let obra_row = tx.query_one(
+            r#"
+            INSERT INTO public.registros_obras (
+                id, id_revision, id_registro_patronal, numero, tipo_obra, fecha_inicio, fecha_fin, creado_usuario
+            ) VALUES (
+                uuidv7(), $1, $2, $3, 'REGISTRO DE OBRA CÉDULA', $4, $5, false
+            )
+            ON CONFLICT (id_revision, numero) DO UPDATE SET
+                fecha_inicio = LEAST(public.registros_obras.fecha_inicio, EXCLUDED.fecha_inicio),
+                fecha_fin = GREATEST(public.registros_obras.fecha_fin, EXCLUDED.fecha_fin)
+            RETURNING id, (xmax = 0) AS is_inserted
+            "#,
+            &[&ctx.id_revision, &ctx.id_registro_patronal, &num_obra, &fecha_inicio, &fecha_fin],
+        )?;
+
+        let id_registro_obra: Uuid = obra_row.get(0);
+        let is_inserted: bool = obra_row.get(1);
+        if is_inserted {
+            registros_obras_count += 1;
+        }
+
+        // Evitar duplicar vinculación obra - liquidación
+        let existing_vinc = tx.query_opt(
+            "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE id_registro_obra = $1 AND id_liquidacion = $2 LIMIT 1",
+            &[&id_registro_obra, &id_liquidacion],
+        )?;
+
+        if existing_vinc.is_none() {
+            let id_vinc = Uuid::now_v7();
+            tx.execute(
+                r#"
+                INSERT INTO public.vinculaciones_obras_liquidaciones (
+                    id, id_registro_obra, id_liquidacion, dias_registro_obra
+                ) VALUES ($1, $2, $3, $4)
+                "#,
+                &[&id_vinc, &id_registro_obra, &id_liquidacion, &dias_vinc],
+            )?;
+            vinculaciones_count += 1;
+        }
+
+        // Asegurar reporte_liquidacion si aún no existe para reflejar la obra en Reporte Liquidaciones
+        if final_rep_liq_id.is_none() {
+            let rep_liq_opt = tx.query_opt(
+                "SELECT id FROM public.reportes_liquidaciones WHERE id_liquidacion = $1 LIMIT 1",
+                &[&id_liquidacion],
+            )?;
+            let assigned_id = match rep_liq_opt {
+                Some(r) => r.get(0),
+                None => {
+                    let new_rep_id = Uuid::now_v7();
+                    tx.execute(
+                        r#"
+                        INSERT INTO public.reportes_liquidaciones (
+                            id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        "#,
+                        &[&new_rep_id, &id_liquidacion, &ctx.id_revision, &id_empleado, &mes_norm, &anio_norm, &truncate_str(Some(&nombre_arch), 350)],
+                    )?;
+                    new_rep_id
+                }
+            };
+            final_rep_liq_id = Some(assigned_id);
+        }
+
+        // Asegurar vinculación en reportes_vinculaciones_obras_liquidaciones
+        if let Some(id_rep_liq) = final_rep_liq_id {
+            let existing_rep_vinc = tx.query_opt(
+                "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 LIMIT 1",
+                &[&id_rep_liq],
+            )?;
+
+            if let Some(erv) = existing_rep_vinc {
+                let vid: Uuid = erv.get(0);
+                let _ = tx.execute(
+                    "UPDATE public.reportes_vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
+                    &[&vid, &Some(id_registro_obra), &Some(dias_vinc)],
+                );
+            } else {
+                let id_rep_vinc = Uuid::now_v7();
+                tx.execute(
+                    r#"
+                    INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (
+                        id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra
+                    ) VALUES ($1, $2, $3, $4)
+                    "#,
+                    &[&id_rep_vinc, &Some(id_registro_obra), &id_rep_liq, &Some(dias_vinc)],
+                )?;
+            }
+        }
+    }
+
     // Si tiene obra asignada en reportes_vinculaciones_obras_liquidaciones, recalcular y guardar detalles en reportes_detalles_liquidaciones
-    if let Some(id_rep_liq) = id_rep_liq_opt {
+    if let Some(id_rep_liq) = final_rep_liq_id {
         let rv_info = tx.query_opt(
             r#"
             SELECT rvol.id_registro_obra, rvol.dias_registro_obra, rdl.dias

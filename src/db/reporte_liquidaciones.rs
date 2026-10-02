@@ -35,6 +35,14 @@ pub struct ReporteLiquidacionRowDb {
     pub obra_label: String,
     pub dias_obra: i16,
 
+    pub clave: String,
+    pub fecha: Option<NaiveDate>,
+    pub fecha_str: String,
+    pub sdi: f64,
+    pub lic: f64,
+    pub inc: f64,
+    pub aus: f64,
+
     // Prorrateados
     pub cf: f64,
     pub exc_pat: f64,
@@ -300,21 +308,49 @@ pub fn sync_reportes_liquidaciones_for_revision(
                     (None, None)
                 }
             },
-            None => (None, None),
+            None => {
+                let emp_obra_row = tx.query_opt(
+                    r#"
+                    SELECT ro.id FROM public.registros_obras ro
+                    JOIN public.empleados e ON ro.numero = LEFT(TRIM(e.clave_ubicacion), 15)
+                    WHERE ro.id_revision = $1 AND e.id = $2
+                    LIMIT 1
+                    "#,
+                    &[&id_revision, &id_emp],
+                ).ok().flatten();
+                if let Some(er) = emp_obra_row {
+                    let oid: Uuid = er.get(0);
+                    (Some(oid), Some(30))
+                } else {
+                    (None, None)
+                }
+            },
         };
 
         if let Some(rv) = rep_vinc_opt {
             let vid: Uuid = rv.get(0);
             let curr_rep_obra: Option<Uuid> = rv.try_get(1).ok().flatten();
             // Preservar los cambios que el usuario haya realizado en la vista de Reporte Liquidaciones.
-            // Si la obra vinculada ya no pertenece a las obras válidas o es nula, eliminar la vinculación por completo
+            // Si la obra vinculada ya no pertenece a las obras válidas o es nula, actualizar o eliminar la vinculación
             if let Some(curr_obra) = curr_rep_obra {
                 if !valid_obras_set.contains(&curr_obra) {
-                    tx.execute(
-                        "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id = $1",
-                        &[&vid],
-                    ).map_err(|e| format!("Error eliminando vinculación con obra eliminada: {}", e))?;
+                    if let Some(toid) = target_obra_id {
+                        let _ = tx.execute(
+                            "UPDATE public.reportes_vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
+                            &[&vid, &Some(toid), &target_dias],
+                        );
+                    } else {
+                        tx.execute(
+                            "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id = $1",
+                            &[&vid],
+                        ).map_err(|e| format!("Error eliminando vinculación con obra eliminada: {}", e))?;
+                    }
                 }
+            } else if let Some(toid) = target_obra_id {
+                let _ = tx.execute(
+                    "UPDATE public.reportes_vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
+                    &[&vid, &Some(toid), &target_dias],
+                );
             } else {
                 tx.execute(
                     "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id = $1",
@@ -564,7 +600,13 @@ pub fn fetch_reporte_liquidaciones(
         dl.gps AS gps_orig,
         dl.patronal AS patronal_orig,
         dl.obrera AS obrera_orig,
-        dl.subtotal AS subtotal_orig
+        dl.subtotal AS subtotal_orig,
+        COALESCE(rdl.clave, '') AS clave,
+        rdl.fecha,
+        COALESCE(rdl.sdi, 0.0) AS sdi,
+        COALESCE(rdl.lic, 0.0) AS lic,
+        COALESCE(rdl.inc, 0.0) AS inc,
+        COALESCE(rdl.aus, 0.0) AS aus
     FROM public.reportes_liquidaciones AS rl
     INNER JOIN public.reportes_detalles_liquidaciones AS rdl
         ON rl.id = rdl.id_reporte_liquidacion
@@ -664,6 +706,16 @@ pub fn fetch_reporte_liquidaciones(
             "⚠️ Sin Asignar (Pendiente)".to_string()
         };
 
+        let clave_raw: String = r.try_get::<_, Option<String>>(43).ok().flatten().unwrap_or_default();
+        let fecha_opt: Option<NaiveDate> = r.try_get(44).ok().flatten();
+        let fecha_str = fecha_opt
+            .map(|d| d.format("%d/%m/%Y").to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let sdi = row_get_f64(&r, 45, 0.0);
+        let lic = row_get_f64(&r, 46, 0.0);
+        let inc = row_get_f64(&r, 47, 0.0);
+        let aus = row_get_f64(&r, 48, 0.0);
+
         result.push(ReporteLiquidacionRowDb {
             id_reporte_liq: id_rep_liq,
             id_liquidacion: id_liq,
@@ -681,6 +733,14 @@ pub fn fetch_reporte_liquidaciones(
             obra_numero: obra_num.trim().to_string(),
             obra_label,
             dias_obra,
+
+            clave: clave_raw.trim().to_string(),
+            fecha: fecha_opt,
+            fecha_str,
+            sdi,
+            lic,
+            inc,
+            aus,
 
             cf: row_get_f64(&r, 15, 0.0),
             exc_pat: row_get_f64(&r, 16, 0.0),
@@ -1063,7 +1123,8 @@ pub fn export_reporte_liquidaciones_to_excel(
     // Encabezados sin la columna "Total Prorrateado"
     let headers = [
         "#", "Periodo", "NSS", "RFC", "CURP", "Nombre del Trabajador", "Reg. Patronal",
-        "Registro de Obra", "Días Cédula", "Días Obra",
+        "Registro de Obra", "Clave", "Fecha", "SDI", "Días Cédula", "Días Obra",
+        "Lic.", "Inc.", "Aus.",
         "Cuota Fija", "Exc. Pat.", "Exc. Obr.", "PD Pat.", "PD Obr.", "GMP Pat.", "GMP Obr.",
         "Riesgo Trab.", "IV Pat.", "IV Obr.", "Guard y PS", "Suma Patronal", "Suma Obrera", "Subtotal", "Subtotal Cédula"
     ];
@@ -1091,6 +1152,9 @@ pub fn export_reporte_liquidaciones_to_excel(
     // Acumuladores de Total General
     let mut g_dias_ced: f64 = 0.0;
     let mut g_dias_obr: f64 = 0.0;
+    let mut g_lic: f64 = 0.0;
+    let mut g_inc: f64 = 0.0;
+    let mut g_aus: f64 = 0.0;
     let mut g_cf: f64 = 0.0;
     let mut g_exc_pat: f64 = 0.0;
     let mut g_exc_obr: f64 = 0.0;
@@ -1113,6 +1177,9 @@ pub fn export_reporte_liquidaciones_to_excel(
     for (periodo_key, group_rows) in &groups {
         let mut m_dias_ced: f64 = 0.0;
         let mut m_dias_obr: f64 = 0.0;
+        let mut m_lic: f64 = 0.0;
+        let mut m_inc: f64 = 0.0;
+        let mut m_aus: f64 = 0.0;
         let mut m_cf: f64 = 0.0;
         let mut m_exc_pat: f64 = 0.0;
         let mut m_exc_obr: f64 = 0.0;
@@ -1169,29 +1236,54 @@ pub fn export_reporte_liquidaciones_to_excel(
             worksheet.write_string_with_format(current_r, 5, &row.nombre_trabajador, &text_format).map_err(|e| e.to_string())?;
             worksheet.write_string_with_format(current_r, 6, rp_clean, &text_format).map_err(|e| e.to_string())?;
             worksheet.write_string_with_format(current_r, 7, obra_clean, &text_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 8, row.dias_cedula as f64, &integer_format).map_err(|e| e.to_string())?;
+            worksheet.write_string_with_format(current_r, 8, &row.clave, &text_format).map_err(|e| e.to_string())?;
+            worksheet.write_string_with_format(current_r, 9, &row.fecha_str, &text_format).map_err(|e| e.to_string())?;
+            if row.sdi > 0.001 {
+                worksheet.write_number_with_format(current_r, 10, row.sdi, &currency_format).map_err(|e| e.to_string())?;
+            } else {
+                worksheet.write_string_with_format(current_r, 10, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+            worksheet.write_number_with_format(current_r, 11, row.dias_cedula as f64, &integer_format).map_err(|e| e.to_string())?;
             if row.id_registro_obra.is_some() {
-                worksheet.write_number_with_format(current_r, 9, row.dias_obra as f64, &integer_format).map_err(|e| e.to_string())?;
+                worksheet.write_number_with_format(current_r, 12, row.dias_obra as f64, &integer_format).map_err(|e| e.to_string())?;
                 m_dias_obr += row.dias_obra as f64;
             } else {
-                worksheet.write_string_with_format(current_r, 9, "", &text_format).map_err(|e| e.to_string())?;
+                worksheet.write_string_with_format(current_r, 12, "", &text_format).map_err(|e| e.to_string())?;
+            }
+            if row.lic > 0.001 {
+                worksheet.write_number_with_format(current_r, 13, row.lic, &integer_format).map_err(|e| e.to_string())?;
+                m_lic += row.lic;
+            } else {
+                worksheet.write_string_with_format(current_r, 13, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+            if row.inc > 0.001 {
+                worksheet.write_number_with_format(current_r, 14, row.inc, &integer_format).map_err(|e| e.to_string())?;
+                m_inc += row.inc;
+            } else {
+                worksheet.write_string_with_format(current_r, 14, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+            if row.aus > 0.001 {
+                worksheet.write_number_with_format(current_r, 15, row.aus, &integer_format).map_err(|e| e.to_string())?;
+                m_aus += row.aus;
+            } else {
+                worksheet.write_string_with_format(current_r, 15, "-", &text_format).map_err(|e| e.to_string())?;
             }
 
-            worksheet.write_number_with_format(current_r, 10, row.cf, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 11, row.exc_pat, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 12, row.exc_obr, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 13, row.pd_pat, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 14, row.pd_obr, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 15, row.gmp_pat, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 16, row.gmp_obr, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 17, row.rt, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 18, row.iv_pat, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 19, row.iv_obr, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 20, row.gps, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 21, row.patronal, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 22, row.obrera, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 23, row.subtotal, &currency_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(current_r, 24, row.subtotal_orig, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 16, row.cf, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 17, row.exc_pat, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 18, row.exc_obr, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 19, row.pd_pat, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 20, row.pd_obr, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 21, row.gmp_pat, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 22, row.gmp_obr, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 23, row.rt, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 24, row.iv_pat, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 25, row.iv_obr, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 26, row.gps, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 27, row.patronal, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 28, row.obrera, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 29, row.subtotal, &currency_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(current_r, 30, row.subtotal_orig, &currency_format).map_err(|e| e.to_string())?;
 
             m_dias_ced += row.dias_cedula as f64;
             m_cf += row.cf;
@@ -1219,33 +1311,52 @@ pub fn export_reporte_liquidaciones_to_excel(
             worksheet.write_string_with_format(current_r, c as u16, "", &month_total_label_format).map_err(|e| e.to_string())?;
         }
         worksheet.write_string_with_format(current_r, 5, &format!("TOTAL {}", periodo_key), &month_total_label_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(current_r, 6, "", &month_total_label_format).map_err(|e| e.to_string())?;
-        worksheet.write_string_with_format(current_r, 7, "", &month_total_label_format).map_err(|e| e.to_string())?;
+        for c in 6..=10 {
+            worksheet.write_string_with_format(current_r, c as u16, "", &month_total_label_format).map_err(|e| e.to_string())?;
+        }
 
-        worksheet.write_number_with_format(current_r, 8, m_dias_ced, &month_total_int_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 9, m_dias_obr, &month_total_int_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 11, m_dias_ced, &month_total_int_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 12, m_dias_obr, &month_total_int_format).map_err(|e| e.to_string())?;
+        if m_lic > 0.001 {
+            worksheet.write_number_with_format(current_r, 13, m_lic, &month_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            worksheet.write_string_with_format(current_r, 13, "-", &month_total_label_format).map_err(|e| e.to_string())?;
+        }
+        if m_inc > 0.001 {
+            worksheet.write_number_with_format(current_r, 14, m_inc, &month_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            worksheet.write_string_with_format(current_r, 14, "-", &month_total_label_format).map_err(|e| e.to_string())?;
+        }
+        if m_aus > 0.001 {
+            worksheet.write_number_with_format(current_r, 15, m_aus, &month_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            worksheet.write_string_with_format(current_r, 15, "-", &month_total_label_format).map_err(|e| e.to_string())?;
+        }
 
-        worksheet.write_number_with_format(current_r, 10, m_cf, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 11, m_exc_pat, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 12, m_exc_obr, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 13, m_pd_pat, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 14, m_pd_obr, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 15, m_gmp_pat, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 16, m_gmp_obr, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 17, m_rt, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 18, m_iv_pat, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 19, m_iv_obr, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 20, m_gps, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 21, m_patronal, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 22, m_obrera, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 23, m_subtotal, &month_total_curr_format).map_err(|e| e.to_string())?;
-        worksheet.write_number_with_format(current_r, 24, m_subtotal_orig, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 16, m_cf, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 17, m_exc_pat, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 18, m_exc_obr, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 19, m_pd_pat, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 20, m_pd_obr, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 21, m_gmp_pat, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 22, m_gmp_obr, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 23, m_rt, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 24, m_iv_pat, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 25, m_iv_obr, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 26, m_gps, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 27, m_patronal, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 28, m_obrera, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 29, m_subtotal, &month_total_curr_format).map_err(|e| e.to_string())?;
+        worksheet.write_number_with_format(current_r, 30, m_subtotal_orig, &month_total_curr_format).map_err(|e| e.to_string())?;
 
         current_r += 1;
 
         // Acumular a Total General
         g_dias_ced += m_dias_ced;
         g_dias_obr += m_dias_obr;
+        g_lic += m_lic;
+        g_inc += m_inc;
+        g_aus += m_aus;
         g_cf += m_cf;
         g_exc_pat += m_exc_pat;
         g_exc_obr += m_exc_obr;
@@ -1268,27 +1379,43 @@ pub fn export_reporte_liquidaciones_to_excel(
         worksheet.write_string_with_format(current_r, c as u16, "", &grand_total_label_format).map_err(|e| e.to_string())?;
     }
     worksheet.write_string_with_format(current_r, 5, "TOTAL GENERAL", &grand_total_label_format).map_err(|e| e.to_string())?;
-    worksheet.write_string_with_format(current_r, 6, "", &grand_total_label_format).map_err(|e| e.to_string())?;
-    worksheet.write_string_with_format(current_r, 7, "", &grand_total_label_format).map_err(|e| e.to_string())?;
+    for c in 6..=10 {
+        worksheet.write_string_with_format(current_r, c as u16, "", &grand_total_label_format).map_err(|e| e.to_string())?;
+    }
 
-    worksheet.write_number_with_format(current_r, 8, g_dias_ced, &grand_total_int_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 9, g_dias_obr, &grand_total_int_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 11, g_dias_ced, &grand_total_int_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 12, g_dias_obr, &grand_total_int_format).map_err(|e| e.to_string())?;
+    if g_lic > 0.001 {
+        worksheet.write_number_with_format(current_r, 13, g_lic, &grand_total_int_format).map_err(|e| e.to_string())?;
+    } else {
+        worksheet.write_string_with_format(current_r, 13, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+    }
+    if g_inc > 0.001 {
+        worksheet.write_number_with_format(current_r, 14, g_inc, &grand_total_int_format).map_err(|e| e.to_string())?;
+    } else {
+        worksheet.write_string_with_format(current_r, 14, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+    }
+    if g_aus > 0.001 {
+        worksheet.write_number_with_format(current_r, 15, g_aus, &grand_total_int_format).map_err(|e| e.to_string())?;
+    } else {
+        worksheet.write_string_with_format(current_r, 15, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+    }
 
-    worksheet.write_number_with_format(current_r, 10, g_cf, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 11, g_exc_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 12, g_exc_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 13, g_pd_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 14, g_pd_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 15, g_gmp_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 16, g_gmp_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 17, g_rt, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 18, g_iv_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 19, g_iv_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 20, g_gps, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 21, g_patronal, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 22, g_obrera, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 23, g_subtotal, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 24, g_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 16, g_cf, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 17, g_exc_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 18, g_exc_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 19, g_pd_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 20, g_pd_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 21, g_gmp_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 22, g_gmp_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 23, g_rt, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 24, g_iv_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 25, g_iv_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 26, g_gps, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 27, g_patronal, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 28, g_obrera, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 29, g_subtotal, &grand_total_curr_format).map_err(|e| e.to_string())?;
+    worksheet.write_number_with_format(current_r, 30, g_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
 
     worksheet.autofit();
     workbook.save(file_path).map_err(|e| format!("Error guardando archivo Excel: {}", e))?;

@@ -125,6 +125,33 @@ export component RegistrosObrasView inherits Rectangle {
                 spacing: 12px;
                 alignment: center;
 
+                // Botón Cargar Nominas
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: btn_load_cedulas.has-hover ? #1d4ed8 : #1e40af;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 8px;
+                        alignment: center;
+                        Text { text: "📑"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Cargar Nominas";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_load_nominas := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.open_nominas_view(); }
+                    }
+                }
+
                 // Botón Cargar Cédulas de Cuotas
                 Rectangle {
                     height: 38px;

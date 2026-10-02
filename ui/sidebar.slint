@@ -499,6 +499,116 @@ export component Sidebar inherits Rectangle {
                         }
                     }
                 }
+
+                // Calendario Fiscal & Revisiones (F9) -> View 8
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 8 ? #1e3a8a : (btn_f9.has-hover ? #f8fafc : transparent);
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "📅";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Calendario Fiscal";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 8 ? #ffffff : #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 8 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F9";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 8 ? #ffffff : #64748b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f9 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            AppLogic.navigate_view(8);
+                        }
+                    }
+                }
+
+                // Reporte Nóminas (F10) -> View 9
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 9 ? #1e3a8a : (AppData.nominas_access_allowed && btn_f10.has-hover ? #f8fafc : transparent);
+                    opacity: AppData.current_view == 9 || AppData.nominas_access_allowed ? 1.0 : 0.35;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "💵";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Reporte Nóminas";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 9 ? #ffffff : (AppData.nominas_access_allowed ? #1e293b : #94a3b8);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 9 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F10";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 9 ? #ffffff : (AppData.nominas_access_allowed ? #64748b : #cbd5e1);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f10 := TouchArea {
+                        enabled: AppData.nominas_access_allowed;
+                        mouse-cursor: AppData.nominas_access_allowed ? pointer : not-allowed;
+                        clicked => {
+                            if AppData.nominas_access_allowed {
+                                AppLogic.navigate_view(9);
+                            }
+                        }
+                    }
+                }
             }
 
         }

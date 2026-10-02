@@ -1,0 +1,851 @@
+import { ScrollView, LineEdit, ComboBox } from "std-widgets.slint";
+import { AppData, AppLogic, NominaRow, NominaPercepcionItem, NominaMesTotalItem, NominaEmpleadoDiaItem } from "models.slint";
+
+// Tarjeta de KPI del encabezado.
+component KpiCard inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <color> accent: #1e3a8a;
+    in property <color> value_bg: transparent;
+
+    background: #ffffff;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    border-radius: 8px;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 10px;
+
+        Rectangle {
+            width: 3px;
+            border-radius: 2px;
+            background: root.accent;
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+            horizontal-stretch: 1;
+
+            Text {
+                text: root.label;
+                font-size: 10.5px;
+                font-weight: 600;
+                color: #64748b;
+                overflow: elide;
+            }
+            Text {
+                text: root.value;
+                font-size: 17px;
+                font-weight: 800;
+                color: root.accent;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// Chip compacto de un mes dentro del desglose de días del trabajador.
+// El color comunica el contraste con la cédula sin agregar una columna más.
+component MesDiaChip inherits Rectangle {
+    in property <NominaEmpleadoDiaItem> mes;
+
+    height: 22px;
+    width: 108px;
+    border-radius: 6px;
+    background: root.mes.coincide ? #dcfce7 : #fef3c7;
+    border-width: 1px;
+    border-color: root.mes.coincide ? #86efac : #fcd34d;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+
+        Text {
+            text: root.mes.coincide ? "✓" : "≠";
+            font-size: 11px;
+            font-weight: 800;
+            color: root.mes.coincide ? #166534 : #92400e;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            spacing: 0px;
+            horizontal-stretch: 1;
+
+            Text {
+                text: root.mes.periodo;
+                font-size: 10px;
+                font-weight: 600;
+                color: #475569;
+                overflow: elide;
+            }
+            Text {
+                text: root.mes.dias_nomina + "d / " + root.mes.dias_cedula + "d";
+                font-size: 10px;
+                font-weight: 700;
+                color: #1e293b;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component NominasView inherits Rectangle {
+    background: #f8fafc;
+
+    // ─── Adaptación al ancho disponible ─────────────────────────────────
+    // La tabla se adapta al ancho del área de contenido publicado en
+    // `AppData.window_width`, NO a `self.width`. Si el ancho se derivara de este
+    // componente, el layout de las columnas alimentaría su propia medida y Slint
+    // lo marcaría como ciclo de binding (potencialmente pánico en ejecución).
+    // `window_width` lo publica un observador en main_view.slint y es
+    // independiente de esta tabla. El orden de
+    // descarte es: primero columnas de importe, luego fechas secundarias y
+    // luego identificadores; nunca se oculta Periodo, Trabajador, los días ni
+    // las percepciones, que son el propósito del reporte.
+    in property <length> table_w: AppData.window_width - 40px;
+    in property <bool> wide: self.table_w >= 1500px;
+    in property <bool> medium: self.table_w >= 1250px;
+    in property <bool> narrow: self.table_w >= 1020px;
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 14px;
+
+        // ─── 1. Encabezado ────────────────────────────────────────────────
+        HorizontalLayout {
+            alignment: space-between;
+            spacing: 16px;
+
+            VerticalLayout {
+                spacing: 4px;
+                horizontal-stretch: 1;
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+
+                    Text {
+                        text: "💵";
+                        font-size: 24px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "Reporte de Nóminas";
+                        font-size: 22px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        height: 26px;
+                        border-radius: 13px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            alignment: center;
+                            Text {
+                                text: "Comparativo días Nómina vs Cédula";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: AppData.nominas_subtitle != "" ? AppData.nominas_subtitle : "Percepciones, días pagados y fechas de pago por trabajador.";
+                    font-size: 13px;
+                    font-weight: 500;
+                    color: #64748b;
+                    wrap: word-wrap;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+
+                Rectangle {
+                    height: 38px;
+                    width: 168px;
+                    border-radius: 6px;
+                    background: btn_excel.has-hover ? #15803d : #16a34a;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Text { text: "📥"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Exportar a Excel (.xlsx)";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_excel := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.nominas_export_excel(); }
+                    }
+                }
+            }
+        }
+
+        // ─── 2. KPIs ──────────────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: 10px;
+
+            KpiCard { label: "NÓMINAS"; value: AppData.nominas_kpi_total_str; accent: #1e3a8a; }
+            KpiCard { label: "TRABAJADORES"; value: AppData.nominas_kpi_empleados_str; accent: #2563eb; }
+            KpiCard { label: "DÍAS PAGADOS (NÓMINA)"; value: AppData.nominas_kpi_dias_pagados_str; accent: #0891b2; }
+            KpiCard { label: "DÍAS CÉDULA"; value: AppData.nominas_kpi_dias_cedula_str; accent: #7c3aed; }
+            KpiCard { label: "DIFERENCIA"; value: AppData.nominas_kpi_dias_delta_str; accent: #c2410c; }
+            KpiCard { label: "TOTAL PERCEPCIONES"; value: AppData.nominas_kpi_percepciones_str; accent: #15803d; }
+        }
+
+        // ─── 3. Filtros ───────────────────────────────────────────────────
+        Rectangle {
+            height: 54px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+            border-radius: 8px;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 10px;
+
+                LineEdit {
+                    horizontal-stretch: 1;
+                    min-width: 190px;
+                    max-width: 420px;
+                    height: 34px;
+                    placeholder-text: "🔍  Buscar por nombre, NSS, RFC/CURP o periodo...";
+                    text: AppData.nominas_search_query;
+                    edited => { AppLogic.nominas_set_search(self.text); }
+                }
+
+                Rectangle {
+                    width: 36px;
+                    height: 34px;
+                    border-radius: 6px;
+                    background: btn_clear.has-hover ? #fee2e2 : #fef2f2;
+                    border-width: 1px;
+                    border-color: #fecaca;
+                    visible: AppData.nominas_search_query != "";
+
+                    Text {
+                        text: "✕";
+                        font-size: 14px;
+                        font-weight: 800;
+                        color: #b91c1c;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    btn_clear := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.nominas_clear_search(); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 1px;
+                    Text { text: "Periodo"; font-size: 9.5px; color: #94a3b8; font-weight: 600; visible: root.narrow; }
+                    ComboBox {
+                        width: root.narrow ? 170px : 130px;
+                        height: 30px;
+                        model: AppData.nominas_periodo_options;
+                        current-index <=> AppData.nominas_filter_periodo_idx;
+                        selected(val) => { AppLogic.nominas_filter_periodo(self.current-index); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 1px;
+                    Text { text: "Año"; font-size: 9.5px; color: #94a3b8; font-weight: 600; visible: root.narrow; }
+                    ComboBox {
+                        width: 95px;
+                        height: 30px;
+                        model: AppData.nominas_anio_options;
+                        current-index <=> AppData.nominas_filter_anio_idx;
+                        selected(val) => { AppLogic.nominas_filter_anio(self.current-index); }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 1px;
+                    Text { text: "Días"; font-size: 9.5px; color: #94a3b8; font-weight: 600; }
+                    ComboBox {
+                        width: 160px;
+                        height: 30px;
+                        model: ["Todos", "Coinciden", "Difieren", "Sin cédula"];
+                        current-index <=> AppData.nominas_filter_dias_idx;
+                        selected(val) => { AppLogic.nominas_filter_dias(self.current-index); }
+                    }
+                }
+
+                Rectangle {
+                    height: 34px;
+                    width: 150px;
+                    visible: root.narrow;
+                    border-radius: 6px;
+                    background: AppData.nominas_only_sin_cedula ? #fef3c7 : #f8fafc;
+                    border-width: 1px;
+                    border-color: AppData.nominas_only_sin_cedula ? #f59e0b : #e2e8f0;
+                    y: (parent.height - self.height) / 2;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 6px;
+                        Text {
+                            text: AppData.nominas_only_sin_cedula ? "☑" : "☐";
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            color: #92400e;
+                        }
+                        Text {
+                            text: "Solo sin cédula";
+                            font-size: 11.5px;
+                            font-weight: 600;
+                            color: #334155;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_sinc := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.nominas_toggle_only_sin_cedula(); }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                // Desglose mensual por trabajador: la pieza que hace posible
+                // comparar sin salir de la vista.
+                Rectangle {
+                    height: 34px;
+                    width: root.narrow ? 176px : 116px;
+                    border-radius: 6px;
+                    background: btn_detalle.has-hover ? #dbeafe : #eff6ff;
+                    border-width: 1px;
+                    border-color: #bfdbfe;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 6px;
+                        Text { text: "🗓"; font-size: 12px; vertical-alignment: center; color: #1d4ed8; }
+                        Text {
+                            text: !root.narrow ? (AppData.nominas_mostrar_detalle ? "Ocultar" : "Ver") : (AppData.nominas_mostrar_detalle ? "Ocultar días/mes" : "Ver días/mes");
+                            font-size: 11.5px;
+                            font-weight: 700;
+                            color: #1e3a8a;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_detalle := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.nominas_toggle_detalle(); }
+                    }
+                }
+            }
+        }
+
+        // ─── 4. Tabla ─────────────────────────────────────────────────────
+        Rectangle {
+            vertical-stretch: 1;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+            border-radius: 8px;
+            clip: true;
+
+            VerticalLayout {
+                spacing: 0px;
+
+                // Encabezado fijo
+                Rectangle {
+                    height: 42px;
+                    background: #f1f5f9;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 0px;
+
+                        // Las columnas del encabezado deben coincidir 1:1 con las
+                        // de las filas, en el mismo orden, y compartir las mismas
+                        // reglas de visibilidad por ancho.
+                        Text { width: 34px; text: "#"; font-size: 12px; font-weight: 700; color: #64748b; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { width: 108px; text: "Periodo"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                        Text { width: 46px; text: "Sem."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { horizontal-stretch: 1; min-width: 140px; text: "Trabajador"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                        Text { width: 92px; text: "NSS"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.narrow; }
+                        Text { width: 128px; text: "RFC / CURP"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.medium; }
+                        Text { width: 88px; text: "F. Inicio"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.narrow; }
+                        Text { width: 88px; text: "F. Fin"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                        Text { width: 88px; text: "F. Pago"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.narrow; }
+                        Text { width: 82px; text: "F. CFDI"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.wide; }
+                        Text { width: 68px; text: "Días Nóm."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { width: 68px; text: "Días Céd."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { width: 58px; text: "Dif."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { width: 108px; text: "Percepciones"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                        Text { width: 74px; text: "Gravado"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; visible: root.wide; }
+                        Text { width: 74px; text: "Exento"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; visible: root.wide; }
+                        Text { width: 74px; text: "S. Diario"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; visible: root.medium; }
+                        Text { horizontal-stretch: 1; min-width: 150px; text: "Días por mes del trabajador"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #cbd5e1; }
+
+                // Cuerpo
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 0px;
+
+                        if AppData.nominas_list.length == 0 : Rectangle {
+                            height: 180px;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 8px;
+                                Text { text: "📭"; font-size: 32px; horizontal-alignment: center; }
+                                Text {
+                                    text: "No hay nóminas para mostrar";
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    color: #64748b;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Importa nóminas CFDI en la vista de Auditoría General para poblar este reporte.";
+                                    font-size: 12px;
+                                    color: #94a3b8;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        for item in AppData.nominas_list : Rectangle {
+                            height: 44px;
+                            background: row_area.has-hover ? item.row_hover_color : item.row_bg_color;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 0px;
+
+                                Text { width: 34px; text: item.idx; font-size: 11px; color: #94a3b8; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 108px; text: item.periodo_str; font-size: 12px; font-weight: 700; color: #0f172a; vertical-alignment: center; overflow: elide; }
+                                Text { width: 46px; text: item.semana_fiscal_str; font-size: 11px; font-weight: 700; color: #7c3aed; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { horizontal-stretch: 1; min-width: 140px; text: item.nombre_trabajador; font-size: 12px; font-weight: 600; color: #0f172a; vertical-alignment: center; overflow: elide; }
+                                Text { width: 92px; text: item.nss; font-size: 11px; font-family: "monospace"; color: #334155; vertical-alignment: center; overflow: elide; visible: root.narrow; }
+                                Text { width: 128px; text: item.rfc_curp; font-size: 10.5px; font-family: "monospace"; color: #475569; vertical-alignment: center; overflow: elide; visible: root.medium; }
+                                Text { width: 88px; text: item.fecha_inicial_pago_str; font-size: 11px; color: #334155; horizontal-alignment: center; vertical-alignment: center; visible: root.narrow; }
+                                Text { width: 88px; text: item.fecha_final_pago_str; font-size: 11px; font-weight: 600; color: #0f172a; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 88px; text: item.fecha_pago_str; font-size: 11px; color: #334155; horizontal-alignment: center; vertical-alignment: center; visible: root.narrow; }
+                                Text { width: 82px; text: item.fecha_emision_str; font-size: 11px; color: #64748b; horizontal-alignment: center; vertical-alignment: center; visible: root.wide; }
+
+                                Text {
+                                    width: 68px;
+                                    text: item.num_dias_pagados_str;
+                                    font-size: 12.5px;
+                                    font-weight: 700;
+                                    color: #0f172a;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    width: 68px;
+                                    text: item.dias_cedula_str;
+                                    font-size: 12.5px;
+                                    font-weight: 700;
+                                    color: item.sin_cedula ? #94a3b8 : #0f172a;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                // Indicador de contraste: verde si coincide,
+                                // ámbar si difiere. Reemplaza a una columna
+                                // "? / OK" que exigía descifrado.
+                                Rectangle {
+                                    width: 58px;
+                                    height: 22px;
+                                    border-radius: 5px;
+                                    background: item.sin_cedula ? #f1f5f9 : (item.dias_coinciden ? #dcfce7 : #fef3c7);
+                                    y: (parent.height - self.height) / 2;
+
+                                    Text {
+                                        text: item.dias_delta_str;
+                                        font-size: 10.5px;
+                                        font-weight: 800;
+                                        color: item.sin_cedula ? #94a3b8 : (item.dias_coinciden ? #166534 : #92400e);
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Percepciones: clic abre el detalle.
+                                Rectangle {
+                                    width: 108px;
+                                    height: 26px;
+                                    border-radius: 5px;
+                                    background: btn_perc.has-hover ? #dcfce7 : #f0fdf4;
+                                    border-width: 1px;
+                                    border-color: #bbf7d0;
+                                    y: (parent.height - self.height) / 2;
+
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        spacing: 4px;
+                                        Text { text: "▸"; font-size: 9px; color: #15803d; vertical-alignment: center; }
+                                        Text {
+                                            text: item.total_percepciones_str;
+                                            font-size: 11.5px;
+                                            font-weight: 800;
+                                            color: #166534;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    btn_perc := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            AppLogic.nominas_open_percepciones(
+                                                item.id_nomina,
+                                                item.nombre_trabajador,
+                                                item.periodo_str);
+                                        }
+                                    }
+                                }
+
+                                Text { width: 74px; text: item.total_gravado_str; font-size: 11px; color: #334155; horizontal-alignment: right; vertical-alignment: center; visible: root.wide; }
+                                Text { width: 74px; text: item.total_exento_str; font-size: 11px; color: #334155; horizontal-alignment: right; vertical-alignment: center; visible: root.wide; }
+                                Text { width: 74px; text: item.salario_diario_str; font-size: 11px; color: #475569; horizontal-alignment: right; vertical-alignment: center; visible: root.medium; }
+
+                                // Desglose por mes del trabajador
+                                HorizontalLayout {
+                                    horizontal-stretch: 1;
+                                    min-width: 190px;
+                                    padding-left: 8px;
+                                    spacing: 4px;
+
+                                    if !AppData.nominas_mostrar_detalle : Text {
+                                        text: "—";
+                                        font-size: 11px;
+                                        color: #cbd5e1;
+                                        vertical-alignment: center;
+                                    }
+
+                                    for m in item.meses : MesDiaChip { mes: m; }
+                                }
+                            }
+
+                            row_area := TouchArea {
+                                horizontal-stretch: 1;
+                            }
+                        }
+                    }
+                }
+
+                // Totales por mes
+                if AppData.nominas_totales_por_mes.length > 0 : Rectangle {
+                    height: 36px;
+                    background: #f1f5f9;
+                    border-width: 1px;
+                    border-color: #cbd5e1;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "TOTALES POR MES";
+                            font-size: 10.5px;
+                            font-weight: 800;
+                            color: #475569;
+                            vertical-alignment: center;
+                        }
+
+                        for t in AppData.nominas_totales_por_mes : Rectangle {
+                            height: 24px;
+                            border-radius: 5px;
+                            background: #ffffff;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 5px;
+                                Text { text: t.periodo; font-size: 10px; font-weight: 700; color: #0f172a; vertical-alignment: center; }
+                                Text { text: t.nominas + "n"; font-size: 10px; color: #64748b; vertical-alignment: center; }
+                                Text { text: t.dias_pagados_str + "d"; font-size: 10px; font-weight: 700; color: #0891b2; vertical-alignment: center; }
+                                Text { text: "vs " + t.dias_cedula_str + "d"; font-size: 10px; font-weight: 700; color: #7c3aed; vertical-alignment: center; }
+                                Text { text: t.percepciones_str; font-size: 10px; font-weight: 700; color: #166534; vertical-alignment: center; }
+                            }
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+
+                // Paginación
+                Rectangle {
+                    height: 44px;
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 10px;
+
+                        Text {
+                            text: "Mostrando " + (AppData.nominas_total_filtered > 0 ? (AppData.nominas_page_start_row + "–" + AppData.nominas_page_end_row) : "0") + " de " + AppData.nominas_total_filtered + " nómina(s)";
+                            font-size: 12px;
+                            color: #64748b;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Rectangle {
+                            height: 30px;
+                            width: 34px;
+                            border-radius: 6px;
+                            background: prev.has-hover && AppData.nominas_page_current > 1 ? #eff6ff : #f8fafc;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+                            opacity: AppData.nominas_page_current > 1 ? 1.0 : 0.4;
+
+                            Text {
+                                text: "‹";
+                                font-size: 17px;
+                                font-weight: 700;
+                                color: #1e3a8a;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            prev := TouchArea {
+                                enabled: AppData.nominas_page_current > 1;
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.nominas_prev_page(); }
+                            }
+                        }
+
+                        Text {
+                            text: AppData.nominas_page_current + " / " + AppData.nominas_page_total;
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #0f172a;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            height: 30px;
+                            width: 34px;
+                            border-radius: 6px;
+                            background: next.has-hover && AppData.nominas_page_current < AppData.nominas_page_total ? #eff6ff : #f8fafc;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+                            opacity: AppData.nominas_page_current < AppData.nominas_page_total ? 1.0 : 0.4;
+
+                            Text {
+                                text: "›";
+                                font-size: 17px;
+                                font-weight: 700;
+                                color: #1e3a8a;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            next := TouchArea {
+                                enabled: AppData.nominas_page_current < AppData.nominas_page_total;
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.nominas_next_page(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── 5. Modal de percepciones ────────────────────────────────────────
+    if AppData.nominas_show_percepciones : Rectangle {
+        background: #00000030;
+
+        TouchArea {
+            clicked => { AppLogic.nominas_close_percepciones(); }
+        }
+
+        Rectangle {
+            width: 720px;
+            height: 520px;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-color: #0f172a33;
+            drop-shadow-blur: 24px;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "Percepciones de la Nómina";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: AppData.nominas_percepciones_empleado + " · " + AppData.nominas_percepciones_periodo;
+                            font-size: 12px;
+                            color: #64748b;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        border-radius: 6px;
+                        background: close.has-hover ? #fee2e2 : #f8fafc;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+
+                        Text {
+                            text: "✕";
+                            font-size: 14px;
+                            font-weight: 800;
+                            color: #b91c1c;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        close := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.nominas_close_percepciones(); }
+                        }
+                    }
+                }
+
+                // Encabezado del detalle
+                Rectangle {
+                    height: 32px;
+                    background: #f1f5f9;
+                    border-radius: 6px;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text { width: 70px; text: "Clave"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                        Text { width: 40px; text: "SAT"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { horizontal-stretch: 1; text: "Concepto"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                        Text { width: 110px; text: "Gravado"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                        Text { width: 110px; text: "Exento"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                        Text { width: 110px; text: "Importe"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 0px;
+
+                        if AppData.nominas_percepciones_detalle.length == 0 : Text {
+                            text: "Esta nómina no tiene percepciones registradas.";
+                            font-size: 12px;
+                            color: #94a3b8;
+                            letter-spacing: 16px;
+                        }
+
+                        for p in AppData.nominas_percepciones_detalle : Rectangle {
+                            height: 34px;
+                            background: p_row.has-hover ? #f8fafc : transparent;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+                                Text { width: 70px; text: p.clave; font-size: 11px; font-family: "monospace"; color: #334155; vertical-alignment: center; }
+                                Text { width: 40px; text: p.tipo_sat; font-size: 11px; font-family: "monospace"; color: #64748b; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { horizontal-stretch: 1; text: p.concepto; font-size: 12px; color: #0f172a; vertical-alignment: center; overflow: elide; }
+                                Text { width: 110px; text: p.gravado_str; font-size: 11.5px; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { width: 110px; text: p.exento_str; font-size: 11.5px; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { width: 110px; text: p.importe_str; font-size: 12px; font-weight: 800; color: #166534; horizontal-alignment: right; vertical-alignment: center; }
+                            }
+
+                            p_row := TouchArea { horizontal-stretch: 1; }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    Text {
+                        text: "Solo percepciones; las deducciones no se incluyen en este reporte.";
+                        font-size: 11px;
+                        color: #94a3b8;
+                    }
+
+                    Rectangle {
+                        height: 32px;
+                        width: 210px;
+                        border-radius: 6px;
+                        background: #f0fdf4;
+                        border-width: 1px;
+                        border-color: #bbf7d0;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            Text { text: "TOTAL PERCEPCIONES"; font-size: 11px; font-weight: 700; color: #166534; vertical-alignment: center; }
+                            Text { text: AppData.nominas_percepciones_total_str; font-size: 13px; font-weight: 800; color: #15803d; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

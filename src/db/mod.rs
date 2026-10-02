@@ -1,15 +1,19 @@
+pub mod calendario;
 pub mod catalogos;
 pub mod cedulas;
 pub mod client;
 pub mod nominas;
+pub mod nominas_reporte;
 pub mod reporte_liquidaciones;
 pub mod revisiones;
 pub mod schema;
 
+pub use calendario::*;
 pub use catalogos::*;
 pub use cedulas::{save_cedulas_concurrent, save_cedulas_to_db, CedulasDbStats};
 pub use client::{create_client, create_pool, DbPool, PooledClient};
 pub use nominas::{save_nominas_concurrent, save_nominas_to_db, NominasDbStats};
+pub use nominas_reporte::*;
 pub use reporte_liquidaciones::*;
 pub use revisiones::*;
 pub use schema::ensure_schema;
@@ -35,6 +39,41 @@ mod tests {
         // 1. Test ensure_schema
         let schema_res = ensure_schema(&mut client);
         assert!(schema_res.is_ok(), "ensure_schema failed: {:?}", schema_res.err());
+
+        let rows = client.query(
+            r#"
+            SELECT 
+                e.nombre, e.rfc, e.curp, e.clave_ubicacion,
+                l.id AS id_liq,
+                vol.dias_registro_obra AS vol_dias,
+                ro_vol.numero AS vol_obra,
+                rl.id AS id_rep_liq,
+                rvol.dias_registro_obra AS rvol_dias,
+                ro_rvol.numero AS rvol_obra
+            FROM public.empleados e
+            LEFT JOIN public.liquidaciones l ON l.id_empleado = e.id
+            LEFT JOIN public.vinculaciones_obras_liquidaciones vol ON vol.id_liquidacion = l.id
+            LEFT JOIN public.registros_obras ro_vol ON ro_vol.id = vol.id_registro_obra
+            LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
+            LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rvol ON rvol.id_reporte_liquidacion = rl.id
+            LEFT JOIN public.registros_obras ro_rvol ON ro_rvol.id = rvol.id_registro_obra
+            WHERE e.nombre ~* 'CRUZ LUNA' OR e.nombre ~* 'JIMENEZ'
+            ORDER BY e.nombre;
+            "#,
+            &[],
+        ).unwrap();
+        for r in rows {
+            let nom: String = r.get(0);
+            let rfc: Option<String> = r.get(1);
+            let curp: Option<String> = r.get(2);
+            let ubic: Option<String> = r.get(3);
+            let vol_dias: Option<i16> = r.get(5);
+            let vol_obra: Option<String> = r.get(6);
+            let rvol_dias: Option<i16> = r.get(8);
+            let rvol_obra: Option<String> = r.get(9);
+            println!("DEBUG_EMP: nom='{}', rfc='{:?}', curp='{:?}', ubic='{:?}', vol_obra='{:?}', vol_dias='{:?}', rvol_obra='{:?}', rvol_dias='{:?}'",
+                nom, rfc, curp, ubic, vol_obra, vol_dias, rvol_obra, rvol_dias);
+        }
 
         // 2. Test save_nominas_to_db with sample employee
         let mut emp = Employee {
@@ -125,12 +164,12 @@ mod tests {
         c_emp.no_seguro_social = Some("12345678901".to_string());
         c_emp.rfc = Some("PEGI800101XYZ".to_string());
         c_emp.curp = Some("PEGI800101HDFRRN01".to_string());
-        c_emp.clave_ubicacion = Some("OBRA TORRE REFORMA".to_string());
+        c_emp.clave_ubicacion = Some("01".to_string());
         c_emp.mes_periodo = Some("MAYO".to_string());
         c_emp.anio_periodo = Some("2024".to_string());
 
         c_emp.registro_obras.push(RegistroObra {
-            registro_obra: "OBRA-2024-001".to_string(),
+            registro_obra: "C1234567".to_string(),
             dias_registro_obra: 15,
         });
 
@@ -156,7 +195,16 @@ mod tests {
         let ced_s = ced_stats.unwrap();
         assert_eq!(ced_s.liquidaciones_guardadas, 1);
         assert_eq!(ced_s.detalles_guardados, 1);
-        assert_eq!(ced_s.vinculaciones_guardadas, 0);
+        assert_eq!(ced_s.vinculaciones_guardadas, 1);
+        assert_eq!(ced_s.registros_obras_guardados, 1);
+
+        // Verificar que la obra guardada desde cédula tenga creado_usuario = false
+        let obra_row = client.query_one(
+            "SELECT creado_usuario FROM public.registros_obras WHERE numero = 'C1234567' LIMIT 1",
+            &[],
+        ).expect("Obra debe existir en public.registros_obras");
+        let creado_usuario: bool = obra_row.get(0);
+        assert!(!creado_usuario, "La obra creada desde cédula debe tener creado_usuario = false");
 
         // Prueba de no duplicación: reingresar los mismos datos no debe duplicar en Postgres
         let dup_stats = save_cedulas_to_db(&mut client, &[biz]);
@@ -165,6 +213,48 @@ mod tests {
         assert_eq!(dup_s.liquidaciones_guardadas, 0, "No debe duplicar liquidaciones existentes");
         assert_eq!(dup_s.detalles_guardados, 0, "No debe duplicar detalles existentes");
         assert_eq!(dup_s.vinculaciones_guardadas, 0, "No debe duplicar vinculaciones existentes");
+
+        // Prueba: verificar que un RFC/CURP o registro de obra inválido NO se guarda en registros_obras
+        let mut bad_biz = Business::new();
+        bad_biz.registro_patronal = Some("Y5512345101".to_string());
+        bad_biz.razon_social = Some("EMPRESA CONSTRUCTORA DEL NORTE SA DE CV".to_string());
+        let mut bad_emp = CedulaEmployee::new();
+        bad_emp.no_seguro_social = Some("98765432101".to_string());
+        bad_emp.rfc = Some("JIFA981012A12".to_string());
+        bad_emp.curp = Some("JIFA981012MCLMN04".to_string());
+        bad_emp.clave_ubicacion = Some("JIFA981012MCLMN04".to_string()); // erróneamente CURP en clave_ubicacion
+        bad_emp.mes_periodo = Some("JUNIO".to_string());
+        bad_emp.anio_periodo = Some("2024".to_string());
+        bad_emp.registro_obras.push(RegistroObra {
+            registro_obra: "jifa981012mclmn".to_string(), // erróneamente CURP en registro_obras
+            dias_registro_obra: 10,
+        });
+        bad_emp.data_employee.push(DataEmployee {
+            mes_periodo: Some("JUNIO".to_string()),
+            anio_periodo: Some("2024".to_string()),
+            clave: Some("ALTA".to_string()),
+            fecha: NaiveDate::from_ymd_opt(2024, 6, 1),
+            dias: Some(15.0),
+            sdi: Some(525.0),
+            cf: Some(120.0),
+            rt: Some(85.0),
+            patronal: Some(450.0),
+            obrera: Some(120.0),
+            subtotal: Some(570.0),
+            ..Default::default()
+        });
+        bad_biz.employees.push(bad_emp);
+
+        let bad_ced_stats = save_cedulas_to_db(&mut client, &[bad_biz]);
+        assert!(bad_ced_stats.is_ok());
+        let b_stats = bad_ced_stats.unwrap();
+        assert_eq!(b_stats.registros_obras_guardados, 0, "No debe guardar registros de obra inválidos");
+
+        let bad_count: i64 = client.query_one(
+            "SELECT COUNT(*) FROM public.registros_obras WHERE numero ~* 'jifa981012mclmn'",
+            &[],
+        ).unwrap().get(0);
+        assert_eq!(bad_count, 0, "jifa981012mclmn nunca debe existir en registros_obras");
     }
 
     #[test]
@@ -275,7 +365,7 @@ mod tests {
             });
 
             c_emp.registro_obras.push(RegistroObra {
-                registro_obra: format!("OBRA-2024-{:02}", i % 3),
+                registro_obra: format!("C123456{}", i % 3),
                 dias_registro_obra: 15,
             });
 
@@ -287,7 +377,7 @@ mod tests {
         let cs = ced_stats.unwrap();
         assert_eq!(cs.liquidaciones_guardadas, 10);
         assert_eq!(cs.detalles_guardados, 10);
-        assert_eq!(cs.vinculaciones_guardadas, 0);
+        assert_eq!(cs.vinculaciones_guardadas, 10);
         assert!(cs.errores.is_empty(), "Errors during concurrent cedulas insert: {:?}", cs.errores);
 
         // Deduplication: re-ejecutar guardado concurrente con los mismos datos debe insertar 0 duplicados

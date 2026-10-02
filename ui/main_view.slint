@@ -10,10 +10,12 @@ import { RegistrosObrasView } from "registros_obras_view.slint";
 import { EmpleadosView } from "empleados_view.slint";
 import { CedulaCuotasView } from "cedula_cuotas_view.slint";
 import { ReporteLiquidacionesView } from "reporte_liquidaciones_view.slint";
+import { CalendarioView } from "calendario_view.slint";
+import { NominasView } from "nominas_view.slint";
 import { UploadCard } from "upload_card.slint";
 import { ActionPanel } from "action_panel.slint";
 import { ResultsPanel } from "results_panel.slint";
-export { AppData, AppLogic, DateHelper, DateDmy, FileItemData, UnprocessedItemData, ProcessingSummary, ClienteCardData, RegistroPatronalData, EmpleadoData, RevisionData, RegistroObraData, CedulaFileItem, CedulaDetalleRow, CedulaSumatoriaRow, ReporteObraItem, ReporteLiquidacionRow } from "models.slint";
+export { AppData, AppLogic, DateHelper, DateDmy, FileItemData, UnprocessedItemData, ProcessingSummary, ClienteCardData, RegistroPatronalData, EmpleadoData, RevisionData, RegistroObraData, CedulaFileItem, CedulaDetalleRow, CedulaSumatoriaRow, ReporteObraItem, ReporteLiquidacionRow, CalendarDayCell, CalendarHolidayItem, CalendarRevisionItem } from "models.slint";
 import { AppData, AppLogic } from "models.slint";
 
 export component MainWindow inherits Window {
@@ -36,6 +38,17 @@ export component MainWindow inherits Window {
             horizontal-stretch: 1;
             padding: 0px;
             spacing: 0px;
+
+            // Publica el ancho del área de contenido para que las vistas con
+            // tabla adaptativa (nóminas) decidan qué columnas caben. Mide este
+            // elemento en lugar de `self.width` de la ventana para no crear un
+            // ciclo de binding con el layout de la propia tabla.
+            Rectangle {
+                height: 0px;
+                background: transparent;
+                in property <length> avail_w: self.width;
+                changed avail_w => { AppLogic.view_resized(avail_w); }
+            }
 
             // Barra Superior de Contexto y Breadcrumbs
             TopBar {}
@@ -243,6 +256,16 @@ export component MainWindow inherits Window {
 
             // VISTA 7: Reporte de Liquidaciones y Prorrateo por Obra (F8)
             if AppData.current_view == 7 : ReporteLiquidacionesView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 8: Calendario Fiscal & Revisiones Patronales IMSS (F9)
+            if AppData.current_view == 8 : CalendarioView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 9: Reporte de Nóminas (F10)
+            if AppData.current_view == 9 : NominasView {
                 vertical-stretch: 1;
             }
 
