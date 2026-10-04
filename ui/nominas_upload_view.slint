@@ -1,0 +1,1146 @@
+import { ScrollView } from "std-widgets.slint";
+import { AppData, AppLogic, FileItemData, NominaRow } from "models.slint";
+
+// ────────────────────────────────────────────────────────────────────────────
+// Vista de Carga de Nóminas
+//
+// Replica el flujo de "Cédulas de Determinación de Cuotas":
+//   Estado 0 → Solo la interfaz de "Cargar Documentos".
+//   Estado 1 → Tabla de archivos cargados + botón "Procesar y Guardar".
+//   Estado 2 → Estadísticas generales + detalle paginado + "Realizar Reporte".
+//
+// El botón "Realizar Reporte" lleva a la vista de reporte de nóminas.
+// ────────────────────────────────────────────────────────────────────────────
+
+export component NominasUploadView inherits Rectangle {
+    background: #f4f6fa;
+
+    ScrollView {
+        VerticalLayout {
+            padding: 24px;
+            spacing: 20px;
+
+            // ══════════════════════════════════════════════════════════════
+            // 1. Barra de navegación y acciones superiores
+            // ══════════════════════════════════════════════════════════════
+            HorizontalLayout {
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: center;
+
+                    // Botón "atrás"
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: back_touch.has-hover ? #eff6ff : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "←"; font-size: 13px; font-weight: 800; color: #1e3a8a; }
+                            Text {
+                                text: "Nóminas";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #1e3a8a;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        back_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.navigate_view(2); }
+                        }
+                    }
+
+                    Text {
+                        text: "Nóminas  ›  Carga y Procesamiento";
+                        font-size: 13px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        height: 24px;
+                        border-radius: 4px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: "CFDI Nómina v1.2";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Acciones de cabecera
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+
+                    // Solo en estado 2: "Borrar Todo" (a la izquierda de Realizar Reporte)
+                    if AppData.nominas_view_state == 2 : Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_del_all.has-hover ? #fef2f2 : #ffffff;
+                        border-width: 1px;
+                        border-color: #fecaca;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "🗑"; font-size: 13px; vertical-alignment: center; }
+                            Text {
+                                text: "Borrar Todo";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #b91c1c;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_del_all := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.solicitar_borrar_todas_nominas(); }
+                        }
+                    }
+
+                    // Solo en estado 2: "Realizar Reporte"
+                    if AppData.nominas_view_state == 2 : Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_rep.has-hover ? #f8fafc : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "📋"; font-size: 13px; vertical-alignment: center; }
+                            Text {
+                                text: "Realizar Reporte";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_rep := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.realizar_reporte_nominas(); }
+                        }
+                    }
+
+                    // Refrescar
+                    Rectangle {
+                        width: 34px;
+                        height: 34px;
+                        border-radius: 6px;
+                        background: btn_ref.has-hover ? #f1f5f9 : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        Text {
+                            text: "⟳";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #475569;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        btn_ref := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.recargar_nominas_view(); }
+                        }
+                    }
+                }
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            // 2. Tarjeta principal de carga
+            // ══════════════════════════════════════════════════════════════
+            Rectangle {
+                background: #ffffff;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 16px;
+
+                    // Cabecera de la tarjeta
+                    HorizontalLayout {
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: center;
+
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 14px;
+                                background: #eff6ff;
+                                border-width: 1px;
+                                border-color: #bfdbfe;
+                                Text {
+                                    text: "1";
+                                    font-size: 13px;
+                                    font-weight: 800;
+                                    color: #1d4ed8;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Text {
+                                text: "Nóminas de Sueldos y Salarios";
+                                font-size: 16px;
+                                font-weight: 800;
+                                color: #0f172a;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                height: 22px;
+                                border-radius: 4px;
+                                background: #eff6ff;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    Text {
+                                        text: "Múltiples archivos o .XML / .ZIP / .RAR / Carpeta";
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        color: #1d4ed8;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 24px;
+                            border-radius: 4px;
+                            background: #f1f5f9;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 4px;
+                                alignment: center;
+                                Text { text: "⚙"; font-size: 11px; vertical-alignment: center; }
+                                Text {
+                                    text: "Parser XML CFDI 4.0";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "CFDI de nómina 1.2 emitidos por el patrón (XML). Validación automática contra el portal del SAT. Extracción recursiva desde carpetas y archivos comprimidos.";
+                        font-size: 12px;
+                        color: #64748b;
+                    }
+
+                    // Cuadro de carga / Drag & Drop
+                    Rectangle {
+                        height: 140px;
+                        background: #f8fafc;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 10px;
+
+                            Text {
+                                text: "🔲";
+                                font-size: 26px;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "Arrastra archivos o carpetas aquí, o selecciona:";
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: #334155;
+                                horizontal-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 12px;
+
+                                Rectangle {
+                                    height: 36px;
+                                    width: 170px;
+                                    border-radius: 6px;
+                                    background: btn_exp.has-hover ? #022c22 : #064e3b;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 6px;
+                                        Text { text: "📁"; font-size: 13px; vertical-alignment: center; }
+                                        Text {
+                                            text: "Explorar Archivos";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #ffffff;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    btn_exp := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.select_nominas_view_files(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 36px;
+                                    width: 180px;
+                                    border-radius: 6px;
+                                    background: btn_car.has-hover ? #f0fdf4 : #ffffff;
+                                    border-width: 1px;
+                                    border-color: #065f46;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 6px;
+                                        Text { text: "📂"; font-size: 13px; vertical-alignment: center; }
+                                        Text {
+                                            text: "Seleccionar Carpeta";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #065f46;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    btn_car := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.select_nominas_view_folder(); }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 8px;
+
+                                Text {
+                                    text: "Formatos admitidos:";
+                                    font-size: 11px;
+                                    color: #64748b;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 3px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout { padding-left: 5px; padding-right: 5px; Text { text: ".XML"; font-size: 9px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                }
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 3px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout { padding-left: 5px; padding-right: 5px; Text { text: ".ZIP"; font-size: 9px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                }
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 3px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout { padding-left: 5px; padding-right: 5px; Text { text: ".RAR"; font-size: 9px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                }
+                                Rectangle {
+                                    height: 18px;
+                                    border-radius: 3px;
+                                    background: #f1f5f9;
+                                    HorizontalLayout { padding-left: 5px; padding-right: 5px; Text { text: "CARPETA"; font-size: 9px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                }
+                            }
+                        }
+                    }
+
+                    // ══════════════════════════════════════════════════════════
+                    // SECCIÓN: ARCHIVOS CARGADOS (visible en estado >= 1)
+                    // ══════════════════════════════════════════════════════════
+                    if AppData.nominas_view_files_count > 0 : VerticalLayout {
+                        spacing: 12px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            Text {
+                                text: "ARCHIVOS CARGADOS (" + AppData.nominas_view_files_count + " ANALIZADOS)";
+                                font-size: 11px;
+                                font-weight: 800;
+                                color: #475569;
+                                letter-spacing: 0.5px;
+                                vertical-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: center;
+
+                                Text {
+                                    text: "Tamaño Total: " + AppData.nominas_view_total_size_str;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #334155;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    height: 20px;
+                                    border-radius: 4px;
+                                    background: #ecfdf5;
+                                    border-width: 1px;
+                                    border-color: #a7f3d0;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Text {
+                                            text: AppData.nominas_view_extracted_count_str;
+                                            font-size: 10px;
+                                            font-weight: 700;
+                                            color: #059669;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Tabla de archivos
+                        Rectangle {
+                            height: 220px;
+                            background: #ffffff;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+                            clip: true;
+
+                            ScrollView {
+                                VerticalLayout {
+                                    padding: 0px;
+                                    spacing: 0px;
+
+                                    // Cabecera
+                                    Rectangle {
+                                        height: 36px;
+                                        background: #f8fafc;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 8px;
+
+                                            Text { width: 280px; text: "Archivo"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 150px; text: "Tipo / Extensión"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 90px; text: "Tamaño"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 130px; text: "Estatus"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 400px; text: "Ruta RustFS"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                            Text { width: 50px; text: "Acción"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                    }
+
+                                    Rectangle { height: 1px; background: #e2e8f0; }
+
+                                    // Filas
+                                    for item in AppData.nominas_view_files : Rectangle {
+                                        height: 40px;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 8px;
+                                            alignment: center;
+
+                                            HorizontalLayout {
+                                                width: 280px;
+                                                spacing: 6px;
+                                                alignment: center;
+                                                Text { text: item.extension == "xml" ? "📄" : "🗂"; font-size: 13px; vertical-alignment: center; }
+                                                Text {
+                                                    text: item.filename;
+                                                    font-size: 11px;
+                                                    font-weight: 600;
+                                                    color: #1e293b;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            Text { width: 150px; text: item.extension == "xml" ? "XML CFDI Nómina" : "Archivo comprimido"; font-size: 11px; color: #475569; vertical-alignment: center; }
+                                            Text { width: 90px; text: item.filesize; font-size: 11px; color: #64748b; vertical-alignment: center; }
+                                            Rectangle {
+                                                width: 130px;
+                                                height: 24px;
+                                                y: (parent.height - self.height) / 2;
+                                                border-radius: 4px;
+                                                background: item.is_archive ? #f1f5f9 : #ecfdf5;
+                                                HorizontalLayout {
+                                                    padding-left: 6px;
+                                                    padding-right: 6px;
+                                                    spacing: 4px;
+                                                    alignment: center;
+                                                    Text { text: item.is_archive ? "•" : "•"; font-size: 12px; color: item.is_archive ? #64748b : #059669; vertical-alignment: center; }
+                                                    Text {
+                                                        text: item.is_archive ? "Comprimido" : "Listo para procesar";
+                                                        font-size: 10px;
+                                                        font-weight: 700;
+                                                        color: item.is_archive ? #64748b : #059669;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                            Text {
+                                                width: 400px;
+                                                text: item.rustfs_path;
+                                                font-size: 9px;
+                                                font-family: "monospace";
+                                                color: #64748b;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                            Rectangle {
+                                                width: 50px;
+                                                height: 26px;
+                                                y: (parent.height - self.height) / 2;
+                                                border-radius: 4px;
+                                                background: btn_rem.has-hover ? #fee2e2 : transparent;
+                                                Text {
+                                                    text: "✕";
+                                                    font-size: 12px;
+                                                    font-weight: 800;
+                                                    color: #ef4444;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                btn_rem := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { AppLogic.remove_nomina_view_file(item.id); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Footer de estado y botón "Procesar y Guardar"
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: center;
+                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #10b981; }
+                                Text {
+                                    text: AppData.nominas_view_status_banner_text;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 38px;
+                                width: 180px;
+                                border-radius: 6px;
+                                background: btn_save.has-hover ? #022c22 : #064e3b;
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 8px;
+                                    Text { text: "💾"; font-size: 14px; vertical-alignment: center; }
+                                    Text {
+                                        text: "Procesar y Guardar";
+                                        font-size: 12px;
+                                        font-weight: 800;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                btn_save := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { AppLogic.procesar_y_guardar_nominas(); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            // 3. SECCIÓN PROCESADA Y GUARDADA EN BD (estado == 2)
+            // ══════════════════════════════════════════════════════════════
+            if AppData.nominas_view_state == 2 : VerticalLayout {
+                spacing: 20px;
+
+                // 3.1. Tarjetas de estadísticas generales
+                HorizontalLayout {
+                    spacing: 16px;
+
+                    // Tarjeta 1: Rango de periodos
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #ffffff;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "PERIODOS PROCESADOS"; font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; }
+                                Text { text: "📅"; font-size: 14px; color: #2563eb; }
+                            }
+
+                            Text {
+                                text: AppData.nominas_view_periodo_rango_str;
+                                font-size: 18px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+
+                            Text {
+                                text: AppData.nominas_view_periodo_sub_str;
+                                font-size: 11px;
+                                color: #475569;
+                            }
+                        }
+                    }
+
+                    // Tarjeta 2: Total de trabajadores y días
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #ffffff;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "TRABAJADORES / DÍAS"; font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; }
+                                Text { text: "👥"; font-size: 14px; color: #059669; }
+                            }
+
+                            Text {
+                                text: AppData.nominas_view_total_trabajadores_str;
+                                font-size: 18px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "Días pagados: " + AppData.nominas_view_total_dias_str;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #059669;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    // Tarjeta 3: Total de percepciones
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #ffffff;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "TOTAL PERCEPCIONES"; font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; }
+                                Text { text: "💵"; font-size: 14px; color: #7c3aed; }
+                            }
+
+                            Text {
+                                text: AppData.nominas_view_total_percepciones_str;
+                                font-size: 18px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+
+                            Text {
+                                text: AppData.nominas_view_sbc_sub_str;
+                                font-size: 11px;
+                                color: #475569;
+                            }
+                        }
+                    }
+                }
+
+                // 3.2. Detalle paginado de nóminas
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: #ffffff;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        // Cabecera con buscador
+                        HorizontalLayout {
+                            alignment: space-between;
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "Detalle de Nóminas Procesadas";
+                                    font-size: 16px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                }
+                                Text {
+                                    text: "Mostrando " + AppData.nominas_view_detalle_page_start_row + " - " + AppData.nominas_view_detalle_page_end_row + " de " + AppData.nominas_view_detalle_total_count + " registros procesados";
+                                    font-size: 12px;
+                                    color: #64748b;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: center;
+
+                                // Buscador
+                                Rectangle {
+                                    width: 280px;
+                                    height: 36px;
+                                    border-radius: 6px;
+                                    background: #f8fafc;
+                                    border-width: 1px;
+                                    border-color: #cbd5e1;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 8px;
+                                        alignment: center;
+                                        Text { text: "🔍"; font-size: 12px; vertical-alignment: center; }
+                                        search_input := TextInput {
+                                            font-size: 12px;
+                                            text: AppData.nominas_view_detalle_search;
+                                            vertical-alignment: center;
+                                            edited => { AppLogic.nominas_view_filtrar_busqueda(self.text); }
+                                        }
+                                    }
+                                }
+
+                                // Paginación superior
+                                if AppData.nominas_view_detalle_page_total > 1 : HorizontalLayout {
+                                    spacing: 4px;
+                                    alignment: center;
+
+                                    Rectangle {
+                                        width: 24px;
+                                        height: 22px;
+                                        border-radius: 4px;
+                                        background: AppData.nominas_view_detalle_page_current > 1 ? (btn_top_prev.has-hover ? #e2e8f0 : #ffffff) : #f8fafc;
+                                        border-width: 1px;
+                                        border-color: AppData.nominas_view_detalle_page_current > 1 ? #cbd5e1 : #e2e8f0;
+                                        opacity: AppData.nominas_view_detalle_page_current > 1 ? 1.0 : 0.4;
+                                        Text { text: "‹"; font-size: 13px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                        btn_top_prev := TouchArea {
+                                            mouse-cursor: AppData.nominas_view_detalle_page_current > 1 ? pointer : default;
+                                            clicked => {
+                                                if AppData.nominas_view_detalle_page_current > 1 {
+                                                    AppLogic.nominas_view_cambiar_pagina(AppData.nominas_view_detalle_page_current - 1);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: AppData.nominas_view_detalle_page_current + " / " + AppData.nominas_view_detalle_page_total;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #1e3a8a;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Rectangle {
+                                        width: 24px;
+                                        height: 22px;
+                                        border-radius: 4px;
+                                        background: AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total ? (btn_top_next.has-hover ? #e2e8f0 : #ffffff) : #f8fafc;
+                                        border-width: 1px;
+                                        border-color: AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total ? #cbd5e1 : #e2e8f0;
+                                        opacity: AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total ? 1.0 : 0.4;
+                                        Text { text: "›"; font-size: 13px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                        btn_top_next := TouchArea {
+                                            mouse-cursor: AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total ? pointer : default;
+                                            clicked => {
+                                                if AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total {
+                                                    AppLogic.nominas_view_cambiar_pagina(AppData.nominas_view_detalle_page_current + 1);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Tabla de detalle
+                        Rectangle {
+                            vertical-stretch: 1;
+                            min-height: 200px;
+                            background: #ffffff;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+                            clip: true;
+
+                            ScrollView {
+                                VerticalLayout {
+                                    padding: 0px;
+                                    spacing: 0px;
+                                    // Ancho mínimo para que el scroll
+                                    // horizontal aparezca solo cuando
+                                    // las columnas no caben.
+                                    min-width: 660px;
+
+                                    // Cabecera de tabla
+                                    Rectangle {
+                                        height: 40px;
+                                        background: #f8fafc;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 8px;
+                                            alignment: center;
+
+                                            Text { width: 50px; text: "# Reg."; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                            Text { width: 90px; text: "Periodo"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                            Text { width: 110px; text: "RFC / CURP"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                            Text { horizontal-stretch: 1; min-width: 170px; text: "Nombre del Trabajador"; font-size: 11.5px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                                            Text { width: 60px; text: "Días"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                            Text { width: 110px; text: "Percepciones"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                        }
+                                    }
+
+                                    Rectangle { height: 1px; background: #e2e8f0; }
+
+                                    // Filas de detalle
+                                    for row in AppData.nominas_view_detalle_list : Rectangle {
+                                        height: 40px;
+                                        background: row_row.has-hover ? #f8fafc : row.row_bg_color;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 8px;
+                                            alignment: center;
+
+                                            Text { width: 50px; text: row.idx; font-size: 11px; color: #94a3b8; horizontal-alignment: center; vertical-alignment: center; }
+                                            Text { width: 90px; text: row.periodo_str; font-size: 11px; font-weight: 700; color: #0f172a; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                                            Text { width: 110px; text: row.rfc_curp; font-size: 10.5px; font-family: "monospace"; color: #475569; vertical-alignment: center; overflow: elide; }
+                                            Text { horizontal-stretch: 1; min-width: 170px; text: row.nombre_trabajador; font-size: 11.5px; font-weight: 600; color: #1e293b; vertical-alignment: center; overflow: elide; }
+                                            Text { width: 60px; text: row.num_dias_pagados_str; font-size: 11.5px; font-weight: 700; color: #0f172a; horizontal-alignment: right; vertical-alignment: center; }
+                                            Text { width: 110px; text: row.total_percepciones_str; font-size: 11.5px; font-weight: 800; color: #166534; horizontal-alignment: right; vertical-alignment: center; }
+                                        }
+
+                                        row_row := TouchArea { horizontal-stretch: 1; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Paginación inferior
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 10px;
+
+                            if AppData.nominas_view_detalle_page_total > 1 : HorizontalLayout {
+                                spacing: 4px;
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 4px;
+                                    background: AppData.nominas_view_detalle_page_current > 1 ? (btn_bot_prev.has-hover ? #e2e8f0 : #ffffff) : #f8fafc;
+                                    border-width: 1px;
+                                    border-color: AppData.nominas_view_detalle_page_current > 1 ? #cbd5e1 : #e2e8f0;
+                                    opacity: AppData.nominas_view_detalle_page_current > 1 ? 1.0 : 0.4;
+                                    Text { text: "‹"; font-size: 15px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                    btn_bot_prev := TouchArea {
+                                        mouse-cursor: AppData.nominas_view_detalle_page_current > 1 ? pointer : default;
+                                        clicked => {
+                                            if AppData.nominas_view_detalle_page_current > 1 {
+                                                AppLogic.nominas_view_cambiar_pagina(AppData.nominas_view_detalle_page_current - 1);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: AppData.nominas_view_detalle_page_current + " / " + AppData.nominas_view_detalle_page_total;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: #1e3a8a;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 4px;
+                                    background: AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total ? (btn_bot_next.has-hover ? #e2e8f0 : #ffffff) : #f8fafc;
+                                    border-width: 1px;
+                                    border-color: AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total ? #cbd5e1 : #e2e8f0;
+                                    opacity: AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total ? 1.0 : 0.4;
+                                    Text { text: "›"; font-size: 15px; font-weight: 800; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                    btn_bot_next := TouchArea {
+                                        mouse-cursor: AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total ? pointer : default;
+                                        clicked => {
+                                            if AppData.nominas_view_detalle_page_current < AppData.nominas_view_detalle_page_total {
+                                                AppLogic.nominas_view_cambiar_pagina(AppData.nominas_view_detalle_page_current + 1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            // 4. Barra de progreso (visible durante procesamiento)
+            // ══════════════════════════════════════════════════════════════
+            if AppData.nominas_view_is_processing : Rectangle {
+                background: #eff6ff;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #bfdbfe;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    Text {
+                        text: AppData.nominas_view_progress_text;
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #1e3a8a;
+                        horizontal-alignment: center;
+                    }
+
+                    Rectangle {
+                        height: 8px;
+                        border-radius: 4px;
+                        background: #dbeafe;
+
+                        Rectangle {
+                            width: parent.width * AppData.nominas_view_progress_fraction;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: #2563eb;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal de confirmación: borrar todas las nóminas
+    if AppData.show_delete_all_nominas_modal : Rectangle {
+        background: #00000077;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 480px;
+            height: 230px;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #fecaca;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "⚠️";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "¿Borrar Todas las Nóminas?";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+                        Text {
+                            text: "Esta acción eliminará todas las nóminas y sus detalles de la base de datos.";
+                            font-size: 12px;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Card resumen
+                Rectangle {
+                    border-radius: 6px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 4px;
+                        Text {
+                            text: "NÓMINAS Y DETALLES:";
+                            font-size: 10px;
+                            font-weight: 800;
+                            color: #065f46;
+                        }
+                        Text {
+                            text: "Se borrarán todos los registros procesados; los archivos de RustFS se moverán a Trash";
+                            font-size: 13px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    // Cancelar
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_cancel_del_all.has-hover ? #f1f5f9 : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: center;
+                            Text {
+                                text: "Cancelar";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_cancel_del_all := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cancelar_borrar_todas_nominas(); }
+                        }
+                    }
+
+                    // Sí, Borrar Todo
+                    Rectangle {
+                        height: 36px;
+                        border-radius: 6px;
+                        background: btn_confirm_del_all.has-hover ? #b91c1c : #dc2626;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "🗑"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                            Text {
+                                text: "Sí, Borrar Todo";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_confirm_del_all := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.confirmar_borrar_todas_nominas(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

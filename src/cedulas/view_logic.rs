@@ -1205,6 +1205,11 @@ pub fn save_cedulas_audit_to_db(
         }
     }
 
+    // Actualizar reportes_nominas con las nuevas vinculaciones de empleados a obras
+    if let Err(e) = crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client) {
+        log::warn!("Error actualizando reportes_nominas tras guardar cédulas: {}", e);
+    }
+
     Ok(stats)
 }
 

@@ -2,6 +2,7 @@ use chrono::NaiveDate;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use crate::archives::collect_or_extract_files;
 use crate::nominas::excel::generate_excel;
@@ -51,6 +52,7 @@ pub fn process_nominas(
     output_excel_path: &Path,
     temp_dir: &Path,
     progress_callback: impl Fn(usize, usize, &str) + Send + Sync,
+    revision_id: Uuid,
 ) -> Result<NominasProcessResult, String> {
     progress_callback(0, 0, "Buscando y extrayendo nóminas XML...");
 
@@ -306,17 +308,50 @@ pub fn process_nominas(
         }
     }
 
-    // Filter valid employees (require fecha final de pago and employee name)
-    let initial_valid = valid_employees.len();
-    valid_employees.retain(|emp| emp.nomina.fechafinalpago.is_some() && emp.nombre.is_some());
+    // Requisito mínimo para persistir: fecha final de pago y nombre del
+    // trabajador. Una nómina que SUPERVIVIÓ la validación SAT pero no cumple
+    // esto no puede guardarse (el modelo exige esas columnas), pero tampoco debe
+    // desaparecer: antes solo se contaba con `log::warn!` y quedaba fuera tanto
+    // de la base de datos como del Excel de "omitidas", así que el usuario no
+    // tenía ninguna traza. Ahora cada descarte entra a `invalid_items` con su
+    // motivo explícito, de modo que aparece en la hoja de no procesadas y en la
+    // lista de rechazados de la UI.
+    let mut dropped_missing_fields = 0usize;
+    valid_employees.retain(|emp| {
+        let falta_fecha = emp.nomina.fechafinalpago.is_none();
+        let falta_nombre = emp.nombre.is_none();
+        if !falta_fecha && !falta_nombre {
+            return true;
+        }
 
-    let other_inv = if valid_employees.len() < initial_valid {
-        let diff = initial_valid - valid_employees.len();
-        log::warn!("Ignorados {} registros por carecer de fecha final o nombre", diff);
-        diff
-    } else {
-        0
-    };
+        let mut motivos: Vec<&str> = Vec::new();
+        if falta_nombre {
+            motivos.push("falta el nombre del trabajador");
+        }
+        if falta_fecha {
+            motivos.push("falta la fecha final de pago");
+        }
+        let motivo = format!(
+            "Datos incompletos (válida ante SAT pero {}): no se puede registrar en la base de datos",
+            motivos.join(" y ")
+        );
+
+        log::warn!("Nómina descartada ({}): {}", emp.nombrearchivo, motivo);
+        invalid_items.push(UnprocessedNomina {
+            filename: emp.nombrearchivo.clone(),
+            uuid: emp.uuid.as_deref().unwrap_or("").trim().to_uppercase(),
+            rfc_emisor: emp.rfc_emisor.clone().unwrap_or_default(),
+            rfc_receptor: emp.rfc_receptor.clone().unwrap_or_default(),
+            total: emp.total.unwrap_or(0.0),
+            category: "DATOS INCOMPLETOS".to_string(),
+            reason: motivo,
+            is_sat_error: false,
+        });
+        dropped_missing_fields += 1;
+        false
+    });
+
+    let other_inv = dropped_missing_fields;
 
     // Sort valid employees using dedicated CPU pool
     cpu_pool.install(|| {
@@ -411,7 +446,7 @@ pub fn process_nominas(
                     );
                 };
 
-                match crate::db::save_nominas_concurrent(&pool, &valid_employees, Some(&cb)) {
+                match crate::db::save_nominas_concurrent(&pool, &valid_employees, Some(&cb), revision_id) {
                     Ok(db_stats) => {
                         log::info!(
                             "Nóminas guardadas en PostgreSQL concurrentemente: {} nóminas, {} cfdis, {} contratos, {} detalles, {} empleados",

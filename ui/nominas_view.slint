@@ -165,6 +165,31 @@ export component NominasView inherits Rectangle {
                             }
                         }
                     }
+
+                    // El reporte solo contiene nóminas de
+                    // empleados con obras creadas por el
+                    // usuario y fechas coincidentes.
+                    Rectangle {
+                        height: 26px;
+                        border-radius: 13px;
+                        background: #fef3c7;
+                        border-width: 1px;
+                        border-color: #fcd34d;
+                        y: (parent.height - self.height) / 2;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            alignment: center;
+                            Text {
+                                text: "⚠ Solo obras creadas por el usuario";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #92400e;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
                 }
 
                 Text {
@@ -387,48 +412,67 @@ export component NominasView inherits Rectangle {
             VerticalLayout {
                 spacing: 0px;
 
-                // Encabezado fijo
-                Rectangle {
-                    height: 42px;
-                    background: #f1f5f9;
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 0px;
-
-                        // Las columnas del encabezado deben coincidir 1:1 con las
-                        // de las filas, en el mismo orden, y compartir las mismas
-                        // reglas de visibilidad por ancho.
-                        Text { width: 34px; text: "#"; font-size: 12px; font-weight: 700; color: #64748b; horizontal-alignment: center; vertical-alignment: center; }
-                        Text { width: 108px; text: "Periodo"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
-                        Text { width: 46px; text: "Sem."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
-                        Text { horizontal-stretch: 1; min-width: 140px; text: "Trabajador"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
-                        Text { width: 92px; text: "NSS"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.narrow; }
-                        Text { width: 128px; text: "RFC / CURP"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.medium; }
-                        Text { width: 88px; text: "F. Inicio"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.narrow; }
-                        Text { width: 88px; text: "F. Fin"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
-                        Text { width: 88px; text: "F. Pago"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.narrow; }
-                        Text { width: 82px; text: "F. CFDI"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; visible: root.wide; }
-                        Text { width: 68px; text: "Días Nóm."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
-                        Text { width: 68px; text: "Días Céd."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
-                        Text { width: 58px; text: "Dif."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
-                        Text { width: 108px; text: "Percepciones"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
-                        Text { width: 74px; text: "Gravado"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; visible: root.wide; }
-                        Text { width: 74px; text: "Exento"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; visible: root.wide; }
-                        Text { width: 74px; text: "S. Diario"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; visible: root.medium; }
-                        Text { horizontal-stretch: 1; min-width: 150px; text: "Días por mes del trabajador"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
-                    }
-                }
-
-                Rectangle { height: 1px; background: #cbd5e1; }
-
-                // Cuerpo
+                // Cuerpo: la cabecera va DENTRO del ScrollView
+                // para que encabezados y datos se desplacen
+                // juntos (scroll horizontal solo cuando las
+                // columnas no caben en el area visible).
                 ScrollView {
                     vertical-stretch: 1;
 
                     VerticalLayout {
                         spacing: 0px;
+                        min-width: AppData.nominas_table_min_width;
+
+                        // Encabezado
+                        Rectangle {
+                            height: 42px;
+                            background: #f1f5f9;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 0px;
+
+                                // Las columnas del encabezado
+                                // coinciden 1:1 con las de las
+                                // filas, en el mismo orden.
+                                Text { width: 34px; text: "#"; font-size: 12px; font-weight: 700; color: #64748b; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 108px; text: "Periodo"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                Text { width: 46px; text: "Sem."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { horizontal-stretch: 1; min-width: 140px; text: "Trabajador"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                Text { width: 92px; text: "NSS"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                Text { width: 128px; text: "RFC / CURP"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                                Text { width: 88px; text: "F. Inicio"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 88px; text: "F. Fin"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 88px; text: "F. Pago"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 82px; text: "F. CFDI"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 68px; text: "Días Nóm."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 68px; text: "Días Céd."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 58px; text: "Dif."; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+
+                                // Columnas dinamicas: un
+                                // encabezado por cada concepto
+                                // de percepcion subido.
+                                for h in AppData.nominas_percepcion_headers : Text {
+                                    width: 100px;
+                                    text: h;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #7c3aed;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                Text { width: 108px; text: "Percepciones"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { width: 74px; text: "Gravado"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { width: 74px; text: "Exento"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { width: 74px; text: "S. Diario"; font-size: 11px; font-weight: 700; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { horizontal-stretch: 1; min-width: 190px; text: "Días por mes del trabajador"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #cbd5e1; }
 
                         if AppData.nominas_list.length == 0 : Rectangle {
                             height: 180px;
@@ -466,12 +510,12 @@ export component NominasView inherits Rectangle {
                                 Text { width: 108px; text: item.periodo_str; font-size: 12px; font-weight: 700; color: #0f172a; vertical-alignment: center; overflow: elide; }
                                 Text { width: 46px; text: item.semana_fiscal_str; font-size: 11px; font-weight: 700; color: #7c3aed; horizontal-alignment: center; vertical-alignment: center; }
                                 Text { horizontal-stretch: 1; min-width: 140px; text: item.nombre_trabajador; font-size: 12px; font-weight: 600; color: #0f172a; vertical-alignment: center; overflow: elide; }
-                                Text { width: 92px; text: item.nss; font-size: 11px; font-family: "monospace"; color: #334155; vertical-alignment: center; overflow: elide; visible: root.narrow; }
-                                Text { width: 128px; text: item.rfc_curp; font-size: 10.5px; font-family: "monospace"; color: #475569; vertical-alignment: center; overflow: elide; visible: root.medium; }
-                                Text { width: 88px; text: item.fecha_inicial_pago_str; font-size: 11px; color: #334155; horizontal-alignment: center; vertical-alignment: center; visible: root.narrow; }
+                                Text { width: 92px; text: item.nss; font-size: 11px; font-family: "monospace"; color: #334155; vertical-alignment: center; overflow: elide; }
+                                Text { width: 128px; text: item.rfc_curp; font-size: 10.5px; font-family: "monospace"; color: #475569; vertical-alignment: center; overflow: elide; }
+                                Text { width: 88px; text: item.fecha_inicial_pago_str; font-size: 11px; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
                                 Text { width: 88px; text: item.fecha_final_pago_str; font-size: 11px; font-weight: 600; color: #0f172a; horizontal-alignment: center; vertical-alignment: center; }
-                                Text { width: 88px; text: item.fecha_pago_str; font-size: 11px; color: #334155; horizontal-alignment: center; vertical-alignment: center; visible: root.narrow; }
-                                Text { width: 82px; text: item.fecha_emision_str; font-size: 11px; color: #64748b; horizontal-alignment: center; vertical-alignment: center; visible: root.wide; }
+                                Text { width: 88px; text: item.fecha_pago_str; font-size: 11px; color: #334155; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: 82px; text: item.fecha_emision_str; font-size: 11px; color: #64748b; horizontal-alignment: center; vertical-alignment: center; }
 
                                 Text {
                                     width: 68px;
@@ -512,6 +556,21 @@ export component NominasView inherits Rectangle {
                                     }
                                 }
 
+                                // Columnas dinámicas: un
+                                // monto por concepto de
+                                // percepción, alineadas
+                                // con los encabezados.
+                                for v in item.percepciones_cols : Text {
+                                    width: 100px;
+                                    text: v;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #6d28d9;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+
                                 // Percepciones: clic abre el detalle.
                                 Rectangle {
                                     width: 108px;
@@ -548,9 +607,9 @@ export component NominasView inherits Rectangle {
                                     }
                                 }
 
-                                Text { width: 74px; text: item.total_gravado_str; font-size: 11px; color: #334155; horizontal-alignment: right; vertical-alignment: center; visible: root.wide; }
-                                Text { width: 74px; text: item.total_exento_str; font-size: 11px; color: #334155; horizontal-alignment: right; vertical-alignment: center; visible: root.wide; }
-                                Text { width: 74px; text: item.salario_diario_str; font-size: 11px; color: #475569; horizontal-alignment: right; vertical-alignment: center; visible: root.medium; }
+                                Text { width: 74px; text: item.total_gravado_str; font-size: 11px; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { width: 74px; text: item.total_exento_str; font-size: 11px; color: #334155; horizontal-alignment: right; vertical-alignment: center; }
+                                Text { width: 74px; text: item.salario_diario_str; font-size: 11px; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
 
                                 // Desglose por mes del trabajador
                                 HorizontalLayout {

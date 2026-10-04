@@ -12,7 +12,7 @@ pub use calendario::*;
 pub use catalogos::*;
 pub use cedulas::{save_cedulas_concurrent, save_cedulas_to_db, CedulasDbStats};
 pub use client::{create_client, create_pool, DbPool, PooledClient};
-pub use nominas::{save_nominas_concurrent, save_nominas_to_db, NominasDbStats};
+pub use nominas::{save_nominas_concurrent, save_nominas_to_db, delete_all_nominas, NominasDbStats};
 pub use nominas_reporte::*;
 pub use reporte_liquidaciones::*;
 pub use revisiones::*;
@@ -22,6 +22,7 @@ pub use schema::ensure_schema;
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use uuid::Uuid;
     use crate::nominas::models::*;
     use crate::cedulas::business::Business;
     use crate::cedulas::employees::{DataEmployee, Employee as CedulaEmployee, RegistroObra};
@@ -85,7 +86,7 @@ mod tests {
             rfc_emisor: Some("XAXX010101000".to_string()),
             nombre_emisor: Some("EMPRESA CONSTRUCTORA DEL NORTE SA DE CV".to_string()),
             registro_patronal: Some("Y5512345101".to_string()),
-            uuid: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            uuid: Some(Uuid::now_v7().to_string()),
             total: Some(7500.0),
             fechainiciorellaboral: NaiveDate::from_ymd_opt(2022, 1, 15),
             salariobasecotapor: Some(500.0),
@@ -135,7 +136,39 @@ mod tests {
             objeto_imp: Some("01".to_string()),
         });
 
-        let nom_stats = save_nominas_to_db(&mut client, &[emp]);
+        // Crear cliente, registro_patronal y revisión de prueba para la nómina
+        let revision_id = {
+            let mut tx = client.transaction().expect("Failed to start transaction");
+            
+            let cliente_id = Uuid::now_v7();
+            let cliente_nombre = format!("CLIENTE TEST NOMINA {}", Uuid::now_v7());
+            tx.execute(
+                "INSERT INTO public.clientes (id, nombre) VALUES ($1, $2)
+                 RETURNING id",
+                &[&cliente_id, &cliente_nombre],
+            ).expect("Failed to create test cliente");
+            
+            let rp_id = Uuid::now_v7();
+            tx.execute(
+                "INSERT INTO public.registros_patronales (id, id_cliente, registro)
+                 VALUES ($1, $2, 'Y5512345101')
+                 RETURNING id",
+                &[&rp_id, &cliente_id],
+            ).expect("Failed to create test registro_patronal");
+            
+            let rev_id = Uuid::now_v7();
+            tx.execute(
+                "INSERT INTO public.revisiones (id, id_registro_patronal, nombre, folio, fecha_entrega_revision)
+                 VALUES ($1, $2, 'REV TEST NOMINA', 'REV-TEST-NOM', CURRENT_DATE)
+                 RETURNING id",
+                &[&rev_id, &rp_id],
+            ).expect("Failed to create test revision");
+            
+            tx.commit().expect("Failed to commit test data");
+            rev_id
+        };
+
+        let nom_stats = save_nominas_to_db(&mut client, &[emp], revision_id);
         assert!(nom_stats.is_ok(), "save_nominas_to_db failed: {:?}", nom_stats.err());
         let nom_s = nom_stats.unwrap();
         eprintln!("nom_s = {:?}", nom_s);
@@ -257,7 +290,7 @@ mod tests {
         assert_eq!(bad_count, 0, "jifa981012mclmn nunca debe existir en registros_obras");
     }
 
-    #[test]
+#[test]
     fn test_concurrent_db_insertion() {
         let pool = match create_pool(4) {
             Ok(p) => p,
@@ -267,10 +300,39 @@ mod tests {
             }
         };
 
-        {
+        // Crear registro_patronal y revisión de prueba para las nóminas
+        let (rp_id, revision_id) = {
             let mut client = pool.get().expect("Failed to get connection from pool");
-            ensure_schema(&mut client).expect("ensure_schema failed");
-        }
+            let mut tx = client.transaction().expect("Failed to start transaction");
+            
+            // Crear cliente de prueba primero (nombre único para evitar conflictos)
+            let cliente_id = Uuid::now_v7();
+            let cliente_nombre = format!("CLIENTE TEST CONCURRENTE {}", Uuid::now_v7());
+            tx.execute(
+                "INSERT INTO public.clientes (id, nombre) VALUES ($1, $2)
+                 RETURNING id",
+                &[&cliente_id, &cliente_nombre],
+            ).expect("Failed to create test cliente");
+            
+            let rp_id = Uuid::now_v7();
+            tx.execute(
+                "INSERT INTO public.registros_patronales (id, id_cliente, registro)
+                 VALUES ($1, $2, 'Y5512345101')
+                 RETURNING id",
+                &[&rp_id, &cliente_id],
+            ).expect("Failed to create test registro_patronal");
+            
+            let rev_id = Uuid::now_v7();
+            tx.execute(
+                "INSERT INTO public.revisiones (id, id_registro_patronal, nombre, folio, fecha_entrega_revision)
+                 VALUES ($1, $2, 'REV TEST CONCURRENTE', 'REV-TEST-CONC', CURRENT_DATE)
+                 RETURNING id",
+                &[&rev_id, &rp_id],
+            ).expect("Failed to create test revision");
+            
+            tx.commit().expect("Failed to commit test data");
+            (rp_id, rev_id)
+        };
 
         // Generate multiple employee nóminas
         let mut nominas = Vec::new();
@@ -284,7 +346,7 @@ mod tests {
                 rfc_emisor: Some("XAXX010101000".to_string()),
                 nombre_emisor: Some("EMPRESA CONSTRUCTORA DEL NORTE SA DE CV".to_string()),
                 registro_patronal: Some("Y5512345101".to_string()),
-                uuid: Some(format!("99999999-0000-0000-0000-{:012x}", i)),
+                uuid: Some(Uuid::now_v7().to_string()),
                 total: Some(5000.0 + (i as f64) * 100.0),
                 fechainiciorellaboral: NaiveDate::from_ymd_opt(2023, 1, 1),
                 salariobasecotapor: Some(400.0),
@@ -318,7 +380,7 @@ mod tests {
         }
 
         let cb = |_done, _total| {};
-        let nom_stats = save_nominas_concurrent(&pool, &nominas, Some(&cb));
+        let nom_stats = save_nominas_concurrent(&pool, &nominas, Some(&cb), revision_id);
 
         assert!(nom_stats.is_ok(), "save_nominas_concurrent failed: {:?}", nom_stats.err());
         let s = nom_stats.unwrap();

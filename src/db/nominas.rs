@@ -42,6 +42,7 @@ struct CompanyKey {
 fn resolve_company_context(
     tx: &mut Transaction,
     key: &CompanyKey,
+    revision_id: Uuid,
 ) -> Result<(Uuid, Uuid, Uuid), Box<dyn std::error::Error + Send + Sync>> {
     // 1. Cliente
     let nombre_emisor_upper = key.nombre_emisor.trim().to_uppercase();
@@ -113,36 +114,8 @@ fn resolve_company_context(
         }
     };
 
-    // 3. Revisión
-    let rev_nombre = format!("Revisión Nóminas {}-{:02}", key.anio, key.mes_num);
-    let rev_folio = format!("REV-NOM-{}{:02}", key.anio, key.mes_num);
-    let rev_nombre_upper = rev_nombre.trim().to_uppercase();
-    let rev_folio_upper = rev_folio.trim().to_uppercase();
-    let rev_nombre_trun = truncate_str(Some(&rev_nombre_upper), 150).unwrap();
-    let rev_folio_trun = truncate_str(Some(&rev_folio_upper), 20).unwrap();
-
-    let rev_id_opt = tx.query_opt(
-        "SELECT id FROM public.revisiones WHERE id_registro_patronal = $1 AND (nombre = $2 OR TRIM(folio) = TRIM($3)) LIMIT 1",
-        &[&id_registro_patronal, &rev_nombre_trun, &rev_folio_trun],
-    )?;
-
-    let id_revision: Uuid = match rev_id_opt {
-        Some(row) => row.get(0),
-        None => {
-            let new_id = Uuid::now_v7();
-            let today = Utc::now().date_naive();
-            let row = tx.query_one(
-                r#"
-                INSERT INTO public.revisiones (id, id_registro_patronal, nombre, folio, fecha_entrega_revision)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (id_registro_patronal, nombre) DO UPDATE SET nombre = EXCLUDED.nombre
-                RETURNING id
-                "#,
-                &[&new_id, &id_registro_patronal, &rev_nombre_trun, &rev_folio_trun, &today],
-            )?;
-            row.get(0)
-        }
-    };
+    // 3. Revisión - DEBE venir de la UI (no se crean sintéticas)
+    let id_revision = revision_id;
 
     Ok((id_cliente, id_registro_patronal, id_revision))
 }
@@ -162,6 +135,31 @@ fn save_single_nomina_tx(
     let mut contratos_count = 0;
     let mut nominas_count = 0;
     let mut detalles_count = 0;
+
+    // Idempotencia: si el UUID del timbre ya está registrado, esta nómina ya se
+    // guardó en una ejecución anterior. Se omite ANTES de crear el `cfdis` y el
+    // `contratos` para no dejar filas huérfanas que queden apuntando a una
+    // nómina inexistente, y porque la restricción `uq_nominas_timbre_uuid` haría
+    // fallar la transacción completa.
+    //
+    // Devuelve ceros en todas las cuentas: no se insertó nada; la nómina ya
+    // existía. La estadística `nominas_guardadas` no se incrementa.
+    let timbre_uuid_parsed = emp.uuid.as_deref().and_then(|u| Uuid::parse_str(u).ok());
+    if let Some(uuid_timbre) = timbre_uuid_parsed {
+        let ya_existe: bool = tx
+            .query_opt(
+                "SELECT 1 FROM public.nominas WHERE timbre_uuid = $1 LIMIT 1",
+                &[&uuid_timbre],
+            )?
+            .is_some();
+        if ya_existe {
+            log::info!(
+                "Nómina con UUID {} ya registrada; se omite para no duplicar.",
+                uuid_timbre
+            );
+            return Ok((0, 0, 0, 0, 0));
+        }
+    }
 
     // Empleado
     let emp_nombre = emp.nombre.as_deref().map(|s| s.trim().to_uppercase());
@@ -411,6 +409,16 @@ fn save_single_nomina_tx(
     // Nómina
     let id_nomina = Uuid::now_v7();
     let timbre_uuid_parsed = emp.uuid.as_deref().and_then(|u| Uuid::parse_str(u).ok());
+
+    // `salario_base_cotizacion_aportacion_calculado` se guardaba duplicando el
+    // valor DECLARADO (`salario_base_cotizacion_aportacion`), porque
+    // `Employee::calculate_salaries()` no produce un SBC calculado: solo deriva
+    // salario diario y salario diario integrado. Una columna "_calculado" que
+    // repite el declarado hace que cualquier auditoría lea una cifra ficticia,
+    // así que se persiste NULL en lugar de un duplicado silencioso. El par
+    // REAL calculado (SD y SDI) sí se guarda, en las columnas homónimas.
+    let sbc_calculado: Option<f64> = None;
+
     tx.execute(
         r#"
         INSERT INTO public.nominas (
@@ -445,7 +453,7 @@ fn save_single_nomina_tx(
             &emp.salariobasecotapor,
             &emp.salariodiariointegrado,
             &emp.salariodiariocalculado,
-            &emp.salariobasecotapor,
+            &sbc_calculado,
             &emp.salariodiariointegradocalculado,
             &truncate_str(emp.timbre.version.as_deref(), 5),
             &truncate_str(emp.timbre.no_certificado_sat.as_deref(), 50),
@@ -493,7 +501,7 @@ fn save_single_nomina_tx(
             &emp.salariobasecotapor,
             &emp.salariodiariointegrado,
             &emp.salariodiariocalculado,
-            &emp.salariobasecotapor,
+            &sbc_calculado,
             &emp.salariodiariointegradocalculado,
             &truncate_str(emp.timbre.version.as_deref(), 5),
             &truncate_str(emp.timbre.no_certificado_sat.as_deref(), 50),
@@ -617,6 +625,7 @@ pub fn save_nominas_concurrent(
     pool: &DbPool,
     employees: &[Employee],
     progress_cb: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+    revision_id: Uuid,
 ) -> Result<NominasDbStats, String> {
     if employees.is_empty() {
         return Ok(NominasDbStats::default());
@@ -697,7 +706,7 @@ pub fn save_nominas_concurrent(
             };
 
             if !company_map.contains_key(&key) {
-                let context = resolve_company_context(&mut tx, &key)
+                let context = resolve_company_context(&mut tx, &key, revision_id)
                     .map_err(|e| format!("Error resolviendo cliente/empresa: {}", e))?;
                 company_map.insert(key, context);
             }
@@ -830,6 +839,7 @@ pub fn save_nominas_concurrent(
 pub fn save_nominas_to_db(
     client: &mut Client,
     employees: &[Employee],
+    revision_id: Uuid,
 ) -> Result<NominasDbStats, String> {
     let mut stats = NominasDbStats::default();
 
@@ -903,7 +913,7 @@ pub fn save_nominas_to_db(
             mes_num,
         };
 
-        let context = match resolve_company_context(&mut tx, &key) {
+        let context = match resolve_company_context(&mut tx, &key, revision_id) {
             Ok(ctx) => ctx,
             Err(e) => {
                 let _ = tx.rollback();
@@ -943,4 +953,109 @@ pub fn save_nominas_to_db(
     }
 
     Ok(stats)
+}
+
+/// Elimina TODAS las nóminas y sus detalles de la base de
+/// datos, junto con las copias de las tablas de reporte.
+///
+/// Orden de borrado (respeta FKs):
+///   1. `reportes_detalles_nominas` / `reportes_nominas`
+///   2. `detalles_nominas` / `nominas`
+///   3. Purga de huérfanos: `lista_conceptos_cfdis`,
+///      `conceptos_cfdis`, `contratos` y `cfdis` que ya
+///      no referen ninguna nómina restante.
+///
+/// Los catálogos (`tipos_conceptos`, `conceptos`) son
+/// inmutables y nunca se tocan.
+pub fn delete_all_nominas(client: &mut Client) -> Result<u64, String> {
+    let rd = client
+        .execute(
+            r#"
+            DELETE FROM public.reportes_detalles_nominas
+            WHERE id_reporte_nomina IN (
+                SELECT id FROM public.reportes_nominas
+            )
+            "#,
+            &[],
+        )
+        .map_err(|e| {
+            format!("Error eliminando reportes_detalles_nominas: {}", e)
+        })?;
+    let rn = client
+        .execute("DELETE FROM public.reportes_nominas", &[])
+        .map_err(|e| format!("Error eliminando reportes_nominas: {}", e))?;
+    let dn = client
+        .execute("DELETE FROM public.detalles_nominas", &[])
+        .map_err(|e| format!("Error eliminando detalles de nóminas: {}", e))?;
+    let n = client
+        .execute("DELETE FROM public.nominas", &[])
+        .map_err(|e| format!("Error eliminando nóminas: {}", e))?;
+
+    // Purga de CFDI, contratos y conceptos de CFDI que
+    // quedaron huérfanos tras borrar las nóminas.
+    let lc = client
+        .execute(
+            r#"
+            DELETE FROM public.lista_conceptos_cfdis
+            WHERE id_cfdi IN (
+                SELECT cf.id FROM public.cfdis cf
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM public.nominas n2
+                    WHERE n2.id_cfdi = cf.id
+                )
+            )
+            "#,
+            &[],
+        )
+        .map_err(|e| {
+            format!("Error eliminando lista_conceptos_cfdis: {}", e)
+        })?;
+    let cc = client
+        .execute(
+            r#"
+            DELETE FROM public.conceptos_cfdis cc
+            WHERE NOT EXISTS (
+                SELECT 1 FROM public.lista_conceptos_cfdis lc
+                WHERE lc.id_concepto_cfdi = cc.id
+            )
+            "#,
+            &[],
+        )
+        .map_err(|e| {
+            format!("Error eliminando conceptos_cfdis: {}", e)
+        })?;
+    let ct = client
+        .execute(
+            r#"
+            DELETE FROM public.contratos ct
+            WHERE NOT EXISTS (
+                SELECT 1 FROM public.cfdis cf
+                WHERE cf.id = ct.id_cfdi
+            )
+            "#,
+            &[],
+        )
+        .map_err(|e| {
+            format!("Error eliminando contratos: {}", e)
+        })?;
+    let cf = client
+        .execute(
+            r#"
+            DELETE FROM public.cfdis cf
+            WHERE NOT EXISTS (
+                SELECT 1 FROM public.nominas n3
+                WHERE n3.id_cfdi = cf.id
+            )
+            "#,
+            &[],
+        )
+        .map_err(|e| format!("Error eliminando CFDI: {}", e))?;
+
+    log::info!(
+        "Borrado total de nóminas: {} reportes_detalles, {} reportes, \
+         {} detalles, {} nominas, {} lista_cfdi, {} conceptos_cfdi, \
+         {} contratos, {} cfdi",
+        rd, rn, dn, n, lc, cc, ct, cf
+    );
+    Ok(rd + rn + dn + n + lc + cc + ct + cf)
 }

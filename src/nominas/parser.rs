@@ -8,21 +8,17 @@ use crate::nominas::models::{Employee, Percepcion};
 use crate::nominas::utils::clean_concepto;
 
 pub fn parse_xml_file(path: &Path) -> Result<Employee> {
-    let mut parts_iter = path.components().rev();
-    let file = parts_iter
-        .next()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+    // Solo se conserva el NOMBRE del archivo. Antes se componía
+    // "{directorio_padre}/{archivo}", y cuando el XML venía de un ZIP/RAR esa
+    // carpeta padre era el directorio temporal de extracción
+    // (`temp_dir/<archivo>_<pid>_<millis>_<id>/`), que se borra al terminar el
+    // proceso. La base de datos quedaba guardando una ruta que ya no existía.
+    // El nombre base es estable y además es lo que la UI muestra, de modo que
+    // base de datos y pantalla coinciden.
+    let file_name = path
+        .file_name()
+        .map(|c| c.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let dir = parts_iter
-        .next()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .unwrap_or_default();
-
-    let file_name = if !dir.is_empty() {
-        format!("{}/{}", dir, file)
-    } else {
-        file.clone()
-    };
 
     let text = fs::read_to_string(path)
         .with_context(|| format!("No se pudo leer el archivo XML: {}", file_name))?;

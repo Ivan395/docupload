@@ -6,7 +6,9 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use uuid::Uuid;
 
 use crate::db::nominas_reporte::{
-    fetch_nominas_reporte, fetch_percepciones_nomina, summarize_nominas, NominaReporteRowDb,
+    fetch_nominas_reporte, fetch_percepcion_conceptos,
+    fetch_percepciones_nomina, fetch_percepciones_por_nomina,
+    summarize_nominas, NominaReporteRowDb,
 };
 use crate::db::DbPool;
 use crate::{
@@ -31,6 +33,11 @@ pub struct NominasSessionState {
     pub filter_dias_idx: usize,
     pub only_sin_cedula: bool,
     pub mostrar_detalle: bool,
+    /// Encabezados de las columnas dinámicas de percepciones.
+    pub percepcion_headers: Vec<String>,
+    /// Montos por percepción de cada nómina, alineados con
+    /// `percepcion_headers` e indexados por `id_nomina`.
+    pub percepciones_por_nomina: HashMap<Uuid, Vec<f64>>,
 }
 
 impl Default for NominasSessionState {
@@ -49,6 +56,8 @@ impl Default for NominasSessionState {
             filter_dias_idx: 0,
             only_sin_cedula: false,
             mostrar_detalle: true,
+            percepcion_headers: Vec::new(),
+            percepciones_por_nomina: HashMap::new(),
         }
     }
 }
@@ -303,6 +312,24 @@ pub fn render_nominas_ui(ui: &MainWindow, state: &NominasSessionState) {
             }
         }
 
+        // Montos por concepto de percepción, alineados con los
+        // encabezados dinámicos. "-" cuando no hay monto.
+        let percepciones_cols: Vec<SharedString> = state
+            .percepciones_por_nomina
+            .get(&r.id_nomina)
+            .map(|v| {
+                v.iter()
+                    .map(|m| {
+                        if m.abs() < 0.005 {
+                            "-".to_string().into()
+                        } else {
+                            fmt_money(*m).into()
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["-".into(); state.percepcion_headers.len()]);
+
         rows.push(NominaRow {
             idx: idx as i32,
             id_nomina: r.id_nomina.to_string().into(),
@@ -346,6 +373,7 @@ pub fn render_nominas_ui(ui: &MainWindow, state: &NominasSessionState) {
             total_dias_empleado: fmt_dias(tot_nom).into(),
             total_dias_meses: meses.len() as i32,
             meses: ModelRc::new(VecModel::from(meses)),
+            percepciones_cols: ModelRc::new(VecModel::from(percepciones_cols)),
             row_bg_color: if alt {
                 slint::Color::from_rgb_u8(0xfb, 0xfc, 0xfe)
             } else {
@@ -356,6 +384,20 @@ pub fn render_nominas_ui(ui: &MainWindow, state: &NominasSessionState) {
     }
 
     d.set_nominas_list(ModelRc::new(VecModel::from(rows)));
+
+    // Encabezados dinámicos de percepciones y ancho mínimo de
+    // tabla para que el scroll horizontal aparezca solo cuando
+    // las columnas no caben en el área visible.
+    d.set_nominas_percepcion_headers(ModelRc::new(VecModel::from(
+        state
+            .percepcion_headers
+            .iter()
+            .map(|h| h.as_str().into())
+            .collect::<Vec<SharedString>>(),
+    )));
+    // 1540px de columnas fijas + ~100px por columna de percepción.
+    let min_w = 1540.0 + (state.percepcion_headers.len() as f32) * 100.0;
+    d.set_nominas_table_min_width(min_w);
 
     // Resumen y KPIs sobre el conjunto filtrado.
     let s = summarize_nominas(&state.filtered_rows);
@@ -431,6 +473,24 @@ pub fn sync_and_load_nominas_data(
 
     st.all_rows = rows;
     st.dias_por_empleado = build_dias_por_empleado(&st.all_rows);
+
+    // Columnas dinámicas de percepciones: encabezados y montos
+    // por concepto de cada nómina.
+    st.percepcion_headers = fetch_percepcion_conceptos(&mut client)
+        .unwrap_or_default();
+    let matrix = fetch_percepciones_por_nomina(&mut client)
+        .unwrap_or_default();
+    let headers = &st.percepcion_headers;
+    st.percepciones_por_nomina = matrix
+        .into_iter()
+        .map(|(id_nom, por_concepto)| {
+            let alineados = headers
+                .iter()
+                .map(|h| por_concepto.get(h).copied().unwrap_or(0.0))
+                .collect::<Vec<f64>>();
+            (id_nom, alineados)
+        })
+        .collect();
 
     // Opciones de filtro, ordenadas de más reciente a más antigua.
     // El índice 0 es "Todos" para no filtrar por defecto.

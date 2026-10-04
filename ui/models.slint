@@ -16,6 +16,7 @@ export struct FileItemData {
     filesize: string,
     extension: string,
     is_archive: bool,
+    rustfs_path: string,
 }
 
 export struct UnprocessedItemData {
@@ -323,6 +324,10 @@ export struct NominaRow {
     total_dias_empleado: string,
     total_dias_meses: int,
     meses: [NominaEmpleadoDiaItem],
+
+    // Montos por concepto de percepción (columnas dinámicas),
+    // alineados con AppData.nominas_percepcion_headers
+    percepciones_cols: [string],
 
     row_bg_color: color,
     row_hover_color: color,
@@ -748,6 +753,49 @@ export global AppData {
     // Control de acceso a Cédulas de Cuotas (deshabilitado hasta acceder desde Registros de Obras)
     in-out property <bool> cedulas_access_allowed: false;
 
+    // ─── VISTA DE CARGA DE NÓMINAS (máquina de estados: 0=vacío, 1=archivos, 2=procesado) ───
+    // Estado de la vista: 0 = En blanco / Solo subir, 1 = Archivos seleccionados / Por guardar, 2 = Procesado y Guardado en BD
+    in-out property <int> nominas_view_state: 0;
+    in-out property <[FileItemData]> nominas_view_files: [];
+    in-out property <int> nominas_view_files_count: 0;
+    in-out property <string> nominas_view_total_size_str: "0.0 MB";
+    in-out property <string> nominas_view_extracted_count_str: "0 Nóminas Extraídas";
+    in-out property <int> nominas_view_warning_count: 0;
+    in-out property <string> nominas_view_status_banner_text: "Sin archivos en memoria temporal";
+    in-out property <bool> nominas_view_is_processing: false;
+    in-out property <float> nominas_view_progress_fraction: 0.0;
+    in-out property <string> nominas_view_progress_text: "";
+
+    // Estadísticas tras procesar y guardar en BD
+    in-out property <string> nominas_view_periodo_rango_str: "";
+    in-out property <string> nominas_view_periodo_sub_str: "";
+    in-out property <string> nominas_view_total_trabajadores_str: "0";
+    in-out property <string> nominas_view_total_dias_str: "0";
+    in-out property <string> nominas_view_total_percepciones_str: "$0.00";
+    in-out property <string> nominas_view_sbc_promedio_str: "$0.00";
+    in-out property <string> nominas_view_sbc_sub_str: "";
+    in-out property <string> nominas_view_sbc_min_str: "";
+    in-out property <string> nominas_view_sbc_max_str: "";
+
+    // Tabla paginada de detalle de nóminas procesadas
+    in-out property <[NominaRow]> nominas_view_detalle_list: [];
+    in-out property <int> nominas_view_detalle_total_count: 0;
+    in-out property <int> nominas_view_detalle_page_current: 1;
+    in-out property <int> nominas_view_detalle_page_total: 1;
+    in-out property <int> nominas_view_detalle_page_start_row: 0;
+    in-out property <int> nominas_view_detalle_page_end_row: 0;
+    in-out property <string> nominas_view_detalle_search: "";
+    in-out property <int> nominas_view_detalle_page_size: 100;
+
+    // Control de acceso a la vista de carga de nóminas
+    in-out property <bool> nominas_upload_access_allowed: false;
+
+    // Modal de confirmación para borrar todas las nóminas
+    in-out property <bool> show_delete_all_nominas_modal: false;
+
+    // Columnas dinámicas de percepciones del reporte de nóminas
+    in-out property <[string]> nominas_percepcion_headers: [];
+    in-out property <length> nominas_table_min_width: 1540px;
     // --- Vista 7: Reporte de Liquidaciones y Prorrateo por Obra ---
     in-out property <bool> reporte_liquidaciones_access_allowed: false;
     in-out property <[ReporteLiquidacionRow]> reporte_liquidaciones_list: [];
@@ -940,7 +988,6 @@ export global AppData {
     in-out property <int> nominas_filter_dias_idx: 0;
     in-out property <bool> nominas_only_sin_cedula: false;
     in-out property <bool> nominas_mostrar_detalle: true;
-
     // Paginación
     in-out property <int> nominas_page_current: 0;
     in-out property <int> nominas_page_total: 0;
@@ -1035,9 +1082,22 @@ export global AppLogic {
     callback cedulas_filtrar_busqueda(string);
     callback cedulas_filtrar_mes(int);
     callback cedulas_filtrar_obra(int);
-    callback recargar_cedulas_view();
-    callback close_cedulas_client_mismatch_modal();
+callback recargar_cedulas_view();
 
+    // ─── Vista de Carga de Nóminas ───
+    callback select_nominas_view_files();
+    callback select_nominas_view_folder();
+    callback procesar_y_guardar_nominas();
+    callback recargar_nominas_view();
+    callback realizar_reporte_nominas();
+    callback remove_nomina_view_file(int);
+    callback nominas_view_filtrar_busqueda(string);
+    callback nominas_view_cambiar_pagina(int);
+    callback solicitar_borrar_todas_nominas();
+    callback cancelar_borrar_todas_nominas();
+    callback confirmar_borrar_todas_nominas();
+
+    callback close_cedulas_client_mismatch_modal();
     // Empleados
     callback open_new_empleado_dialog();
     callback select_empleado_for_edit(string);
@@ -1078,6 +1138,7 @@ export global AppLogic {
 
     // Reporte Nóminas
     callback open_nominas_view();
+    callback open_nominas_carga();
 
     // Redimensionado de la ventana (alimenta las vistas responsivas)
     callback view_resized(length);

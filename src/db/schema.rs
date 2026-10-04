@@ -763,10 +763,57 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         JOIN public.liquidaciones l ON l.id = rl.id_liquidacion
         JOIN public.empleados e ON e.id = l.id_empleado
         JOIN public.registros_obras ro ON ro.id_revision = rl.id_revision AND ro.numero = LEFT(TRIM(e.clave_ubicacion), 15)
-        WHERE NOT EXISTS (
-            SELECT 1 FROM public.reportes_vinculaciones_obras_liquidaciones rvol 
-            WHERE rvol.id_reporte_liquidacion = rl.id
-        );
+WHERE NOT EXISTS (
+                SELECT 1 FROM public.reportes_vinculaciones_obras_liquidaciones rvol 
+                WHERE rvol.id_reporte_liquidacion = rl.id
+            );
+
+        -- Idempotencia de nóminas: índice ÚNICO PARCIAL sobre el UUID del timbre.
+        --
+        -- Reprocesar el mismo ZIP creaba un `cfdis`, un `contratos`, una
+        -- `nominas` y N `detalles_nominas` nuevos cada vez, porque el INSERT
+        -- genera siempre un `uuidv7()` y la tabla no tenía ninguna restricción
+        -- sobre `timbre_uuid`. El reporte de nóminas suma sus filas sin
+        -- DISTINCT, así que los totales quedaban duplicados.
+        --
+        -- Es PARCIAL (`WHERE timbre_uuid IS NOT NULL`) porque las nóminas sin
+        -- timbre legítimamenteNULL no deben colisionar entre sí.
+        --
+        -- La migración es SEGURA: si ya existen duplicados históricos, NO borra
+        -- nada y NO crea el índice; solo avisa por log para que la resolución sea
+        -- una decisión consciente del usuario.
+        DO $$
+        DECLARE
+            dup_count BIGINT;
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'nominas'
+            ) THEN
+                SELECT COUNT(*) INTO dup_count FROM (
+                    SELECT timbre_uuid
+                    FROM public.nominas
+                    WHERE timbre_uuid IS NOT NULL
+                    GROUP BY timbre_uuid
+                    HAVING COUNT(*) > 1
+                ) d;
+
+                IF dup_count > 0 THEN
+                    RAISE WARNING 'Nóminas duplicadas por timbre_uuid: % grupo(s). NO se creó el índice único; resuelve los duplicados y reejecuta.', dup_count;
+                ELSIF NOT EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE schemaname = 'public'
+                      AND tablename = 'nominas'
+                      AND indexname = 'uq_nominas_timbre_uuid'
+                ) THEN
+                    CREATE UNIQUE INDEX uq_nominas_timbre_uuid
+                        ON public.nominas (timbre_uuid)
+                        WHERE timbre_uuid IS NOT NULL;
+                    RAISE NOTICE 'Índice único parcial uq_nominas_timbre_uuid creado.';
+                END IF;
+            END IF;
+        END $$;
         "#,
     )?;
 

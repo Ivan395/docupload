@@ -12,6 +12,7 @@ import { CedulaCuotasView } from "cedula_cuotas_view.slint";
 import { ReporteLiquidacionesView } from "reporte_liquidaciones_view.slint";
 import { CalendarioView } from "calendario_view.slint";
 import { NominasView } from "nominas_view.slint";
+import { NominasUploadView } from "nominas_upload_view.slint";
 import { UploadCard } from "upload_card.slint";
 import { ActionPanel } from "action_panel.slint";
 import { ResultsPanel } from "results_panel.slint";
@@ -266,6 +267,11 @@ export component MainWindow inherits Window {
 
             // VISTA 9: Reporte de Nóminas (F10)
             if AppData.current_view == 9 : NominasView {
+                vertical-stretch: 1;
+            }
+
+            // VISTA 10: Carga y Procesamiento de Nóminas
+            if AppData.current_view == 10 : NominasUploadView {
                 vertical-stretch: 1;
             }
 

@@ -5,6 +5,7 @@ pub mod calendario_view_logic;
 pub mod cedulas;
 pub mod db;
 pub mod nominas;
+pub mod nominas_upload_view_logic;
 pub mod nominas_view_logic;
 pub mod rustfs;
 pub mod reporte_view_logic;
@@ -18,6 +19,7 @@ use crate::db::revisiones::*;
 use crate::cedulas::view_logic::*;
 use crate::reporte_view_logic::*;
 use crate::nominas_view_logic::*;
+use crate::nominas_upload_view_logic::NominasUploadSessionState;
 use crate::validation::*;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
@@ -26,6 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use uuid::Uuid;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use sha2::{Digest, Sha256};
@@ -100,6 +103,7 @@ fn update_nominas_ui(ui: &MainWindow, entries: &[SelectedFileEntry]) {
             filesize: e.filesize_str.clone().into(),
             extension: e.extension.clone().into(),
             is_archive: e.is_archive,
+            rustfs_path: "".into(),
         })
         .collect();
 
@@ -119,6 +123,7 @@ fn update_cedulas_ui(ui: &MainWindow, entries: &[SelectedFileEntry]) {
             filesize: e.filesize_str.clone().into(),
             extension: e.extension.clone().into(),
             is_archive: e.is_archive,
+            rustfs_path: "".into(),
         })
         .collect();
 
@@ -964,18 +969,21 @@ fn spawn_nominas_worker(
         }
     }
 
-    let (nom_client_nom, nom_rp_reg, nom_rev_nom) = if let Some(ui) = ui_weak.upgrade() {
+    let (nom_client_nom, nom_rp_reg, nom_rev_nom, nom_rev_id) = if let Some(ui) = ui_weak.upgrade() {
         let app_data = ui.global::<AppData>();
         let c = app_data.get_selected_cliente_nombre().to_string();
         let rp = app_data.get_selected_rp_registro().to_string();
         let r = app_data.get_selected_revision_nombre().to_string();
+        let rev_id_str = app_data.get_selected_revision_id().to_string();
+        let rev_id = Uuid::parse_str(&rev_id_str).expect("Revision ID inválido: debe seleccionar una revisión válida en la UI");
         (
             if c.is_empty() || c == "Todos los Clientes" { "GENERAL".to_string() } else { c },
             if rp.is_empty() { "GENERAL".to_string() } else { rp },
             if r.is_empty() { "GENERAL".to_string() } else { r },
+            rev_id,
         )
     } else {
-        ("GENERAL".to_string(), "GENERAL".to_string(), "GENERAL".to_string())
+        ("GENERAL".to_string(), "GENERAL".to_string(), "GENERAL".to_string(), Uuid::now_v7())
     };
 
     let ui_w = ui_weak.clone();
@@ -1044,7 +1052,7 @@ fn spawn_nominas_worker(
             }
         };
 
-        let res = nominas::processor::process_nominas(&nominas_paths, &nominas_out_path, &temp_dir, progress_cb);
+        let res = nominas::processor::process_nominas(&nominas_paths, &nominas_out_path, &temp_dir, progress_cb, nom_rev_id);
 
         let ui_event = ui_w.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -2357,6 +2365,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let cedulas_session = Arc::new(Mutex::new(CedulasViewState::default()));
     let reporte_session = Arc::new(Mutex::new(ReporteSessionState::default()));
     let nominas_session = Arc::new(Mutex::new(NominasSessionState::default()));
+    let nominas_upload_session = Arc::new(Mutex::new(NominasUploadSessionState::default()));
 
     // Store generated Excel file paths for direct download/saving
     let last_nominas_excel = Arc::new(Mutex::new(Option::<PathBuf>::None));
@@ -5327,6 +5336,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 57. Callbacks de Reporte Nóminas
     wire_nominas_callbacks(&main_window, db_pool.clone(), nominas_session.clone());
+
+    // 57b. Callbacks de la vista de Carga de Nóminas (máquina de estados)
+    crate::nominas_upload_view_logic::wire_nominas_upload_callbacks(
+        &main_window,
+        db_pool.clone(),
+        nominas_upload_session.clone(),
+        nominas_session.clone(),
+    );
 
     // 58. Redimensionado: publica el ancho del área de contenido para que las
     // tablas adaptativas (nóminas) ajusten qué columnas muestran.
