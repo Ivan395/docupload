@@ -45,9 +45,10 @@ component ReporteNumericCell inherits Rectangle {
 export component ReporteLiquidacionesView inherits Rectangle {
     background: #f8fafc;
 
-    VerticalLayout {
-        padding: 20px;
-        spacing: 14px;
+    ScrollView {
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
 
         // 1. Encabezado Superior y Botones de Acción
         HorizontalLayout {
@@ -570,6 +571,79 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
+                // Acciones por Lote (cuando hay selección)
+                if AppData.reporte_selected_count > 0 : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: center;
+                    cross-axis-alignment: center;
+
+                    // Botón Desvincular Obra
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 5px;
+                        background: btn_batch_desvincular.has-hover ? #fee2e2 : #ffffff;
+                        border-width: 1px;
+                        border-color: #fca5a5;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 10px;
+                            spacing: 5px;
+                            alignment: center;
+                            cross-axis-alignment: center;
+
+                            Text { text: "🔗❌"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Desvincular Obra";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #dc2626;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_batch_desvincular := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_batch_desvincular_obra();
+                            }
+                        }
+                    }
+
+                    // Botón Igualar Días (Obra = Cédula)
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 5px;
+                        background: btn_batch_igualar.has-hover ? #f0fdf4 : #ffffff;
+                        border-width: 1px;
+                        border-color: #86efac;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 10px;
+                            spacing: 5px;
+                            alignment: center;
+                            cross-axis-alignment: center;
+
+                            Text { text: "⚡"; font-size: 12px; vertical-alignment: center; }
+                            Text {
+                                text: "Igualar Días";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #16a34a;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_batch_igualar := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_request_confirm_igualar_dias();
+                            }
+                        }
+                    }
+                }
+
                 // Separador visual
                 Rectangle { width: 1px; height: 26px; background: #bfdbfe; }
 
@@ -698,7 +772,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
         // 5. Tabla Principal con Encabezados Fijos en Scroll Vertical y sincronizados en Horizontal
         Rectangle {
-            vertical-stretch: 1;
+            height: 580px;
             border-radius: 8px;
             background: #ffffff;
             border-width: 1px;
@@ -805,19 +879,19 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             // Filas de Datos (Paginadas)
                             for item[idx] in AppData.reporte_liquidaciones_list : Rectangle {
                             height: 40px;
-                            background: item.selected ? #eff6ff : (row_touch.has-hover ? (item.is_assigned ? item.row_hover_color : #f8fafc) : (item.is_assigned ? item.row_bg_color : (Math.mod(idx, 2) == 0 ? #ffffff : #fbfcfe)));
+                            background: item.selected ? #eff6ff : (row_touch.has-hover ? (item.has_incidencias ? #fef3c7 : (item.is_assigned ? item.row_hover_color : #f8fafc)) : (item.has_incidencias ? #fffbeb : (item.is_assigned ? item.row_bg_color : (Math.mod(idx, 2) == 0 ? #ffffff : #fbfcfe))));
                             border-width: 1px;
-                            border-color: item.is_assigned ? item.row_hover_color : #f1f5f9;
+                            border-color: item.has_incidencias ? #fcd34d : (item.is_assigned ? item.row_hover_color : #f1f5f9);
 
                             row_touch := TouchArea {}
 
-                            // Barra lateral de color distintivo del Registro de Obra
-                            if item.is_assigned : Rectangle {
+                            // Barra lateral de color distintivo del Registro de Obra o Alerta de Incidencia
+                            if item.has_incidencias || item.is_assigned : Rectangle {
                                 x: 0px;
                                 y: 0px;
                                 width: 4px;
                                 height: parent.height;
-                                background: item.row_accent_color;
+                                background: item.has_incidencias ? #f59e0b : item.row_accent_color;
                             }
 
                             HorizontalLayout {
@@ -835,11 +909,18 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                         x: (parent.width - self.width) / 2;
                                         y: (parent.height - self.height) / 2;
                                         border-radius: 3px;
-                                        background: item.selected ? #2563eb : #ffffff;
+                                        background: item.is_baja ? #f1f5f9 : (item.selected ? #2563eb : #ffffff);
                                         border-width: 1px;
-                                        border-color: item.selected ? #2563eb : #cbd5e1;
-                                        Text { text: "✓"; font-size: 12px; color: #ffffff; horizontal-alignment: center; vertical-alignment: center; visible: item.selected; }
-                                        TouchArea {
+                                        border-color: item.is_baja ? #cbd5e1 : (item.selected ? #2563eb : #cbd5e1);
+                                        Text {
+                                            text: item.is_baja ? "🔒" : "✓";
+                                            font-size: item.is_baja ? 9px : 12px;
+                                            color: item.is_baja ? #94a3b8 : #ffffff;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            visible: item.is_baja || item.selected;
+                                        }
+                                        if !item.is_baja : TouchArea {
                                             mouse-cursor: pointer;
                                             clicked => {
                                                 AppLogic.reporte_toggle_select_row(item.id_reporte_liq);
@@ -916,9 +997,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     width: 210px;
                                     height: 28px;
                                     border-radius: 5px;
-                                    background: item.is_assigned ? #f0fdf4 : #fef2f2;
+                                    background: item.is_baja ? #f5f5f5 : (item.is_assigned ? #f0fdf4 : #fef2f2);
                                     border-width: 1px;
-                                    border-color: item.is_assigned ? #bbf7d0 : #fecaca;
+                                    border-color: item.is_baja ? #e0e0e0 : (item.is_assigned ? #bbf7d0 : #fecaca);
                                     y: (parent.height - self.height) / 2;
 
                                     HorizontalLayout {
@@ -926,17 +1007,17 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                         padding-right: 6px;
                                         alignment: space-between;
                                         Text {
-                                            text: item.obra_label;
+                                            text: item.is_baja ? ("🔒 " + item.obra_label) : item.obra_label;
                                             font-size: 12px;
                                             font-weight: 700;
-                                            color: item.is_assigned ? #166534 : #b91c1c;
+                                            color: item.is_baja ? #9e9e9e : (item.is_assigned ? #166534 : #b91c1c);
                                             vertical-alignment: center;
                                             overflow: elide;
                                         }
-                                        Text { text: "▾"; font-size: 11px; color: item.is_assigned ? #16a34a : #dc2626; vertical-alignment: center; }
+                                        if !item.is_baja : Text { text: "▾"; font-size: 11px; color: item.is_assigned ? #16a34a : #dc2626; vertical-alignment: center; }
                                     }
 
-                                    TouchArea {
+                                    if !item.is_baja : TouchArea {
                                         mouse-cursor: pointer;
                                         clicked => {
                                             AppLogic.reporte_open_unified_modal(item.id_reporte_liq);
@@ -949,21 +1030,21 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     width: 65px;
                                     height: 26px;
                                     border-radius: 4px;
-                                    background: #f1f5f9;
+                                    background: item.is_baja ? #f5f5f5 : #f1f5f9;
                                     border-width: 1px;
-                                    border-color: #cbd5e1;
+                                    border-color: item.is_baja ? #e0e0e0 : #cbd5e1;
                                     y: (parent.height - self.height) / 2;
 
                                     Text {
                                         text: item.dias_cedula;
                                         font-size: 12.5px;
                                         font-weight: 700;
-                                        color: #1e293b;
+                                        color: item.is_baja ? #9e9e9e : #1e293b;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
 
-                                    TouchArea {
+                                    if !item.is_baja : TouchArea {
                                         mouse-cursor: pointer;
                                         clicked => {
                                             AppLogic.reporte_open_unified_modal(item.id_reporte_liq);
@@ -976,21 +1057,21 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     width: 65px;
                                     height: 26px;
                                     border-radius: 4px;
-                                    background: item.is_assigned ? #eff6ff : #fff1f2;
+                                    background: item.is_baja ? #f5f5f5 : (item.is_assigned ? #eff6ff : #fff1f2);
                                     border-width: 1px;
-                                    border-color: item.is_assigned ? #93c5fd : #fecdd3;
+                                    border-color: item.is_baja ? #e0e0e0 : (item.is_assigned ? #93c5fd : #fecdd3);
                                     y: (parent.height - self.height) / 2;
 
                                     Text {
-                                        text: item.is_assigned ? item.dias_obra : "-";
+                                        text: item.is_baja ? "🔒" : (item.is_assigned ? item.dias_obra : "-");
                                         font-size: 12.5px;
                                         font-weight: 800;
-                                        color: item.is_assigned ? #1d4ed8 : #e11d48;
+                                        color: item.is_baja ? #9e9e9e : (item.is_assigned ? #1d4ed8 : #e11d48);
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
 
-                                    TouchArea {
+                                    if !item.is_baja : TouchArea {
                                         mouse-cursor: pointer;
                                         clicked => {
                                             AppLogic.reporte_open_unified_modal(item.id_reporte_liq);
@@ -999,16 +1080,23 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                 }
 
                                 // Clave
-                                TextInput {
+                                Rectangle {
                                     width: 75px;
-                                    text: item.clave;
-                                    read-only: true;
-                                    single-line: true;
-                                    font-size: 12px;
-                                    font-weight: 600;
-                                    color: #334155;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                    height: 26px;
+                                    border-radius: 4px;
+                                    background: item.is_baja ? #fee2e2 : #f1f5f9;
+                                    border-width: 1px;
+                                    border-color: item.is_baja ? #fca5a5 : #cbd5e1;
+                                    y: (parent.height - self.height) / 2;
+
+                                    Text {
+                                        text: item.clave;
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        color: item.is_baja ? #b91c1c : #334155;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
                                 }
 
                                 // Fecha
@@ -1044,7 +1132,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     read-only: true;
                                     single-line: true;
                                     font-size: 12px;
-                                    color: #64748b;
+                                    font-weight: (item.has_incidencias && item.lic_str != "-") ? 800 : 400;
+                                    color: (item.has_incidencias && item.lic_str != "-") ? #b45309 : #64748b;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -1056,7 +1145,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     read-only: true;
                                     single-line: true;
                                     font-size: 12px;
-                                    color: #64748b;
+                                    font-weight: (item.has_incidencias && item.inc_str != "-") ? 800 : 400;
+                                    color: (item.has_incidencias && item.inc_str != "-") ? #b45309 : #64748b;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -1068,7 +1158,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     read-only: true;
                                     single-line: true;
                                     font-size: 12px;
-                                    color: #64748b;
+                                    font-weight: (item.has_incidencias && item.aus_str != "-") ? 800 : 400;
+                                    color: (item.has_incidencias && item.aus_str != "-") ? #b45309 : #64748b;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -1202,12 +1293,17 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                         width: 26px;
                                         height: 26px;
                                         border-radius: 4px;
-                                        background: btn_act_obra.has-hover ? #e2e8f0 : transparent;
+                                        background: (!item.is_baja && btn_act_obra.has-hover) ? #e2e8f0 : transparent;
 
-                                        Text { text: "✏️"; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { text: item.is_baja ? "🔒" : "✏️"; font-size: item.is_baja ? 11px : 14px; horizontal-alignment: center; vertical-alignment: center; color: item.is_baja ? #94a3b8 : #0f172a; }
                                         btn_act_obra := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { AppLogic.reporte_open_unified_modal(item.id_reporte_liq); }
+                                            enabled: !item.is_baja;
+                                            mouse-cursor: !item.is_baja ? pointer : default;
+                                            clicked => {
+                                                if !item.is_baja {
+                                                    AppLogic.reporte_open_unified_modal(item.id_reporte_liq);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1499,6 +1595,192 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 }
             }
         }
+
+        // 7. Análisis de Guarderías (Tope 18% por Registro de Obra del Usuario)
+        if AppData.reporte_guarderias_obras.length > 0 : VerticalLayout {
+            spacing: 10px;
+
+            for g_item in AppData.reporte_guarderias_obras : Rectangle {
+                border-radius: 8px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: g_item.supera_18 ? #facc15 : #e2e8f0;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+
+                    // Encabezado de la Obra y Alerta si supera el 18%
+                    HorizontalLayout {
+                        alignment: space-between;
+                        spacing: 12px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Text { text: "🏗️"; font-size: 15px; vertical-alignment: center; }
+                            Text {
+                                text: "Registro de Obra: " + g_item.obra_label + " (" + g_item.empleados_count + " registros vinculados)";
+                                font-size: 13px;
+                                font-weight: 800;
+                                color: #1e3a8a;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        if g_item.supera_18 : Rectangle {
+                            height: 26px;
+                            border-radius: 4px;
+                            background: #fef08a;
+                            border-width: 1px;
+                            border-color: #eab308;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 6px;
+                                alignment: center;
+                                Text { text: "⚠️"; font-size: 12px; vertical-alignment: center; }
+                                Text {
+                                    text: "ADVERTENCIA: Guarderías supera el 18% del valor de la obra";
+                                    font-size: 11.5px;
+                                    font-weight: 800;
+                                    color: #854d0e;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    // Cuadros KPI Responsivos de Contraste
+                    HorizontalLayout {
+                        spacing: 12px;
+
+                        // Cuadro 1: Valor Guarderías (1% Total GPS) -> Amarillo si supera el 18%
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 70px;
+                            border-radius: 8px;
+                            background: g_item.supera_18 ? #fef9c3 : #ffffff;
+                            border-width: g_item.supera_18 ? 2px : 1px;
+                            border-color: g_item.supera_18 ? #eab308 : #e2e8f0;
+
+                            VerticalLayout {
+                                padding: 10px;
+                                alignment: space-between;
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    Text {
+                                        text: "VALOR GUARDERÍAS (1% GPS)";
+                                        font-size: 11px;
+                                        font-weight: 800;
+                                        color: g_item.supera_18 ? #854d0e : #64748b;
+                                        letter-spacing: 0.5px;
+                                    }
+                                    if g_item.supera_18 : Text {
+                                        text: "⚠️ > 18%";
+                                        font-size: 11px;
+                                        font-weight: 800;
+                                        color: #ca8a04;
+                                    }
+                                }
+                                Text {
+                                    text: g_item.valor_guarderias_str;
+                                    font-size: 18px;
+                                    font-weight: 800;
+                                    color: g_item.supera_18 ? #854d0e : #0f172a;
+                                }
+                            }
+                        }
+
+                        // Cuadro 2: Valor Total de la Obra
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 70px;
+                            border-radius: 8px;
+                            background: #ffffff;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+
+                            VerticalLayout {
+                                padding: 10px;
+                                alignment: space-between;
+                                Text {
+                                    text: "VALOR TOTAL DE LA OBRA";
+                                    font-size: 11px;
+                                    font-weight: 800;
+                                    color: #64748b;
+                                    letter-spacing: 0.5px;
+                                }
+                                Text {
+                                    text: g_item.monto_obra_str;
+                                    font-size: 18px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                }
+                            }
+                        }
+
+                        // Cuadro 3: Límite 18% de la Obra
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 70px;
+                            border-radius: 8px;
+                            background: #f0fdf4;
+                            border-width: 1px;
+                            border-color: #bbf7d0;
+
+                            VerticalLayout {
+                                padding: 10px;
+                                alignment: space-between;
+                                Text {
+                                    text: "LÍMITE 18% DE LA OBRA";
+                                    font-size: 11px;
+                                    font-weight: 800;
+                                    color: #166534;
+                                    letter-spacing: 0.5px;
+                                }
+                                Text {
+                                    text: g_item.limite_18_obra_str;
+                                    font-size: 18px;
+                                    font-weight: 800;
+                                    color: #15803d;
+                                }
+                            }
+                        }
+
+                        // Cuadro 4: Total Cuotas GPS IMSS
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 70px;
+                            border-radius: 8px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+
+                            VerticalLayout {
+                                padding: 10px;
+                                alignment: space-between;
+                                Text {
+                                    text: "TOTAL CUOTAS GPS (IMSS)";
+                                    font-size: 11px;
+                                    font-weight: 800;
+                                    color: #64748b;
+                                    letter-spacing: 0.5px;
+                                }
+                                Text {
+                                    text: g_item.total_gps_str;
+                                    font-size: 18px;
+                                    font-weight: 800;
+                                    color: #2563eb;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     }
 
     // Modal Unificado: Modificar Asignación de Registro de Obra y Días (SIROC)
@@ -1510,8 +1792,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
         TouchArea {}
 
         Rectangle {
-            width: 560px;
-            height: AppData.reporte_edit_dropdown_open ? 480px : 360px;
+            width: 580px;
+            height: AppData.reporte_edit_dropdown_open ? 550px : 440px;
             border-radius: 12px;
             background: #ffffff;
             x: (parent.width - self.width) / 2;
@@ -1715,6 +1997,82 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
+                // 2.5 Resumen Informativo de Incidencias (Lic, Inc, Aus) y Límite de Días
+                Rectangle {
+                    border-radius: 8px;
+                    background: #fffbeb;
+                    border-width: 1px;
+                    border-color: #fde68a;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "⚠️ Incidencias registradas en el mes:";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #92400e;
+                            }
+                            Text {
+                                text: "Días permitidos (Cédula - Incidencias): " + AppData.reporte_edit_dias_max;
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #b45309;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+
+                            Rectangle {
+                                height: 26px;
+                                border-radius: 4px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: #fde68a;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text { text: "Licencias: " + AppData.reporte_edit_lic_info; font-size: 11.5px; font-weight: 700; color: #b45309; vertical-alignment: center; }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 26px;
+                                border-radius: 4px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: #fde68a;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text { text: "Incapacidades: " + AppData.reporte_edit_inc_info; font-size: 11.5px; font-weight: 700; color: #b45309; vertical-alignment: center; }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 26px;
+                                border-radius: 4px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: #fde68a;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text { text: "Ausentismos: " + AppData.reporte_edit_aus_info; font-size: 11.5px; font-weight: 700; color: #b45309; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 3. Campos de Días Cédula y Días Obra
                 HorizontalLayout {
                     spacing: 16px;
@@ -1739,7 +2097,11 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     VerticalLayout {
                         spacing: 6px;
                         horizontal-stretch: 1;
-                        Text { text: "Días Registro Obra:"; font-size: 13px; font-weight: 700; color: #1e40af; }
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Días Registro Obra:"; font-size: 13px; font-weight: 700; color: #1e40af; }
+                            Text { text: "(Tope máx: " + AppData.reporte_edit_dias_max + ")"; font-size: 11.5px; font-weight: 700; color: #64748b; vertical-alignment: center; }
+                        }
                         Rectangle {
                             height: 40px;
                             border-radius: 6px;

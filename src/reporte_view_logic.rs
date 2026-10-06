@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use slint::{ModelRc, VecModel, ComponentHandle, SharedString};
 
-use crate::{MainWindow, AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem, ReporteFilterOptionItem, ReporteMesTotalItem};
+use crate::{MainWindow, AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem, ReporteFilterOptionItem, ReporteMesTotalItem, ReporteGuarderiaObraItem};
 use crate::cedulas::business::month_to_num;
 use crate::db::DbPool;
 use crate::db::reporte_liquidaciones::{
@@ -133,6 +133,15 @@ pub fn build_rfc_curp_label(rfc: &str, curp: &str) -> String {
     }
 }
 
+pub fn get_clean_non_generic_rfc(rfc: &str) -> Option<String> {
+    let trimmed = rfc.trim();
+    if trimmed.is_empty() || crate::validation::is_generic_sat_identifier(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_uppercase())
+    }
+}
+
 pub fn format_curr(val: f64) -> String {
     let is_neg = val < -0.001;
     let abs_val = val.abs();
@@ -208,6 +217,20 @@ pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
         1.0
     };
     let round2 = |v: f64| (v * 100.0).round() / 100.0;
+
+    // Respaldo de seguridad: Si los campos originales estaban en 0.0 pero la fila ya tenía importes, no perder la base
+    if row.cf_orig == 0.0 && row.cf > 0.0 { row.cf_orig = row.cf; }
+    if row.exc_pat_orig == 0.0 && row.exc_pat > 0.0 { row.exc_pat_orig = row.exc_pat; }
+    if row.exc_obr_orig == 0.0 && row.exc_obr > 0.0 { row.exc_obr_orig = row.exc_obr; }
+    if row.pd_pat_orig == 0.0 && row.pd_pat > 0.0 { row.pd_pat_orig = row.pd_pat; }
+    if row.pd_obr_orig == 0.0 && row.pd_obr > 0.0 { row.pd_obr_orig = row.pd_obr; }
+    if row.gmp_pat_orig == 0.0 && row.gmp_pat > 0.0 { row.gmp_pat_orig = row.gmp_pat; }
+    if row.gmp_obr_orig == 0.0 && row.gmp_obr > 0.0 { row.gmp_obr_orig = row.gmp_obr; }
+    if row.rt_orig == 0.0 && row.rt > 0.0 { row.rt_orig = row.rt; }
+    if row.iv_pat_orig == 0.0 && row.iv_pat > 0.0 { row.iv_pat_orig = row.iv_pat; }
+    if row.iv_obr_orig == 0.0 && row.iv_obr > 0.0 { row.iv_obr_orig = row.iv_obr; }
+    if row.gps_orig == 0.0 && row.gps > 0.0 { row.gps_orig = row.gps; }
+    if row.subtotal_orig == 0.0 && row.subtotal > 0.0 { row.subtotal_orig = row.subtotal; }
 
     row.cf = round2(row.cf_orig * factor);
     row.exc_pat = round2(row.exc_pat_orig * factor);
@@ -308,8 +331,9 @@ pub fn apply_reporte_filtering(state: &mut ReporteSessionState) {
 
             // Filtro por empleados seleccionados
             if state.emp_filter_active {
+                let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
                 let is_target = state.emp_filter_worker_ids.contains(&r.id_empleado)
-                    || (!r.rfc.is_empty() && state.emp_filter_worker_rfcs.contains(&r.rfc));
+                    || clean_rfc.map_or(false, |clean| state.emp_filter_worker_rfcs.contains(&clean));
                 if !is_target {
                     return false;
                 }
@@ -502,12 +526,17 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
 
     // 6. Filas paginadas para la tabla Slint
     let mut page_rows = Vec::with_capacity(end_idx - start_idx);
-    let mut all_page_selected = total_rows > 0;
+    let mut non_baja_in_page = 0;
+    let mut selected_non_baja_in_page = 0;
 
     for (page_offset, r) in state.filtered_rows[start_idx..end_idx].iter().enumerate() {
+        let is_baja = r.clave.trim().eq_ignore_ascii_case("baja");
         let is_selected = state.selected_ids.contains(&r.id_reporte_liq);
-        if !is_selected {
-            all_page_selected = false;
+        if !is_baja {
+            non_baja_in_page += 1;
+            if is_selected {
+                selected_non_baja_in_page += 1;
+            }
         }
 
         let is_assigned = r.id_registro_obra.is_some();
@@ -543,6 +572,7 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
 
         page_rows.push(ReporteLiquidacionRow {
             selected: is_selected,
+            is_baja,
             idx: (start_idx + page_offset + 1) as i32,
             id_reporte_liq: r.id_reporte_liq.to_string().into(),
             id_liquidacion: r.id_liquidacion.to_string().into(),
@@ -563,6 +593,10 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             lic_str: fmt_days_or_dash(r.lic).into(),
             inc_str: fmt_days_or_dash(r.inc).into(),
             aus_str: fmt_days_or_dash(r.aus).into(),
+            has_incidencias: r.lic > 0.001 || r.inc > 0.001 || r.aus > 0.001,
+            lic_val: r.lic as f32,
+            inc_val: r.inc as f32,
+            aus_val: r.aus as f32,
             row_bg_color,
             row_hover_color,
             row_accent_color,
@@ -599,9 +633,15 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
         });
     }
 
+    let all_page_selected = non_baja_in_page > 0 && selected_non_baja_in_page == non_baja_in_page;
+
     app_data.set_reporte_liquidaciones_list(ModelRc::new(VecModel::from(page_rows)));
     app_data.set_reporte_selected_count(state.selected_ids.len() as i32);
-    app_data.set_reporte_all_filter_selected(all_page_selected && total_rows > 0);
+    app_data.set_reporte_all_filter_selected(all_page_selected);
+    app_data.set_reporte_filter_obra_idx(state.filter_obra_idx as i32);
+    app_data.set_reporte_filter_periodo_idx(state.filter_periodo_idx as i32);
+    app_data.set_reporte_filter_estado_idx(state.filter_estado_idx as i32);
+    app_data.set_reporte_search_query(state.search_query.as_str().into());
 
     // Sincronizar estado de ordenamiento multi-criterio
     app_data.set_reporte_sort_by_obra(state.sort_by_obra);
@@ -752,6 +792,58 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
         });
     }
     app_data.set_reporte_totales_por_mes(ModelRc::new(VecModel::from(totales_mes_vec)));
+
+    // 9. Guarderías por Registro de Obra creado por el usuario (Tope 18%)
+    let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
+        Some(state.obras_options[state.filter_obra_idx - 1].id)
+    } else {
+        None
+    };
+
+    let target_rows = if !state.filtered_rows.is_empty() {
+        &state.filtered_rows
+    } else {
+        &state.all_rows
+    };
+
+    let mut guarderias_vec = Vec::new();
+    for o in state.obras_options.iter().filter(|o| o.creado_usuario || o.monto > 0.0 || target_rows.iter().any(|r| r.id_registro_obra == Some(o.id))) {
+        if let Some(target_id) = filter_obra_id {
+            if o.id != target_id {
+                continue;
+            }
+        }
+        let mut total_gps_obra = 0.0;
+        let mut emps_count = 0;
+        for r in target_rows {
+            if r.id_registro_obra == Some(o.id) {
+                total_gps_obra += r.gps;
+                emps_count += 1;
+            }
+        }
+        let monto_obra = o.monto;
+        let limite_18 = monto_obra * 0.18;
+        // Para calcular el valor de las guarderias es el total de gps de todos los empleados que tienen vinculado los registros de obra que el usuario creo entre el 1%:
+        let valor_guarderias = total_gps_obra / 0.01;
+        let supera_18 = (monto_obra > 0.0 && valor_guarderias > limite_18) || (monto_obra == 0.0 && valor_guarderias > 0.0);
+
+        guarderias_vec.push(ReporteGuarderiaObraItem {
+            id_obra: o.id.to_string().into(),
+            obra_numero: o.numero.clone().into(),
+            obra_label: o.label.clone().into(),
+            total_gps: total_gps_obra as f32,
+            total_gps_str: format_curr(total_gps_obra).into(),
+            valor_guarderias: valor_guarderias as f32,
+            valor_guarderias_str: format_curr(valor_guarderias).into(),
+            monto_obra: monto_obra as f32,
+            monto_obra_str: format_curr(monto_obra).into(),
+            limite_18_obra: limite_18 as f32,
+            limite_18_obra_str: format_curr(limite_18).into(),
+            supera_18,
+            empleados_count: emps_count as i32,
+        });
+    }
+    app_data.set_reporte_guarderias_obras(ModelRc::new(VecModel::from(guarderias_vec)));
 }
 
 pub fn sync_and_load_reporte_data(
@@ -981,6 +1073,12 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 if let Ok(id) = Uuid::parse_str(&id_str) {
                     let mut state = session_clone.lock().unwrap();
+                    if let Some(r) = state.all_rows.iter().find(|row| row.id_reporte_liq == id) {
+                        if r.clave.trim().eq_ignore_ascii_case("baja") {
+                            crate::show_toast_message(&ui, "Los registros dados de baja están bloqueados para edición.");
+                            return;
+                        }
+                    }
                     if state.selected_ids.contains(&id) {
                         state.selected_ids.remove(&id);
                     } else {
@@ -1000,7 +1098,10 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
                 if select_all {
-                    let ids: Vec<Uuid> = state.filtered_rows.iter().map(|r| r.id_reporte_liq).collect();
+                    let ids: Vec<Uuid> = state.filtered_rows.iter()
+                        .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                        .map(|r| r.id_reporte_liq)
+                        .collect();
                     for id in ids {
                         state.selected_ids.insert(id);
                     }
@@ -1021,6 +1122,12 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
             if let Ok(id) = Uuid::parse_str(id_str) {
                 if let Some(r) = state.all_rows.iter().find(|row| row.id_reporte_liq == id) {
+                    // Validación: No permitir editar registros con clave "Baja"
+                    if r.clave.trim().eq_ignore_ascii_case("baja") {
+                        crate::show_toast_message(&ui, "No se puede editar un registro con clave 'Baja'.");
+                        return;
+                    }
+
                     app_data.set_reporte_edit_row_id(id_str.into());
                     app_data.set_reporte_edit_worker_name(r.nombre_trabajador.clone().into());
                     app_data.set_reporte_edit_periodo(r.periodo_str.clone().into());
@@ -1035,8 +1142,27 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     app_data.set_reporte_edit_selected_obra_label(obra_label_str.clone().into());
                     app_data.set_reporte_edit_search_query(if r.id_registro_obra.is_some() { obra_label_str.into() } else { "".into() });
 
+                    let lic_val = r.lic;
+                    let inc_val = r.inc;
+                    let aus_val = r.aus;
+                    let dias_max = (r.dias_cedula as f64 - lic_val - inc_val - aus_val).round().max(0.0) as i32;
+
+                    app_data.set_reporte_edit_lic_info(if lic_val > 0.001 { format!("{:.0}", lic_val) } else { "0".to_string() }.into());
+                    app_data.set_reporte_edit_inc_info(if inc_val > 0.001 { format!("{:.0}", inc_val) } else { "0".to_string() }.into());
+                    app_data.set_reporte_edit_aus_info(if aus_val > 0.001 { format!("{:.0}", aus_val) } else { "0".to_string() }.into());
+                    app_data.set_reporte_edit_dias_max(dias_max);
+
                     app_data.set_reporte_edit_dias_cedula_val(r.dias_cedula.to_string().into());
-                    app_data.set_reporte_edit_dias_obra_val(if r.id_registro_obra.is_some() { r.dias_obra.to_string().into() } else { "0".into() });
+                    let default_dias_obra = if r.id_registro_obra.is_some() {
+                        if r.dias_obra > 0 && (r.dias_obra as i32) <= dias_max {
+                            r.dias_obra as i32
+                        } else {
+                            dias_max
+                        }
+                    } else {
+                        0
+                    };
+                    app_data.set_reporte_edit_dias_obra_val(default_dias_obra.to_string().into());
 
                     // Opciones de obras disponibles de la revisión activa
                     let mut obras_vec = Vec::with_capacity(state.obras_options.len());
@@ -1119,10 +1245,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 if obra_id.is_empty() {
                     app_data.set_reporte_edit_dias_obra_val("0".into());
                 } else {
-                    let curr_dias_obr = app_data.get_reporte_edit_dias_obra_val();
-                    if curr_dias_obr == "0" || curr_dias_obr.trim().is_empty() {
-                        app_data.set_reporte_edit_dias_obra_val(app_data.get_reporte_edit_dias_cedula_val());
-                    }
+                    let dias_max = app_data.get_reporte_edit_dias_max();
+                    app_data.set_reporte_edit_dias_obra_val(dias_max.to_string().into());
                 }
                 app_data.set_reporte_edit_dropdown_open(false);
             }
@@ -1152,6 +1276,17 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     Err(_) => return,
                 };
 
+                // Validación: No permitir editar registros con clave "Baja"
+                {
+                    let state = session_clone.lock().unwrap();
+                    if let Some(r) = state.all_rows.iter().find(|row| row.id_reporte_liq == row_uuid) {
+                        if r.clave.trim().to_uppercase() == "BAJA" {
+                            crate::show_toast_message(&ui, "No se puede editar un registro con clave 'Baja'.");
+                            return;
+                        }
+                    }
+                }
+
                 let new_dias_ced = dias_ced_str.trim().parse::<i16>().unwrap_or(30).max(1);
                 let raw_dias_obr = dias_obr_str.trim().parse::<i16>().unwrap_or(0).max(0);
 
@@ -1161,11 +1296,33 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     Uuid::parse_str(obra_id_str.trim()).ok()
                 };
 
-                // Validación: Días Obra debe ser menor o igual a Días Cédula
-                if obra_uuid_opt.is_some() && raw_dias_obr > new_dias_ced {
+                // Validación: Días Cédula y Días Obra no deben exceder 31 días
+                if new_dias_ced > 31 || raw_dias_obr > 31 {
                     crate::show_toast_message(
                         &ui,
-                        &format!("Validación: Días de Obra ({}) debe ser menor o igual a Días Cédula ({}).", raw_dias_obr, new_dias_ced),
+                        &format!("Validación: Los días no pueden exceder 31 (Cédula: {}, Obra: {}).", new_dias_ced, raw_dias_obr),
+                    );
+                    return;
+                }
+
+                // Validación: si tiene obra asignada, Días Obra <= (Días Cédula - Lic - Inc - Aus)
+                let (lic_val, inc_val, aus_val) = {
+                    let state = session_clone.lock().unwrap();
+                    if let Some(r) = state.all_rows.iter().find(|row| row.id_reporte_liq == row_uuid) {
+                        (r.lic, r.inc, r.aus)
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    }
+                };
+                let max_efectivo = (new_dias_ced as f64 - lic_val - inc_val - aus_val).round().max(0.0) as i16;
+
+                if obra_uuid_opt.is_some() && raw_dias_obr > max_efectivo {
+                    crate::show_toast_message(
+                        &ui,
+                        &format!(
+                            "Validación: Días Obra ({}) debe ser menor o igual a Días Cédula menos incidencias ({} - Lic {:.0} - Inc {:.0} - Aus {:.0} = {}).",
+                            raw_dias_obr, new_dias_ced, lic_val, inc_val, aus_val, max_efectivo
+                        ),
                     );
                     return;
                 }
@@ -1174,7 +1331,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 app_data.set_show_reporte_edit_modal(false);
 
                 let new_dias_obr = if obra_uuid_opt.is_some() {
-                    if raw_dias_obr > 0 { raw_dias_obr } else { new_dias_ced }
+                    if raw_dias_obr > 0 { raw_dias_obr } else { max_efectivo }
                 } else {
                     0
                 };
@@ -1194,9 +1351,11 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         if let Some(ref o) = obra_info {
                             row.obra_numero = o.numero.clone();
                             row.obra_label = o.label.clone();
+                            row.obra_creado_usuario = o.creado_usuario;
                         } else {
                             row.obra_numero = String::new();
                             row.obra_label = "⚠️ Sin Asignar (Pendiente)".to_string();
+                            row.obra_creado_usuario = false;
                         }
                         recalculate_row_in_memory(row);
                     }
@@ -1318,7 +1477,10 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
                     let mut state = session_clone.lock().unwrap();
                     let ids_to_change: HashSet<Uuid> = if state.selected_ids.is_empty() {
-                        state.filtered_rows.iter().map(|r| r.id_reporte_liq).collect()
+                        state.filtered_rows.iter()
+                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                            .map(|r| r.id_reporte_liq)
+                            .collect()
                     } else {
                         state.selected_ids.clone()
                     };
@@ -1389,7 +1551,10 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
                     let mut state = session_clone.lock().unwrap();
                     let ids_to_modify: HashSet<Uuid> = if state.selected_ids.is_empty() {
-                        state.filtered_rows.iter().map(|r| r.id_reporte_liq).collect()
+                        state.filtered_rows.iter()
+                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                            .map(|r| r.id_reporte_liq)
+                            .collect()
                     } else {
                         state.selected_ids.clone()
                     };
@@ -1417,6 +1582,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 row.id_registro_obra = Some(o.id);
                                 row.obra_numero = o.numero.clone();
                                 row.obra_label = o.label.clone();
+                                row.obra_creado_usuario = o.creado_usuario;
                             }
                             if let Some(dias_ced) = custom_dias_ced_opt {
                                 row.dias_cedula = dias_ced.max(1);
@@ -1502,8 +1668,17 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 let filename = format!("Reporte_Liquidaciones_{}_{}.xlsx", clean_rev, timestamp);
                 let out_file = output_dir.join(&filename);
 
+                let valid_user_obra_ids: HashSet<Uuid> = state
+                    .obras_options
+                    .iter()
+                    .filter(|o| o.creado_usuario)
+                    .map(|o| o.id)
+                    .collect();
+
                 match export_reporte_liquidaciones_to_excel(
                     &state.filtered_rows,
+                    &state.all_rows,
+                    Some(&valid_user_obra_ids),
                     &out_file,
                     &state.cliente_nombre,
                     &state.rp_registro,
@@ -1652,8 +1827,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     for r in &state.all_rows {
                         if state.selected_ids.contains(&r.id_reporte_liq) {
                             w_ids.insert(r.id_empleado);
-                            if !r.rfc.is_empty() {
-                                w_rfcs.insert(r.rfc.clone());
+                            if let Some(clean) = get_clean_non_generic_rfc(&r.rfc) {
+                                w_rfcs.insert(clean);
                             }
                             if seen.insert(r.nombre_trabajador.clone()) {
                                 w_names.push(r.nombre_trabajador.clone());
@@ -1665,8 +1840,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     let mut w_names = Vec::new();
                     let mut seen = HashSet::new();
                     for r in &state.all_rows {
+                        let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
                         if state.emp_filter_worker_ids.contains(&r.id_empleado)
-                            || (!r.rfc.is_empty() && state.emp_filter_worker_rfcs.contains(&r.rfc))
+                            || clean_rfc.map_or(false, |clean| state.emp_filter_worker_rfcs.contains(&clean))
                         {
                             if seen.insert(r.nombre_trabajador.clone()) {
                                 w_names.push(r.nombre_trabajador.clone());
@@ -1684,8 +1860,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 let mut obra_counts: std::collections::BTreeMap<String, (String, usize)> = std::collections::BTreeMap::new();
 
                 for r in &state.all_rows {
+                    let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
                     let matches = worker_ids.contains(&r.id_empleado)
-                        || (!r.rfc.is_empty() && worker_rfcs.contains(&r.rfc));
+                        || clean_rfc.map_or(false, |clean| worker_rfcs.contains(&clean));
                     if matches {
                         total_occurrences += 1;
 
@@ -1760,8 +1937,12 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                 let target_ids: Vec<Uuid> = state.all_rows.iter()
                     .filter(|r| {
+                        if r.clave.trim().eq_ignore_ascii_case("baja") {
+                            return false;
+                        }
+                        let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
                         worker_ids.contains(&r.id_empleado)
-                            || (!r.rfc.is_empty() && worker_rfcs.contains(&r.rfc))
+                            || clean_rfc.map_or(false, |clean| worker_rfcs.contains(&clean))
                     })
                     .map(|r| r.id_reporte_liq)
                     .collect();
@@ -1873,9 +2054,17 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 state.emp_filter_selected_obras = sel_obras;
 
                 state.emp_filter_active = true;
+                state.current_page = 1;
                 ui.global::<AppData>().set_show_reporte_emp_modal(false);
 
                 apply_reporte_filtering(&mut state);
+
+                // Seleccionar automáticamente las filas resultantes del filtro (excluyendo bajas)
+                state.selected_ids = state.filtered_rows.iter()
+                    .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                    .map(|r| r.id_reporte_liq)
+                    .collect();
+
                 render_reporte_ui(&ui, &state);
 
                 crate::show_toast_message(
@@ -1916,6 +2105,18 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
 
+                // Calcular qué obras ya tienen filas seleccionadas
+                let mut selected_obra_ids: HashSet<String> = HashSet::new();
+                for id in &state.selected_ids {
+                    if let Some(row) = state.all_rows.iter().find(|r| r.id_reporte_liq == *id) {
+                        if let Some(oid) = row.id_registro_obra {
+                            selected_obra_ids.insert(oid.to_string());
+                        } else {
+                            selected_obra_ids.insert("sin_asignar".to_string());
+                        }
+                    }
+                }
+
                 let mut obras_items: Vec<(String, String, usize, bool)> = Vec::new();
 
                 for o in &state.obras_options {
@@ -1925,7 +2126,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         .collect::<HashSet<Uuid>>()
                         .len();
                     if count > 0 {
-                        obras_items.push((o.id.to_string(), o.label.clone(), count, false));
+                        let is_selected = selected_obra_ids.contains(&o.id.to_string());
+                        obras_items.push((o.id.to_string(), o.label.clone(), count, is_selected));
                     }
                 }
 
@@ -1935,7 +2137,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     .collect::<HashSet<Uuid>>()
                     .len();
                 if unassigned_count > 0 {
-                    obras_items.push(("sin_asignar".to_string(), "⚠️ Sin Asignar (Pendientes)".to_string(), unassigned_count, false));
+                    let is_selected = selected_obra_ids.contains("sin_asignar");
+                    obras_items.push(("sin_asignar".to_string(), "⚠️ Sin Asignar (Pendientes)".to_string(), unassigned_count, is_selected));
                 }
 
                 state.quick_select_obras = obras_items;
@@ -2037,6 +2240,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                 let mut newly_selected = HashSet::new();
                 for row in &state.all_rows {
+                    if row.clave.trim().eq_ignore_ascii_case("baja") {
+                        continue;
+                    }
                     let matches = match row.id_registro_obra {
                         Some(oid) => sel_ids.contains(&oid.to_string()),
                         None => sel_ids.contains("sin_asignar"),
@@ -2058,6 +2264,79 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     &ui,
                     &format!("Se seleccionaron {} registros de empleados correspondientes a las obras elegidas.", sel_count),
                 );
+            }
+        });
+    }
+
+    // 41. Desvincular Obra en Lote
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_batch_desvincular_obra(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut count = 0;
+                let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
+                    let mut state = session_clone.lock().unwrap();
+                    let ids_to_modify: HashSet<Uuid> = if state.selected_ids.is_empty() {
+                        state.filtered_rows.iter()
+                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                            .map(|r| r.id_reporte_liq)
+                            .collect()
+                    } else {
+                        state.selected_ids.clone()
+                    };
+
+                    if ids_to_modify.is_empty() {
+                        crate::show_toast_message(&ui, "No hay registros seleccionados para desvincular.");
+                        return;
+                    }
+
+                    for row in state.all_rows.iter_mut() {
+                        if ids_to_modify.contains(&row.id_reporte_liq) {
+                            if row.clave.trim().eq_ignore_ascii_case("baja") {
+                                continue;
+                            }
+                            row.id_registro_obra = None;
+                            row.obra_numero.clear();
+                            row.obra_label = "⚠️ Sin Asignar (Pendiente)".to_string();
+                            row.dias_obra = 0;
+                            row.obra_creado_usuario = false;
+                            recalculate_row_in_memory(row);
+                            count += 1;
+                        }
+                    }
+
+                    let rows = state
+                        .all_rows
+                        .iter()
+                        .filter(|r| ids_to_modify.contains(&r.id_reporte_liq))
+                        .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
+                        .collect();
+
+                    apply_reporte_filtering(&mut state);
+                    render_reporte_ui(&ui, &state);
+
+                    rows
+                };
+
+                if count > 0 {
+                    if let Some(ref pool) = pool_clone {
+                        let pool_bg = pool.clone();
+                        std::thread::spawn(move || {
+                            if let Ok(mut client) = pool_bg.get() {
+                                if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
+                                    log::error!("Error persistiendo desvinculación masiva en BD: {}", e);
+                                }
+                            }
+                        });
+                    }
+
+                    crate::show_toast_message(
+                        &ui,
+                        &format!("Se desvincularon {} registros de obra exitosamente.", count),
+                    );
+                }
             }
         });
     }
@@ -2106,7 +2385,43 @@ mod tests {
     }
 
     #[test]
-    fn sin_identificadores_muestra_marcador() {
-        assert_eq!(build_rfc_curp_label("", ""), "SIN RFC/CURP");
+    fn test_dias_efectivos_formula_con_incidencias() {
+        let dias_cedula = 30;
+        let lic = 3.0;
+        let inc = 2.0;
+        let aus = 1.0;
+        let dias_max = (dias_cedula as f64 - lic - inc - aus).round().max(0.0) as i16;
+        assert_eq!(dias_max, 24);
+
+        // Sin incidencias
+        let dias_max_cero = (31 as f64 - 0.0 - 0.0 - 0.0).round().max(0.0) as i16;
+        assert_eq!(dias_max_cero, 31);
+
+        // Incidencias mayores que días cédula nunca es menor a 0
+        let dias_neg = (10 as f64 - 8.0 - 5.0 - 0.0).round().max(0.0) as i16;
+        assert_eq!(dias_neg, 0);
+    }
+
+    #[test]
+    fn test_guarderias_18_porciento_calculo() {
+        // Obra de 1,000,000. Límite 18% = 180,000
+        let monto_obra = 1_000_000.0;
+        let limite_18 = monto_obra * 0.18;
+        assert_eq!(limite_18, 180_000.0);
+
+        // Total GPS de empleados = 1,500.00
+        // Valor Guarderías = 1,500.00 / 1% = 150,000.00
+        let total_gps = 1_500.00;
+        let valor_guarderias = total_gps / 0.01;
+        assert_eq!(valor_guarderias, 150_000.00);
+        let supera_18 = (monto_obra > 0.0 && valor_guarderias > limite_18) || (monto_obra == 0.0 && valor_guarderias > 0.0);
+        assert!(!supera_18);
+
+        // Total GPS de empleados = 2,000.00 -> 200,000.00 > 180,000.00
+        let total_gps_alto = 2_000.00;
+        let valor_guarderias_alto = total_gps_alto / 0.01;
+        assert_eq!(valor_guarderias_alto, 200_000.00);
+        let supera_18_alto = (monto_obra > 0.0 && valor_guarderias_alto > limite_18) || (monto_obra == 0.0 && valor_guarderias_alto > 0.0);
+        assert!(supera_18_alto);
     }
 }

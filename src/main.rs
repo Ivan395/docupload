@@ -16,6 +16,7 @@ use crate::calendario_view_logic::*;
 use crate::db::{create_pool, ensure_schema, DbPool, CedulasDbStats};
 use crate::db::catalogos::*;
 use crate::db::revisiones::*;
+use crate::db::nominas_reporte::check_all_data_exists;
 use crate::cedulas::view_logic::*;
 use crate::reporte_view_logic::*;
 use crate::nominas_view_logic::*;
@@ -2038,6 +2039,24 @@ fn spawn_cedulas_view_worker(
                         app_data.set_cedulas_view_progress_text("¡Procesamiento y guardado completado!".into());
                         app_data.set_reporte_liquidaciones_access_allowed(true);
 
+                        // Actualizar propiedades de navegación tras guardar cédulas
+                        if let Some(ref pool) = pool_stats {
+                            if let Ok(mut client) = pool.get() {
+                                if let Ok(rev_uuid) = Uuid::parse_str(&revision_id) {
+                                    if let Ok((has_cedulas, has_nominas, has_liquidaciones, has_obras)) = 
+                                        check_all_data_exists(&mut client, rev_uuid) {
+                                        app_data.set_revision_has_cedulas(has_cedulas);
+                                        app_data.set_revision_has_nominas(has_nominas);
+                                        app_data.set_revision_has_liquidaciones(has_liquidaciones);
+                                        app_data.set_revision_has_obras(has_obras);
+                                        
+                                        let all_data = has_obras && has_cedulas && has_nominas && has_liquidaciones;
+                                        app_data.set_revision_has_all_data(all_data);
+                                    }
+                                }
+                            }
+                        }
+
                         if let Some(ref pool) = pool_stats {
                             update_global_stats(&ui, pool);
                         }
@@ -2960,6 +2979,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let cedulas_session_clone = cedulas_session.clone();
         let reporte_session_clone = reporte_session.clone();
         let nominas_session_clone = nominas_session.clone();
+        let nominas_upload_session_clone = nominas_upload_session.clone();
         app_logic.on_navigate_view(move |view_idx| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
@@ -3034,6 +3054,12 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
 
+                if view_idx == 10 {
+                    if let Some(ref pool) = pool_clone {
+                        let _ = crate::nominas_upload_view_logic::load_nominas_upload_stats(&ui, pool, &nominas_upload_session_clone);
+                    }
+                }
+
                 if let Some(ref pool) = pool_clone {
                     match view_idx {
                         1 => {
@@ -3050,6 +3076,13 @@ fn main() -> Result<(), slint::PlatformError> {
                             app_data.set_selected_revision_id("".into());
                             app_data.set_selected_revision_nombre("".into());
                             app_data.set_selected_revision_folio("".into());
+                            app_data.set_revision_has_cedulas(false);
+                            app_data.set_revision_has_nominas(false);
+                            app_data.set_revision_has_liquidaciones(false);
+                            app_data.set_revision_has_obras(false);
+                            app_data.set_revision_has_all_data(false);
+                            app_data.set_reportes_liquidaciones_data_exists(false);
+                            app_data.set_nominas_access_allowed(false);
                             load_clientes_ui(&ui, pool);
                         }
                         2 => {
@@ -3061,12 +3094,28 @@ fn main() -> Result<(), slint::PlatformError> {
                             app_data.set_selected_revision_id("".into());
                             app_data.set_selected_revision_nombre("".into());
                             app_data.set_selected_revision_folio("".into());
+                            app_data.set_revision_has_cedulas(false);
+                            app_data.set_revision_has_nominas(false);
+                            app_data.set_revision_has_liquidaciones(false);
+                            app_data.set_revision_has_obras(false);
+                            app_data.set_revision_has_all_data(false);
+                            app_data.set_cedulas_access_allowed(false);
+                            app_data.set_reportes_liquidaciones_data_exists(false);
+                            app_data.set_nominas_access_allowed(false);
                             load_registros_patronales_ui(&ui, pool, &client_id);
                         }
                         3 => {
                             app_data.set_selected_revision_id("".into());
                             app_data.set_selected_revision_nombre("".into());
                             app_data.set_selected_revision_folio("".into());
+                            app_data.set_revision_has_cedulas(false);
+                            app_data.set_revision_has_nominas(false);
+                            app_data.set_revision_has_liquidaciones(false);
+                            app_data.set_revision_has_obras(false);
+                            app_data.set_revision_has_all_data(false);
+                            app_data.set_cedulas_access_allowed(false);
+                            app_data.set_reportes_liquidaciones_data_exists(false);
+                            app_data.set_nominas_access_allowed(false);
                             load_revisiones_ui(&ui, pool, &rp_id);
                         }
                         4 => {
@@ -3140,6 +3189,23 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(ref pool) = pool_clone {
                     load_obras_ui(&ui, pool, rev_id.as_str());
                     update_global_stats(&ui, pool);
+                    
+                    // Verificar qué datos existen para esta revisión y actualizar propiedades de navegación
+                    if let Ok(mut client) = pool.get() {
+                        if let Ok(rev_uuid) = Uuid::parse_str(rev_id.as_str()) {
+                            if let Ok((has_cedulas, has_nominas, has_liquidaciones, has_obras)) = 
+                                check_all_data_exists(&mut client, rev_uuid) {
+                                app_data.set_revision_has_cedulas(has_cedulas);
+                                app_data.set_revision_has_nominas(has_nominas);
+                                app_data.set_revision_has_liquidaciones(has_liquidaciones);
+                                app_data.set_revision_has_obras(has_obras);
+                                
+                                // La revisión está completa si tiene obras, cédulas, nóminas y liquidaciones
+                                let all_data = has_obras && has_cedulas && has_nominas && has_liquidaciones;
+                                app_data.set_revision_has_all_data(all_data);
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -3306,6 +3372,20 @@ fn main() -> Result<(), slint::PlatformError> {
                                 };
                                 app_data.set_rev_form_fecha_entrega_con_prorroga(format_date_opt(f_ent_pror).into());
                                 app_data.set_show_revision_modal(true);
+
+                                // Verificar qué datos existen para esta revisión y actualizar propiedades de navegación
+                                if let Ok(rev_uuid) = Uuid::parse_str(rev_id.as_str()) {
+                                    if let Ok((has_cedulas, has_nominas, has_liquidaciones, has_obras)) = 
+                                        check_all_data_exists(&mut client, rev_uuid) {
+                                        app_data.set_revision_has_cedulas(has_cedulas);
+                                        app_data.set_revision_has_nominas(has_nominas);
+                                        app_data.set_revision_has_liquidaciones(has_liquidaciones);
+                                        app_data.set_revision_has_obras(has_obras);
+                                        
+                                        let all_data = has_obras && has_cedulas && has_nominas && has_liquidaciones;
+                                        app_data.set_revision_has_all_data(all_data);
+                                    }
+                                }
                             }
                         }
                     }
@@ -5587,6 +5667,8 @@ mod tests_ui {
                 fecha_inicio: Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
                 fecha_fin: Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()),
                 label: "C1234567 - Oficinas Torre Norte".into(),
+                creado_usuario: true,
+                monto: 1_500_000.0,
             },
             crate::db::reporte_liquidaciones::ObraOptionDb {
                 id: obra_id_2,
@@ -5595,6 +5677,8 @@ mod tests_ui {
                 fecha_inicio: Some(chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
                 fecha_fin: Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()),
                 label: "C1234987 - Bodega Industrial".into(),
+                creado_usuario: true,
+                monto: 2_000_000.0,
             },
         ];
 
@@ -5610,6 +5694,7 @@ mod tests_ui {
 
             let mut r = crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb {
                 id_reporte_liq: Uuid::new_v4(),
+                id_parent_reporte_liq: Uuid::new_v4(),
                 id_liquidacion: Uuid::new_v4(),
                 id_empleado: Uuid::new_v4(),
                 nombre_trabajador: format!("EMPLEADO TEST {:03}", i),
@@ -5625,6 +5710,7 @@ mod tests_ui {
                 obra_numero: obra_num,
                 obra_label: obra_lbl,
                 dias_obra: dias_obr,
+                obra_creado_usuario: is_assigned,
 
                 clave: "08".to_string(),
                 fecha: None,

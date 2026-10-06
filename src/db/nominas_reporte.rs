@@ -60,6 +60,29 @@ pub struct NominaReporteSummaryDb {
     pub dias_cedula: f64,
     pub total_percepciones: f64,
     pub nominas_sin_cedula: usize,
+    /// Totales por mes (clave: "ANIO-MES" ej "2026-04")
+    pub totales_por_mes: HashMap<String, MesStats>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MesStats {
+    pub total_nominas: usize,
+    pub empleados_unicos: usize,
+    pub dias_pagados: f64,
+    pub total_percepciones: f64,
+    pub dias_cedula: f64,
+    pub nominas_sin_cedula: usize,
+    /// Empleados y sus días en este mes
+    pub empleados: HashMap<Uuid, EmpleadoMesStats>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct EmpleadoMesStats {
+    pub nombre: String,
+    pub nss: String,
+    pub dias_pagados: f64,
+    pub total_percepciones: f64,
+    pub dias_cedula: f64,
 }
 
 /// Nombre del mes en español desde su número (1..=12).
@@ -426,15 +449,8 @@ pub fn copy_nominas_a_reportes(
                 FROM public.reportes_liquidaciones rl
                 JOIN public.reportes_vinculaciones_obras_liquidaciones rv
                      ON rv.id_reporte_liquidacion = rl.id
-                JOIN public.registros_obras ro ON ro.id = rv.id_registro_obra
                 WHERE rl.id_empleado = n.id_empleado
-                  AND COALESCE(ro.creado_usuario, false) = true
-                  AND n.fecha_inicial_pago IS NOT NULL
-                  AND n.fecha_final_pago IS NOT NULL
-                  AND ro.fecha_inicio IS NOT NULL
-                  AND ro.fecha_fin IS NOT NULL
-                  AND n.fecha_final_pago >= ro.fecha_inicio
-                  AND n.fecha_inicial_pago <= ro.fecha_fin
+                  AND rv.id_registro_obra IS NOT NULL
             )
             "#,
             &[],
@@ -615,6 +631,14 @@ pub fn fetch_all_nominas_for_stats(
             LEFT JOIN public.contratos ct ON ct.id_cfdi = n.id_cfdi
             LEFT JOIN per ON per.id_nomina = n.id
             WHERE ($1::uuid IS NULL OR e.id_cliente = $1)
+              AND EXISTS (
+                  SELECT 1
+                  FROM public.reportes_liquidaciones rl
+                  JOIN public.reportes_vinculaciones_obras_liquidaciones rv
+                       ON rv.id_reporte_liquidacion = rl.id
+                  WHERE rl.id_empleado = n.id_empleado
+                    AND rv.id_registro_obra IS NOT NULL
+              )
         )
         SELECT
             b.id_nomina,
@@ -764,9 +788,97 @@ pub fn summarize_nominas(rows: &[NominaReporteRowDb]) -> NominaReporteSummaryDb 
         if r.dias_cedula <= 0.0 {
             s.nominas_sin_cedula += 1;
         }
+
+        // Estadísticas por mes
+        let fecha_periodo = r.fecha_periodo.unwrap_or(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+        let mes_key = format!("{}-{:02}", fecha_periodo.year(), fecha_periodo.month());
+        let mes_entry = s.totales_por_mes.entry(mes_key).or_default();
+        mes_entry.total_nominas += 1;
+        mes_entry.dias_pagados += r.num_dias_pagados;
+        mes_entry.dias_cedula += r.dias_cedula;
+        mes_entry.total_percepciones += r.total_percepciones;
+        if r.dias_cedula <= 0.0 {
+            mes_entry.nominas_sin_cedula += 1;
+        }
+
+        let emp_entry = mes_entry.empleados.entry(r.id_empleado).or_insert_with(|| EmpleadoMesStats {
+            nombre: r.nombre_trabajador.clone(),
+            nss: r.nss.clone(),
+            dias_pagados: 0.0,
+            total_percepciones: 0.0,
+            dias_cedula: 0.0,
+        });
+        emp_entry.dias_pagados += r.num_dias_pagados;
+        emp_entry.total_percepciones += r.total_percepciones;
+        emp_entry.dias_cedula += r.dias_cedula;
+    }
+    // Contar empleados únicos por mes
+    for mes in s.totales_por_mes.values_mut() {
+        mes.empleados_unicos = mes.empleados.len();
     }
     s.total_empleados = empleados.len();
     s
+}
+ 
+ /// Verifica si existen cédulas para una revisión dada.
+pub fn check_cedulas_exists(
+    client: &mut Client,
+    revision_id: Uuid,
+) -> Result<bool, String> {
+    let row = client.query_opt(
+        "SELECT 1 FROM public.liquidaciones WHERE id_revision = $1 LIMIT 1",
+        &[&revision_id],
+    ).map_err(|e| format!("Error verificando cédulas: {}", e))?;
+    Ok(row.is_some())
+}
+
+/// Verifica si existen nóminas para una revisión dada.
+pub fn check_nominas_exists(
+    client: &mut Client,
+    revision_id: Uuid,
+) -> Result<bool, String> {
+    let row = client.query_opt(
+        "SELECT 1 FROM public.nominas WHERE id_revision = $1 LIMIT 1",
+        &[&revision_id],
+    ).map_err(|e| format!("Error verificando nóminas: {}", e))?;
+    Ok(row.is_some())
+}
+
+/// Verifica si existen reportes de liquidaciones para una revisión dada.
+pub fn check_reportes_liquidaciones_exists(
+    client: &mut Client,
+    revision_id: Uuid,
+) -> Result<bool, String> {
+    let row = client.query_opt(
+        "SELECT 1 FROM public.reportes_liquidaciones WHERE id_revision = $1 LIMIT 1",
+        &[&revision_id],
+    ).map_err(|e| format!("Error verificando reportes liquidaciones: {}", e))?;
+    Ok(row.is_some())
+}
+
+/// Verifica si existen registros de obras para una revisión dada.
+pub fn check_registros_obras_exists(
+    client: &mut Client,
+    revision_id: Uuid,
+) -> Result<bool, String> {
+    let row = client.query_opt(
+        "SELECT 1 FROM public.registros_obras WHERE id_revision = $1 LIMIT 1",
+        &[&revision_id],
+    ).map_err(|e| format!("Error verificando registros de obras: {}", e))?;
+    Ok(row.is_some())
+}
+
+/// Verifica la existencia de datos para todos los módulos de una revisión
+/// y actualiza las propiedades en AppData.
+pub fn check_all_data_exists(
+    client: &mut Client,
+    revision_id: Uuid,
+) -> Result<(bool, bool, bool, bool), String> {
+    let cedulas = check_cedulas_exists(client, revision_id)?;
+    let nominas = check_nominas_exists(client, revision_id)?;
+    let reportes = check_reportes_liquidaciones_exists(client, revision_id)?;
+    let obras = check_registros_obras_exists(client, revision_id)?;
+    Ok((cedulas, nominas, reportes, obras))
 }
 
 #[cfg(test)]

@@ -465,6 +465,7 @@ pub fn sync_and_load_nominas_data(
         .get()
         .map_err(|e| format!("Error de conexión a la base de datos: {}", e))?;
 
+    let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client);
     let rows = fetch_nominas_reporte(&mut client, cliente_id)?;
 
     let mut st = session

@@ -10,6 +10,15 @@ export component Sidebar inherits Rectangle {
     property <bool> rp_selected: AppData.selected_rp_id != "";
     property <bool> revision_selected: AppData.selected_revision_id != "";
 
+    // Desbloqueo progresivo: al ir a Clientes o estar en Clientes todo lo posterior se bloquea
+    property <bool> can_go_rp: root.client_selected;
+    property <bool> can_go_revisiones: root.client_selected && root.rp_selected;
+    property <bool> can_go_obras: root.client_selected && root.rp_selected && root.revision_selected;
+    property <bool> can_go_empleados: root.client_selected;
+    property <bool> can_go_cedulas: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_cedulas || AppData.cedulas_access_allowed);
+    property <bool> can_go_reporte: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_liquidaciones || AppData.reportes_liquidaciones_data_exists);
+    property <bool> can_go_nominas: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_nominas || AppData.nominas_data_exists || AppData.nominas_access_allowed);
+
     VerticalLayout {
         padding: 16px;
         spacing: 12px;
@@ -168,12 +177,12 @@ export component Sidebar inherits Rectangle {
                     }
                 }
 
-                // Registros Patronales (F3) -> View 2 (Deshabilitado hasta acceder desde Clientes)
+                // Registros Patronales (F3) -> View 2 (Habilitado con Cliente seleccionado)
                 Rectangle {
                     height: 42px;
                     border-radius: 8px;
-                    background: AppData.current_view == 2 ? #1e3a8a : (root.client_selected && btn_f3.has-hover ? #f8fafc : transparent);
-                    opacity: root.client_selected ? 1.0 : 0.4;
+                    background: AppData.current_view == 2 ? #1e3a8a : (root.can_go_rp && btn_f3.has-hover) ? #f8fafc : transparent;
+                    opacity: root.can_go_rp ? 1.0 : 0.35;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -192,7 +201,7 @@ export component Sidebar inherits Rectangle {
                                 text: "Registros Patronales";
                                 font-size: 13.5px;
                                 font-weight: 700;
-                                color: AppData.current_view == 2 ? #ffffff : (root.client_selected ? #1e293b : #94a3b8);
+                                color: AppData.current_view == 2 ? #ffffff : (root.can_go_rp ? #1e293b : #94a3b8);
                                 vertical-alignment: center;
                             }
                         }
@@ -207,7 +216,7 @@ export component Sidebar inherits Rectangle {
                                 text: "F3";
                                 font-size: 11px;
                                 font-weight: 700;
-                                color: AppData.current_view == 2 ? #ffffff : (root.client_selected ? #64748b : #cbd5e1);
+                                color: AppData.current_view == 2 ? #ffffff : (root.can_go_rp ? #64748b : #cbd5e1);
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -215,22 +224,22 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f3 := TouchArea {
-                        enabled: root.client_selected;
-                        mouse-cursor: root.client_selected ? pointer : not-allowed;
+                        enabled: root.can_go_rp;
+                        mouse-cursor: root.can_go_rp ? pointer : not-allowed;
                         clicked => {
-                            if root.client_selected {
+                            if root.can_go_rp {
                                 AppLogic.navigate_view(2);
                             }
                         }
                     }
                 }
 
-                // Revisiones (F4) -> View 3 (Deshabilitado por default; sólo accesible por botón "Ver" de Registros Patronales)
+                // Revisiones (F4) -> View 3 (Habilitado con RP seleccionado)
                 Rectangle {
                     height: 42px;
                     border-radius: 8px;
-                    background: AppData.current_view == 3 ? #1e3a8a : transparent;
-                    opacity: AppData.current_view == 3 ? 1.0 : 0.35;
+                    background: AppData.current_view == 3 ? #1e3a8a : (root.can_go_revisiones && btn_f4.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 3 || root.can_go_revisiones ? 1.0 : 0.35;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -249,7 +258,7 @@ export component Sidebar inherits Rectangle {
                                 text: "Revisiones";
                                 font-size: 13.5px;
                                 font-weight: 700;
-                                color: AppData.current_view == 3 ? #ffffff : #94a3b8;
+                                color: AppData.current_view == 3 ? #ffffff : (root.can_go_revisiones ? #1e293b : #94a3b8);
                                 vertical-alignment: center;
                             }
                         }
@@ -264,25 +273,30 @@ export component Sidebar inherits Rectangle {
                                 text: "F4";
                                 font-size: 11px;
                                 font-weight: 700;
-                                color: AppData.current_view == 3 ? #ffffff : #cbd5e1;
+                                color: AppData.current_view == 3 ? #ffffff : (root.can_go_revisiones ? #64748b : #cbd5e1);
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
                         }
                     }
 
-                    TouchArea {
-                        enabled: false;
-                        mouse-cursor: not-allowed;
+                    btn_f4 := TouchArea {
+                        enabled: root.can_go_revisiones;
+                        mouse-cursor: root.can_go_revisiones ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_revisiones {
+                                AppLogic.navigate_view(3);
+                            }
+                        }
                     }
                 }
 
-                // Registros de Obras (F5) -> View 4 (Deshabilitado por default; sólo accesible por botón "Ver Registros de Obras" en Revisiones)
+                // Registros de Obras (F5) -> View 4 (Habilitado con Revisión seleccionada)
                 Rectangle {
                     height: 42px;
                     border-radius: 8px;
-                    background: AppData.current_view == 4 ? #1e3a8a : transparent;
-                    opacity: AppData.current_view == 4 ? 1.0 : 0.35;
+                    background: AppData.current_view == 4 ? #1e3a8a : (root.can_go_obras && btn_f5.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 4 || root.can_go_obras ? 1.0 : 0.35;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -301,7 +315,7 @@ export component Sidebar inherits Rectangle {
                                 text: "Registros de Obras";
                                 font-size: 13.5px;
                                 font-weight: 700;
-                                color: AppData.current_view == 4 ? #ffffff : #94a3b8;
+                                color: AppData.current_view == 4 ? #ffffff : (root.can_go_obras ? #1e293b : #94a3b8);
                                 vertical-alignment: center;
                             }
                         }
@@ -316,16 +330,21 @@ export component Sidebar inherits Rectangle {
                                 text: "F5";
                                 font-size: 11px;
                                 font-weight: 700;
-                                color: AppData.current_view == 4 ? #ffffff : #cbd5e1;
+                                color: AppData.current_view == 4 ? #ffffff : (root.can_go_obras ? #64748b : #cbd5e1);
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
                         }
                     }
 
-                    TouchArea {
-                        enabled: false;
-                        mouse-cursor: not-allowed;
+                    btn_f5 := TouchArea {
+                        enabled: root.can_go_obras;
+                        mouse-cursor: root.can_go_obras ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_obras {
+                                AppLogic.navigate_view(4);
+                            }
+                        }
                     }
                 }
 
@@ -333,8 +352,8 @@ export component Sidebar inherits Rectangle {
                 Rectangle {
                     height: 42px;
                     border-radius: 8px;
-                    background: AppData.current_view == 5 ? #1e3a8a : (root.client_selected && btn_f6.has-hover ? #f8fafc : transparent);
-                    opacity: root.client_selected ? 1.0 : 0.4;
+                    background: AppData.current_view == 5 ? #1e3a8a : (root.can_go_empleados && btn_f6.has-hover) ? #f8fafc : transparent;
+                    opacity: root.can_go_empleados ? 1.0 : 0.35;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -353,7 +372,7 @@ export component Sidebar inherits Rectangle {
                                 text: "Empleados";
                                 font-size: 13.5px;
                                 font-weight: 700;
-                                color: AppData.current_view == 5 ? #ffffff : (root.client_selected ? #1e293b : #94a3b8);
+                                color: AppData.current_view == 5 ? #ffffff : (root.can_go_empleados ? #1e293b : #94a3b8);
                                 vertical-alignment: center;
                             }
                         }
@@ -368,7 +387,7 @@ export component Sidebar inherits Rectangle {
                                 text: "F6";
                                 font-size: 11px;
                                 font-weight: 700;
-                                color: AppData.current_view == 5 ? #ffffff : (root.client_selected ? #64748b : #cbd5e1);
+                                color: AppData.current_view == 5 ? #ffffff : (root.can_go_empleados ? #64748b : #cbd5e1);
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -376,22 +395,22 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f6 := TouchArea {
-                        enabled: root.client_selected;
-                        mouse-cursor: root.client_selected ? pointer : not-allowed;
+                        enabled: root.can_go_empleados;
+                        mouse-cursor: root.can_go_empleados ? pointer : not-allowed;
                         clicked => {
-                            if root.client_selected {
+                            if root.can_go_empleados {
                                 AppLogic.navigate_view(5);
                             }
                         }
                     }
                 }
 
-                // Cédula de Cuotas (F7) -> View 6 (Deshabilitado hasta acceder por botón "Cargar Cédulas de Cuotas" en Registros de Obras)
+                // Cédula de Cuotas (F7) -> View 6 (Habilitado con Revisión y Cédulas cargadas o permitidas)
                 Rectangle {
                     height: 42px;
                     border-radius: 8px;
-                    background: AppData.current_view == 6 ? #1e3a8a : (AppData.cedulas_access_allowed && btn_f7.has-hover ? #f8fafc : transparent);
-                    opacity: AppData.current_view == 6 || AppData.cedulas_access_allowed ? 1.0 : 0.35;
+                    background: AppData.current_view == 6 ? #1e3a8a : (root.can_go_cedulas && btn_f7.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 6 || root.can_go_cedulas ? 1.0 : 0.35;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -410,7 +429,7 @@ export component Sidebar inherits Rectangle {
                                 text: "Cédula de Cuotas";
                                 font-size: 13.5px;
                                 font-weight: 700;
-                                color: AppData.current_view == 6 ? #ffffff : (AppData.cedulas_access_allowed ? #1e293b : #94a3b8);
+                                color: AppData.current_view == 6 ? #ffffff : (root.can_go_cedulas ? #1e293b : #94a3b8);
                                 vertical-alignment: center;
                             }
                         }
@@ -425,7 +444,7 @@ export component Sidebar inherits Rectangle {
                                 text: "F7";
                                 font-size: 11px;
                                 font-weight: 700;
-                                color: AppData.current_view == 6 ? #ffffff : (AppData.cedulas_access_allowed ? #64748b : #cbd5e1);
+                                color: AppData.current_view == 6 ? #ffffff : (root.can_go_cedulas ? #64748b : #cbd5e1);
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -433,22 +452,22 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f7 := TouchArea {
-                        enabled: AppData.cedulas_access_allowed;
-                        mouse-cursor: AppData.cedulas_access_allowed ? pointer : not-allowed;
+                        enabled: root.can_go_cedulas;
+                        mouse-cursor: root.can_go_cedulas ? pointer : not-allowed;
                         clicked => {
-                            if AppData.cedulas_access_allowed {
+                            if root.can_go_cedulas {
                                 AppLogic.navigate_view(6);
                             }
                         }
                     }
                 }
 
-                // Reporte Liquidaciones (F8) -> View 7
+                // Reporte Liquidaciones (F8) -> View 7 (Habilitado con Revisión y liquidaciones existentes)
                 Rectangle {
                     height: 42px;
                     border-radius: 8px;
-                    background: AppData.current_view == 7 ? #1e3a8a : (AppData.reporte_liquidaciones_access_allowed && btn_f8.has-hover ? #f8fafc : transparent);
-                    opacity: AppData.current_view == 7 || AppData.reporte_liquidaciones_access_allowed ? 1.0 : 0.35;
+                    background: AppData.current_view == 7 ? #1e3a8a : (root.can_go_reporte && btn_f8.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 7 || root.can_go_reporte ? 1.0 : 0.35;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -467,7 +486,7 @@ export component Sidebar inherits Rectangle {
                                 text: "Reporte Liquidaciones";
                                 font-size: 13.5px;
                                 font-weight: 700;
-                                color: AppData.current_view == 7 ? #ffffff : (AppData.reporte_liquidaciones_access_allowed ? #1e293b : #94a3b8);
+                                color: AppData.current_view == 7 ? #ffffff : (root.can_go_reporte ? #1e293b : #94a3b8);
                                 vertical-alignment: center;
                             }
                         }
@@ -482,7 +501,7 @@ export component Sidebar inherits Rectangle {
                                 text: "F8";
                                 font-size: 11px;
                                 font-weight: 700;
-                                color: AppData.current_view == 7 ? #ffffff : (AppData.reporte_liquidaciones_access_allowed ? #64748b : #cbd5e1);
+                                color: AppData.current_view == 7 ? #ffffff : (root.can_go_reporte ? #64748b : #cbd5e1);
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -490,10 +509,10 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f8 := TouchArea {
-                        enabled: AppData.reporte_liquidaciones_access_allowed;
-                        mouse-cursor: AppData.reporte_liquidaciones_access_allowed ? pointer : not-allowed;
+                        enabled: root.can_go_reporte;
+                        mouse-cursor: root.can_go_reporte ? pointer : not-allowed;
                         clicked => {
-                            if AppData.reporte_liquidaciones_access_allowed {
+                            if root.can_go_reporte {
                                 AppLogic.navigate_view(7);
                             }
                         }
@@ -553,12 +572,12 @@ export component Sidebar inherits Rectangle {
                     }
                 }
 
-                // Reporte Nóminas (F10) -> View 9
+                // Reporte Nóminas (F10) -> View 9 (Habilitado con Revisión y nóminas existentes)
                 Rectangle {
                     height: 42px;
                     border-radius: 8px;
-                    background: AppData.current_view == 9 ? #1e3a8a : (AppData.nominas_access_allowed && btn_f10.has-hover ? #f8fafc : transparent);
-                    opacity: AppData.current_view == 9 || AppData.nominas_access_allowed ? 1.0 : 0.35;
+                    background: AppData.current_view == 9 ? #1e3a8a : (root.can_go_nominas && btn_f10.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 9 || root.can_go_nominas ? 1.0 : 0.35;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -577,7 +596,7 @@ export component Sidebar inherits Rectangle {
                                 text: "Reporte Nóminas";
                                 font-size: 13.5px;
                                 font-weight: 700;
-                                color: AppData.current_view == 9 ? #ffffff : (AppData.nominas_access_allowed ? #1e293b : #94a3b8);
+                                color: AppData.current_view == 9 ? #ffffff : (root.can_go_nominas ? #1e293b : #94a3b8);
                                 vertical-alignment: center;
                             }
                         }
@@ -592,7 +611,7 @@ export component Sidebar inherits Rectangle {
                                 text: "F10";
                                 font-size: 11px;
                                 font-weight: 700;
-                                color: AppData.current_view == 9 ? #ffffff : (AppData.nominas_access_allowed ? #64748b : #cbd5e1);
+                                color: AppData.current_view == 9 ? #ffffff : (root.can_go_nominas ? #64748b : #cbd5e1);
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -600,10 +619,10 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f10 := TouchArea {
-                        enabled: AppData.nominas_access_allowed;
-                        mouse-cursor: AppData.nominas_access_allowed ? pointer : not-allowed;
+                        enabled: root.can_go_nominas;
+                        mouse-cursor: root.can_go_nominas ? pointer : not-allowed;
                         clicked => {
-                            if AppData.nominas_access_allowed {
+                            if root.can_go_nominas {
                                 AppLogic.navigate_view(9);
                             }
                         }

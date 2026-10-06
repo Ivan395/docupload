@@ -5,10 +5,10 @@ use uuid::Uuid;
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::db::nominas_reporte::{
-    fetch_all_nominas_for_stats, summarize_nominas,
+    fetch_all_nominas_for_stats, summarize_nominas, month_name_es,
 };
 use crate::db::DbPool;
-use crate::nominas_view_logic::NominasSessionState;
+use crate::nominas_view_logic::{fmt_dias, fmt_money, NominasSessionState};
 use crate::rustfs::{sanitize_path_component, sanitize_relative_path};
 use crate::show_toast_message;
 use crate::{AppData, AppLogic, FileItemData, MainWindow, NominaRow};
@@ -239,6 +239,16 @@ pub fn refresh_nominas_upload_state(ui: &MainWindow, session: &NominasUploadSess
     }
 }
 
+// Función auxiliar para ordenar meses en español
+fn mes_orden(mes: &str) -> i32 {
+    match mes {
+        "ENERO" => 1, "FEBRERO" => 2, "MARZO" => 3, "ABRIL" => 4,
+        "MAYO" => 5, "JUNIO" => 6, "JULIO" => 7, "AGOSTO" => 8,
+        "SEPTIEMBRE" => 9, "OCTUBRE" => 10, "NOVIEMBRE" => 11, "DICIEMBRE" => 12,
+        _ => 0,
+    }
+}
+
 /// Carga las nóminas desde la BD y publica el estado 2 con las estadísticas.
 pub fn load_nominas_upload_stats(
     ui: &MainWindow,
@@ -249,12 +259,23 @@ pub fn load_nominas_upload_stats(
         .get()
         .map_err(|e| format!("Error de conexión a la base de datos: {}", e))?;
 
+    let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client);
     let rows = fetch_all_nominas_for_stats(&mut client, None)?;
 
     let d = ui.global::<AppData>();
 
     if rows.is_empty() {
         d.set_nominas_view_state(0);
+        d.set_nominas_view_detalle_list(ModelRc::new(VecModel::from(Vec::new())));
+        d.set_nominas_view_detalle_total_count(0);
+        d.set_nominas_view_detalle_page_total(1);
+        d.set_nominas_view_detalle_page_current(1);
+        d.set_nominas_view_total_trabajadores_str("0".into());
+        d.set_nominas_view_total_dias_str("0".into());
+        d.set_nominas_view_total_percepciones_str("$0.00".into());
+        d.set_nominas_view_extracted_count_str("0 Nóminas Extraídas".into());
+        d.set_nominas_view_total_empleados_unicos(0);
+        d.set_nominas_view_mes_stats(ModelRc::new(VecModel::from(Vec::new())));
         return Ok(());
     }
 
@@ -285,6 +306,71 @@ pub fn load_nominas_upload_stats(
     d.set_nominas_view_extracted_count_str(
         format!("{} Nóminas Extraídas", s.total_nominas).into(),
     );
+
+    // Estadísticas adicionales para el analista
+    d.set_nominas_view_total_empleados_unicos(s.total_empleados as i32);
+    if s.total_empleados > 0 {
+        let prom_dias = s.dias_pagados / s.total_empleados as f64;
+        let prom_perc = s.total_percepciones / s.total_empleados as f64;
+        d.set_nominas_view_promedio_dias_por_empleado(crate::nominas_view_logic::fmt_dias(prom_dias).into());
+        d.set_nominas_view_promedio_percepciones_por_empleado(crate::nominas_view_logic::fmt_money(prom_perc).into());
+    }
+    d.set_nominas_view_total_nominas_sin_cedula(s.nominas_sin_cedula.to_string().into());
+
+    // Estadísticas mensuales para el analista
+    let mut mes_stats_rows: Vec<crate::MesStatsRow> = s.totales_por_mes
+        .iter()
+        .map(|(mes_key, ms)| {
+            // Parsear el mes_key para separar año y mes (formato "ANIO-MES")
+            let parts: Vec<&str> = mes_key.split('-').collect();
+            let anio = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mes_num = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mes_nombre = month_name_es(mes_num as u32);
+
+            // Preparar empleados del mes
+            let empleados_rows: Vec<crate::EmpleadoMesStatsRow> = ms.empleados
+                .values()
+                .map(|emp| crate::EmpleadoMesStatsRow {
+                    nombre: emp.nombre.clone().into(),
+                    nss: emp.nss.clone().into(),
+                    dias_pagados: fmt_dias(emp.dias_pagados).into(),
+                    total_percepciones: fmt_money(emp.total_percepciones).into(),
+                    dias_cedula: fmt_dias(emp.dias_cedula).into(),
+                })
+                .collect();
+            // Ordenar empleados por nombre
+            let mut empleados_rows_sorted = empleados_rows;
+            empleados_rows_sorted.sort_by(|a, b| a.nombre.to_string().cmp(&b.nombre.to_string()));
+
+            crate::MesStatsRow {
+                mes: mes_nombre.into(),
+                anio: anio as i32,
+                total_nominas: ms.total_nominas as i32,
+                empleados_unicos: ms.empleados_unicos as i32,
+                dias_pagados: fmt_dias(ms.dias_pagados).into(),
+                dias_cedula: fmt_dias(ms.dias_cedula).into(),
+                total_percepciones: fmt_money(ms.total_percepciones).into(),
+                nominas_sin_cedula: ms.nominas_sin_cedula as i32,
+                empleados: ModelRc::new(VecModel::from(ms.empleados.values().map(|emp| crate::EmpleadoMesStatsRow {
+                    nombre: emp.nombre.clone().into(),
+                    nss: emp.nss.clone().into(),
+                    dias_pagados: fmt_dias(emp.dias_pagados).into(),
+                    total_percepciones: fmt_money(emp.total_percepciones).into(),
+                    dias_cedula: fmt_dias(emp.dias_cedula).into(),
+                }).collect::<Vec<_>>())),
+            }
+        })
+        .collect();
+
+    // Ordenar por año y mes
+    mes_stats_rows.sort_by(|a, b| {
+        if a.anio != b.anio {
+            a.anio.cmp(&b.anio)
+        } else {
+            mes_orden(&a.mes).cmp(&mes_orden(&b.mes))
+        }
+    });
+    d.set_nominas_view_mes_stats(ModelRc::new(VecModel::from(mes_stats_rows)));
 
     // Detalle paginado: se reutiliza el mismo modelo de fila que la vista de
     // reporte para no duplicar la estructura de datos.
@@ -590,6 +676,21 @@ pub fn wire_nominas_upload_callbacks(
                         }
                         if r.valid_count > 0 {
                             app_data.set_nominas_access_allowed(true);
+                        }
+                        // Actualizar propiedades de navegación tras guardar nóminas
+                        if let Some(ref pool) = pool_final {
+                            if let Ok(mut client) = pool.get() {
+                                if let Ok((has_cedulas, has_nominas, has_liquidaciones, has_obras)) = 
+                                    crate::db::nominas_reporte::check_all_data_exists(&mut client, revision_id_w) {
+                                    app_data.set_revision_has_cedulas(has_cedulas);
+                                    app_data.set_revision_has_nominas(has_nominas);
+                                    app_data.set_revision_has_liquidaciones(has_liquidaciones);
+                                    app_data.set_revision_has_obras(has_obras);
+                                    
+                                    let all_data = has_obras && has_cedulas && has_nominas && has_liquidaciones;
+                                    app_data.set_revision_has_all_data(all_data);
+                                }
+                            }
                         }
                         if let Some(ref pool) = pool_final {
                             if let Err(e) =

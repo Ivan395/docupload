@@ -177,6 +177,22 @@ export struct CedulaSumatoriaRow {
     total_liquidacion_str: string,
 }
 
+export struct ReporteGuarderiaObraItem {
+    id_obra: string,
+    obra_numero: string,
+    obra_label: string,
+    total_gps: float,
+    total_gps_str: string,
+    valor_guarderias: float,
+    valor_guarderias_str: string,
+    monto_obra: float,
+    monto_obra_str: string,
+    limite_18_obra: float,
+    limite_18_obra_str: string,
+    supera_18: bool,
+    empleados_count: int,
+}
+
 export struct ReporteObraItem {
     id: string,
     numero: string,
@@ -218,11 +234,16 @@ export struct ReporteLiquidacionRow {
     dias_cedula: int,
     dias_obra: int,
     clave: string,
+    is_baja: bool,
     fecha: string,
     sdi_str: string,
     lic_str: string,
     inc_str: string,
     aus_str: string,
+    has_incidencias: bool,
+    lic_val: float,
+    inc_val: float,
+    aus_val: float,
     row_bg_color: color,
     row_hover_color: color,
     row_accent_color: color,
@@ -339,6 +360,27 @@ export struct NominaMesTotalItem {
     dias_pagados_str: string,
     dias_cedula_str: string,
     percepciones_str: string,
+}
+
+export struct EmpleadoMesStatsRow {
+    nombre: string,
+    nss: string,
+    dias_pagados: string,
+    total_percepciones: string,
+    dias_cedula: string,
+}
+
+export struct MesStatsRow {
+    mes: string,
+    anio: int,
+    total_nominas: int,
+    empleados_unicos: int,
+    dias_pagados: string,
+    dias_cedula: string,
+    total_percepciones: string,
+    nominas_sin_cedula: int,
+    // Empleados en este mes
+    empleados: [EmpleadoMesStatsRow],
 }
 
 export struct CalendarDayMilestone {
@@ -777,6 +819,13 @@ export global AppData {
     in-out property <string> nominas_view_sbc_min_str: "";
     in-out property <string> nominas_view_sbc_max_str: "";
 
+    // Estadísticas mensuales (para análisis del analista)
+    in-out property <[MesStatsRow]> nominas_view_mes_stats: [];
+    in-out property <int> nominas_view_total_empleados_unicos: 0;
+    in-out property <string> nominas_view_promedio_dias_por_empleado: "0";
+    in-out property <string> nominas_view_promedio_percepciones_por_empleado: "$0.00";
+    in-out property <string> nominas_view_total_nominas_sin_cedula: "0";
+
     // Tabla paginada de detalle de nóminas procesadas
     in-out property <[NominaRow]> nominas_view_detalle_list: [];
     in-out property <int> nominas_view_detalle_total_count: 0;
@@ -798,6 +847,22 @@ export global AppData {
     in-out property <length> nominas_table_min_width: 1540px;
     // --- Vista 7: Reporte de Liquidaciones y Prorrateo por Obra ---
     in-out property <bool> reporte_liquidaciones_access_allowed: false;
+
+    // Propiedades para rastrear si hay datos en BD por revisión
+    in-out property <bool> cedulas_data_exists: false;
+    in-out property <bool> nominas_data_exists: false;
+    in-out property <bool> reportes_liquidaciones_data_exists: false;
+    in-out property <bool> registros_obras_data_exists: false;
+
+    // Control granular de acceso por paso del flujo (para la revisión seleccionada)
+    in-out property <bool> revision_has_obras: false;
+    in-out property <bool> revision_has_cedulas: false;
+    in-out property <bool> revision_has_nominas: false;
+    in-out property <bool> revision_has_liquidaciones: false;
+
+    // Indica si la revisión tiene TODA la información completa
+    in-out property <bool> revision_has_all_data: false;
+
     in-out property <[ReporteLiquidacionRow]> reporte_liquidaciones_list: [];
     in-out property <[ReporteObraItem]> reporte_obras_options: [];
     in-out property <[string]> reporte_obras_filter_labels: ["Todas las obras"];
@@ -853,6 +918,10 @@ export global AppData {
     in-out property <[ReporteObraItem]> reporte_edit_filtered_obras: [];
     in-out property <string> reporte_edit_dias_cedula_val: "";
     in-out property <string> reporte_edit_dias_obra_val: "";
+    in-out property <string> reporte_edit_lic_info: "0";
+    in-out property <string> reporte_edit_inc_info: "0";
+    in-out property <string> reporte_edit_aus_info: "0";
+    in-out property <int> reporte_edit_dias_max: 0;
 
     // Compatibilidad retroactiva
     in-out property <bool> show_reporte_obra_picker_modal: false;
@@ -913,6 +982,9 @@ export global AppData {
     // Resumen de Totales por Mes (sólo para "Todos los meses")
     in-out property <bool> show_reporte_totales_por_mes: true;
     in-out property <[ReporteMesTotalItem]> reporte_totales_por_mes: [];
+
+    // Análisis de Guarderías (Tope 18% por Registro de Obra del Usuario)
+    in-out property <[ReporteGuarderiaObraItem]> reporte_guarderias_obras: [];
 
     // Calendario Fiscal & Revisiones IMSS
     in-out property <int> cal_view_year: 2026;
@@ -1168,6 +1240,7 @@ callback recargar_cedulas_view();
 
     callback reporte_batch_apply(int, string, string, bool);
     callback reporte_batch_igualar_dias();
+    callback reporte_batch_desvincular_obra();
     callback reporte_request_confirm_igualar_dias();
     callback reporte_cancel_confirm_igualar_dias();
     callback reporte_execute_confirm_igualar_dias();

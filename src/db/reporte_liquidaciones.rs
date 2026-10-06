@@ -1,6 +1,6 @@
 use chrono::{Datelike, NaiveDate};
 use postgres::Client;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -14,11 +14,14 @@ pub struct ObraOptionDb {
     pub fecha_inicio: Option<NaiveDate>,
     pub fecha_fin: Option<NaiveDate>,
     pub label: String,
+    pub creado_usuario: bool,
+    pub monto: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct ReporteLiquidacionRowDb {
     pub id_reporte_liq: Uuid,
+    pub id_parent_reporte_liq: Uuid,
     pub id_liquidacion: Uuid,
     pub id_empleado: Uuid,
     pub nombre_trabajador: String,
@@ -34,6 +37,7 @@ pub struct ReporteLiquidacionRowDb {
     pub obra_numero: String,
     pub obra_label: String,
     pub dias_obra: i16,
+    pub obra_creado_usuario: bool,
 
     pub clave: String,
     pub fecha: Option<NaiveDate>,
@@ -126,7 +130,9 @@ fn row_get_f64(r: &postgres::Row, idx: usize, default: f64) -> f64 {
 pub fn fetch_obras_for_revision(client: &mut Client, id_revision: Uuid) -> Result<Vec<ObraOptionDb>, String> {
     let rows = client.query(
         r#"
-        SELECT ro.id, ro.numero, ro.tipo_obra, ro.fecha_inicio, ro.fecha_fin
+        SELECT ro.id, ro.numero, ro.tipo_obra, ro.fecha_inicio, ro.fecha_fin,
+               (COALESCE(ro.creado_usuario, false) = true OR COALESCE(ro.monto, 0.0) > 0.0) AS creado_usuario,
+               COALESCE(ro.monto, 0.0) AS monto
         FROM public.registros_obras ro
         WHERE ro.id_revision = $1
            OR ro.id_registro_patronal = (SELECT r.id_registro_patronal FROM public.revisiones r WHERE r.id = $1)
@@ -142,6 +148,8 @@ pub fn fetch_obras_for_revision(client: &mut Client, id_revision: Uuid) -> Resul
         let tipo: Option<String> = r.try_get(2).ok().flatten();
         let f_ini: Option<NaiveDate> = r.try_get(3).ok().flatten();
         let f_fin: Option<NaiveDate> = r.try_get(4).ok().flatten();
+        let creado_usuario: bool = r.try_get(5).unwrap_or(false);
+        let monto: f64 = r.try_get(6).unwrap_or(0.0);
         let tipo_clean = tipo.unwrap_or_default();
         let label = if tipo_clean.trim().is_empty() {
             num.trim().to_string()
@@ -155,6 +163,8 @@ pub fn fetch_obras_for_revision(client: &mut Client, id_revision: Uuid) -> Resul
             fecha_inicio: f_ini,
             fecha_fin: f_fin,
             label,
+            creado_usuario,
+            monto,
         });
     }
     Ok(result)
@@ -423,21 +433,30 @@ pub fn sync_reportes_liquidaciones_for_revision(
 
                 let calc2 = |v: Option<f64>| v.map(|x| (x * factor * 100.0).round() / 100.0);
 
+                let is_baja = clave.as_deref().unwrap_or("").trim().eq_ignore_ascii_case("baja");
+                let det_obra_id = if !is_baja { target_obra_id } else { None };
+                let det_dias_obr: Option<i16> = if !is_baja && target_obra_id.is_some() {
+                    target_dias.or(dias_det)
+                } else {
+                    Some(0)
+                };
+
                 tx.execute(
                     r#"
                     INSERT INTO public.reportes_detalles_liquidaciones (
                         id, id_reporte_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
                         exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
-                        gps, patronal, obrera, subtotal
+                        gps, patronal, obrera, subtotal, id_registro_obra, dias_registro_obra
                     ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
                     )
                     "#,
                     &[
                         &id_rep_det, &id_rep_liq, &clave, &fecha, &dias_det, &sdi, &lic, &inc, &aus,
                         &calc2(cf), &calc2(exc_pat), &calc2(exc_obr), &calc2(pd_pat), &calc2(pd_obr),
                         &calc2(gmp_pat), &calc2(gmp_obr), &calc2(rt), &calc2(iv_pat), &calc2(iv_obr),
-                        &calc2(gps), &calc2(patronal), &calc2(obrera), &calc2(subtotal)
+                        &calc2(gps), &calc2(patronal), &calc2(obrera), &calc2(subtotal),
+                        &det_obra_id, &det_dias_obr
                     ],
                 ).map_err(|e| format!("Error insertando reporte detalle calculado: {}", e))?;
             }
@@ -558,7 +577,7 @@ pub fn fetch_reporte_liquidaciones(
 
     let base_select = r#"
     SELECT 
-        rl.id AS id_reporte_liq,
+        rdl.id AS id_reporte_liq,
         rl.id_liquidacion,
         e.id AS id_empleado,
         e.nombre AS nombre_trabajador,
@@ -569,10 +588,10 @@ pub fn fetch_reporte_liquidaciones(
         rl.mes_periodo,
         rl.anio_periodo,
         rdl.dias AS dias_cedula,
-        rvol.id_registro_obra,
-        ro.numero AS obra_numero,
-        ro.tipo_obra AS tipo_obra,
-        rvol.dias_registro_obra AS dias_obra,
+        COALESCE(rdl.id_registro_obra, rvol.id_registro_obra) AS id_registro_obra,
+        COALESCE(ro_det.numero, ro.numero, '') AS obra_numero,
+        COALESCE(ro_det.tipo_obra, ro.tipo_obra, '') AS tipo_obra,
+        COALESCE(rdl.dias_registro_obra, rvol.dias_registro_obra, 0) AS dias_obra,
         rdl.cf,
         rdl.exc_pat,
         rdl.exc_obr,
@@ -587,31 +606,41 @@ pub fn fetch_reporte_liquidaciones(
         rdl.patronal,
         rdl.obrera,
         rdl.subtotal AS subtotal_prorrateado,
-        dl.cf AS cf_orig,
-        dl.exc_pat AS exc_pat_orig,
-        dl.exc_obr AS exc_obr_orig,
-        dl.pd_pat AS pd_pat_orig,
-        dl.pd_obr AS pd_obr_orig,
-        dl.gmp_pat AS gmp_pat_orig,
-        dl.gmp_obr AS gmp_obr_orig,
-        dl.rt AS rt_orig,
-        dl.iv_pat AS iv_pat_orig,
-        dl.iv_obr AS iv_obr_orig,
-        dl.gps AS gps_orig,
-        dl.patronal AS patronal_orig,
-        dl.obrera AS obrera_orig,
-        dl.subtotal AS subtotal_orig,
+        COALESCE(dl.cf, rdl.cf, 0.0) AS cf_orig,
+        COALESCE(dl.exc_pat, rdl.exc_pat, 0.0) AS exc_pat_orig,
+        COALESCE(dl.exc_obr, rdl.exc_obr, 0.0) AS exc_obr_orig,
+        COALESCE(dl.pd_pat, rdl.pd_pat, 0.0) AS pd_pat_orig,
+        COALESCE(dl.pd_obr, rdl.pd_obr, 0.0) AS pd_obr_orig,
+        COALESCE(dl.gmp_pat, rdl.gmp_pat, 0.0) AS gmp_pat_orig,
+        COALESCE(dl.gmp_obr, rdl.gmp_obr, 0.0) AS gmp_obr_orig,
+        COALESCE(dl.rt, rdl.rt, 0.0) AS rt_orig,
+        COALESCE(dl.iv_pat, rdl.iv_pat, 0.0) AS iv_pat_orig,
+        COALESCE(dl.iv_obr, rdl.iv_obr, 0.0) AS iv_obr_orig,
+        COALESCE(dl.gps, rdl.gps, 0.0) AS gps_orig,
+        COALESCE(dl.patronal, rdl.patronal, 0.0) AS patronal_orig,
+        COALESCE(dl.obrera, rdl.obrera, 0.0) AS obrera_orig,
+        COALESCE(dl.subtotal, rdl.subtotal, 0.0) AS subtotal_orig,
         COALESCE(rdl.clave, '') AS clave,
         rdl.fecha,
         COALESCE(rdl.sdi, 0.0) AS sdi,
         COALESCE(rdl.lic, 0.0) AS lic,
         COALESCE(rdl.inc, 0.0) AS inc,
-        COALESCE(rdl.aus, 0.0) AS aus
+        COALESCE(rdl.aus, 0.0) AS aus,
+        rl.id AS id_parent_reporte_liq,
+        COALESCE(
+            ro_det.creado_usuario,
+            ro.creado_usuario,
+            false
+        ) AS obra_creado_usuario
     FROM public.reportes_liquidaciones AS rl
     INNER JOIN public.reportes_detalles_liquidaciones AS rdl
         ON rl.id = rdl.id_reporte_liquidacion
     LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones AS rvol
         ON rl.id = rvol.id_reporte_liquidacion
+    LEFT JOIN public.registros_obras AS ro
+        ON rvol.id_registro_obra = ro.id
+    LEFT JOIN public.registros_obras AS ro_det
+        ON rdl.id_registro_obra = ro_det.id
     LEFT JOIN public.detalles_liquidaciones AS dl
         ON (dl.id_liquidacion = rl.id_liquidacion 
             AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL)) 
@@ -622,8 +651,6 @@ pub fn fetch_reporte_liquidaciones(
         ON rl.id_revision = rev.id
     JOIN public.registros_patronales AS rp
         ON rev.id_registro_patronal = rp.id
-    LEFT JOIN public.registros_obras AS ro
-        ON rvol.id_registro_obra = ro.id
     "#;
 
     let order_clause = r#"
@@ -716,8 +743,12 @@ pub fn fetch_reporte_liquidaciones(
         let inc = row_get_f64(&r, 47, 0.0);
         let aus = row_get_f64(&r, 48, 0.0);
 
+        let id_parent_rep: Uuid = r.try_get(49).unwrap_or_default();
+        let obra_creado_usr: bool = r.try_get(50).unwrap_or(false);
+
         result.push(ReporteLiquidacionRowDb {
             id_reporte_liq: id_rep_liq,
+            id_parent_reporte_liq: id_parent_rep,
             id_liquidacion: id_liq,
             id_empleado: id_emp,
             nombre_trabajador: nom.trim().to_string(),
@@ -733,6 +764,7 @@ pub fn fetch_reporte_liquidaciones(
             obra_numero: obra_num.trim().to_string(),
             obra_label,
             dias_obra,
+            obra_creado_usuario: obra_creado_usr,
 
             clave: clave_raw.trim().to_string(),
             fecha: fecha_opt,
@@ -794,55 +826,19 @@ pub fn batch_save_reporte_row_updates(
     let mut updated_count = 0;
 
     for &(id_reporte_liq, dias_cedula, dias_obra, id_registro_obra_opt) in rows {
-        // 1. Actualizar días cédula en reportes_detalles_liquidaciones
+        // 1. Actualizar días cédula, obra y días obra en public.reportes_detalles_liquidaciones para este detalle específico
         tx.execute(
-            "UPDATE public.reportes_detalles_liquidaciones SET dias = $2 WHERE id_reporte_liquidacion = $1",
-            &[&id_reporte_liq, &dias_cedula],
-        ).map_err(|e| format!("Error actualizando días en reportes_detalles_liquidaciones: {}", e))?;
+            r#"
+            UPDATE public.reportes_detalles_liquidaciones
+            SET dias = $2,
+                dias_registro_obra = $3,
+                id_registro_obra = $4
+            WHERE id = $1
+            "#,
+            &[&id_reporte_liq, &dias_cedula, &Some(dias_obra), &id_registro_obra_opt],
+        ).map_err(|e| format!("Error actualizando reporte detalle: {}", e))?;
 
-        // 2. Actualizar vinculación en reportes_vinculaciones_obras_liquidaciones
-        if let Some(obra_id) = id_registro_obra_opt {
-            let dias_obra_val = if dias_obra > 0 {
-                dias_obra.clamp(1, 31)
-            } else {
-                dias_cedula.clamp(1, 31)
-            };
-
-            let vinc_exists = tx.query_opt(
-                "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 LIMIT 1",
-                &[&id_reporte_liq],
-            ).map_err(|e| format!("Error consultando vinculación: {}", e))?;
-
-            if let Some(vr) = vinc_exists {
-                let vid: Uuid = vr.get(0);
-                tx.execute(
-                    r#"
-                    UPDATE public.reportes_vinculaciones_obras_liquidaciones
-                    SET id_registro_obra = $2, dias_registro_obra = $3
-                    WHERE id = $1
-                    "#,
-                    &[&vid, &Some(obra_id), &Some(dias_obra_val)],
-                ).map_err(|e| format!("Error actualizando vinculación de obra: {}", e))?;
-            } else {
-                let new_vinc_id = Uuid::now_v7();
-                tx.execute(
-                    r#"
-                    INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (
-                        id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra
-                    ) VALUES ($1, $2, $3, $4)
-                    "#,
-                    &[&new_vinc_id, &Some(obra_id), &id_reporte_liq, &Some(dias_obra_val)],
-                ).map_err(|e| format!("Error creando vinculación de obra: {}", e))?;
-            }
-        } else {
-            // Sin obra asignada: eliminar cualquier relación existente en la tabla
-            tx.execute(
-                "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1",
-                &[&id_reporte_liq],
-            ).map_err(|e| format!("Error eliminando vinculación de obra: {}", e))?;
-        }
-
-        // 3. Recalcular conceptos en public.reportes_detalles_liquidaciones
+        // 2. Recalcular conceptos prorrateados para esta fila de detalle específica
         let factor = if dias_cedula > 0 && id_registro_obra_opt.is_some() {
             (dias_obra as f64 / dias_cedula as f64).clamp(0.0, 10.0)
         } else {
@@ -873,15 +869,70 @@ pub fn batch_save_reporte_row_updates(
               AND dl.id_liquidacion = rl.id_liquidacion
               AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL))
               AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL))
-              AND rl.id = $1
+              AND rdl.id = $1
             "#,
             &[&id_reporte_liq, &factor],
         ).map_err(|e| format!("Error recalculando detalles en tiempo real: {}", e))?;
+
+        // 3. Sincronizar reportes_vinculaciones_obras_liquidaciones para mantener consistencia con nóminas
+        let parent_opt: Option<Uuid> = tx.query_opt(
+            "SELECT id_reporte_liquidacion FROM public.reportes_detalles_liquidaciones WHERE id = $1",
+            &[&id_reporte_liq],
+        ).ok().flatten().and_then(|r| r.try_get(0).ok());
+
+        if let Some(parent_id) = parent_opt {
+            if let Some(obra_id) = id_registro_obra_opt {
+                let dias_obra_val = if dias_obra > 0 {
+                    dias_obra.clamp(1, 31)
+                } else {
+                    dias_cedula.clamp(1, 31)
+                };
+
+                let vinc_exists = tx.query_opt(
+                    "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 LIMIT 1",
+                    &[&parent_id],
+                ).map_err(|e| format!("Error consultando vinculación: {}", e))?;
+
+                if let Some(vr) = vinc_exists {
+                    let vid: Uuid = vr.get(0);
+                    tx.execute(
+                        r#"
+                        UPDATE public.reportes_vinculaciones_obras_liquidaciones
+                        SET id_registro_obra = $2, dias_registro_obra = $3
+                        WHERE id = $1
+                        "#,
+                        &[&vid, &Some(obra_id), &Some(dias_obra_val)],
+                    ).map_err(|e| format!("Error actualizando vinculación de obra: {}", e))?;
+                } else {
+                    let new_vinc_id = Uuid::now_v7();
+                    tx.execute(
+                        r#"
+                        INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (
+                            id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra
+                        ) VALUES ($1, $2, $3, $4)
+                        "#,
+                        &[&new_vinc_id, &Some(obra_id), &parent_id, &Some(dias_obra_val)],
+                    ).map_err(|e| format!("Error creando vinculación de obra: {}", e))?;
+                }
+            } else {
+                let any_other_obra: bool = tx.query_one(
+                    "SELECT EXISTS(SELECT 1 FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion = $1 AND id_registro_obra IS NOT NULL)",
+                    &[&parent_id],
+                ).map(|r| r.get(0)).unwrap_or(false);
+                if !any_other_obra {
+                    let _ = tx.execute(
+                        "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1",
+                        &[&parent_id],
+                    );
+                }
+            }
+        }
 
         updated_count += 1;
     }
 
     tx.commit().map_err(|e| format!("Error en commit de actualización: {}", e))?;
+    let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(client);
     Ok(updated_count)
 }
 
@@ -1022,12 +1073,48 @@ pub fn batch_update_reporte_rows(
     }
 
     tx.commit().map_err(|e| format!("Error en commit de lote masivo: {}", e))?;
+    let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(client);
     Ok(updated_count)
+}
+
+fn clean_rp_text(s: &str) -> &str {
+    if s.trim().is_empty()
+        || s.to_lowercase().contains("sin asignar")
+        || s.to_lowercase().contains("pendiente")
+    {
+        ""
+    } else {
+        let trimmed = s.trim();
+        if let Some((code, _)) = trimmed.split_once(" - ") {
+            code.trim()
+        } else if let Some((code, _)) = trimmed.split_once(' ') {
+            code.trim()
+        } else {
+            trimmed
+        }
+    }
+}
+
+fn clean_obra_text<'a>(obra_num: &'a str, obra_label: &'a str, has_obra: bool) -> &'a str {
+    if !has_obra
+        || obra_label.to_lowercase().contains("sin asignar")
+        || obra_label.to_lowercase().contains("pendiente")
+    {
+        ""
+    } else if !obra_num.trim().is_empty() {
+        obra_num.trim()
+    } else if let Some((num, _)) = obra_label.split_once(" - ") {
+        num.trim()
+    } else {
+        obra_label.trim()
+    }
 }
 
 /// Genera la exportación en Excel (.xlsx) con el formato profesional de la vista
 pub fn export_reporte_liquidaciones_to_excel(
     rows: &[ReporteLiquidacionRowDb],
+    all_rows: &[ReporteLiquidacionRowDb],
+    valid_user_obra_ids: Option<&HashSet<Uuid>>,
     file_path: &Path,
     cliente_nombre: &str,
     rp_registro: &str,
@@ -1197,36 +1284,8 @@ pub fn export_reporte_liquidaciones_to_excel(
         let mut m_subtotal_orig: f64 = 0.0;
 
         for row in group_rows {
-            // Reg. Patronal en blanco si está sin asignar o pendiente; traer solamente el registro patronal, no el texto complementario
-            let rp_clean = if row.registro_patronal.trim().is_empty()
-                || row.registro_patronal.to_lowercase().contains("sin asignar")
-                || row.registro_patronal.to_lowercase().contains("pendiente")
-            {
-                ""
-            } else {
-                let s = row.registro_patronal.trim();
-                if let Some((code, _)) = s.split_once(" - ") {
-                    code.trim()
-                } else if let Some((code, _)) = s.split_once(' ') {
-                    code.trim()
-                } else {
-                    s
-                }
-            };
-
-            // Registro de Obra en blanco si no tiene asignación; traer solamente el número de registro de obra, no el texto complementario
-            let obra_clean = if row.id_registro_obra.is_none()
-                || row.obra_label.to_lowercase().contains("sin asignar")
-                || row.obra_label.to_lowercase().contains("pendiente")
-            {
-                ""
-            } else if !row.obra_numero.trim().is_empty() {
-                row.obra_numero.trim()
-            } else if let Some((num, _)) = row.obra_label.split_once(" - ") {
-                num.trim()
-            } else {
-                row.obra_label.trim()
-            };
+            let rp_clean = clean_rp_text(&row.registro_patronal);
+            let obra_clean = clean_obra_text(&row.obra_numero, &row.obra_label, row.id_registro_obra.is_some());
 
             worksheet.write_number_with_format(current_r, 0, global_idx as f64, &integer_format).map_err(|e| e.to_string())?;
             worksheet.write_string_with_format(current_r, 1, &row.periodo_str, &text_format).map_err(|e| e.to_string())?;
@@ -1418,6 +1477,688 @@ pub fn export_reporte_liquidaciones_to_excel(
     worksheet.write_number_with_format(current_r, 30, g_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
 
     worksheet.autofit();
+
+    let is_valid_user_obra = |r: &ReporteLiquidacionRowDb| -> bool {
+        if let Some(oid) = r.id_registro_obra {
+            if let Some(valid_ids) = valid_user_obra_ids {
+                return valid_ids.contains(&oid);
+            }
+            return r.obra_creado_usuario;
+        }
+        false
+    };
+
+    // =========================================================================
+    // SHEET 2: Totales por Empleado y por Obra (Solo registros de obra de la revisión)
+    // =========================================================================
+    {
+        let ws_emp_obra = workbook.add_worksheet();
+        ws_emp_obra.set_name("Totales por Empleado y Obra").map_err(|e| e.to_string())?;
+
+        // Encabezado del Reporte
+        ws_emp_obra.write_string_with_format(
+            0,
+            0,
+            "Reporte de Liquidaciones - Totales por Empleado y Registro de Obra - CONSTRUAUDIT",
+            &title_format,
+        ).map_err(|e| e.to_string())?;
+
+        ws_emp_obra.write_string_with_format(
+            1,
+            0,
+            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_nombre),
+            &subtitle_format,
+        ).map_err(|e| e.to_string())?;
+
+        ws_emp_obra.write_string_with_format(
+            2,
+            0,
+            "Filtro: Registros de Obra de la Revisión | Totales acumulados de todos los meses",
+            &subtitle_format,
+        ).map_err(|e| e.to_string())?;
+
+        let headers_s2 = [
+            "#", "NSS", "RFC", "CURP", "Nombre del Trabajador", "Reg. Patronal",
+            "Registro de Obra", "Días Cédula", "Días Obra",
+            "Lic.", "Inc.", "Aus.",
+            "Cuota Fija", "Exc. Pat.", "Exc. Obr.", "PD Pat.", "PD Obr.", "GMP Pat.", "GMP Obr.",
+            "Riesgo Trab.", "IV Pat.", "IV Obr.", "Guard y PS", "Suma Patronal", "Suma Obrera", "Subtotal", "Subtotal Cédula"
+        ];
+
+        let header_row_s2 = 4;
+        for (col, h) in headers_s2.iter().enumerate() {
+            ws_emp_obra.write_string_with_format(header_row_s2, col as u16, *h, &header_format).map_err(|e| e.to_string())?;
+        }
+
+        struct AggEmpObra {
+            nss: String,
+            rfc: String,
+            curp: String,
+            nombre_trabajador: String,
+            registro_patronal: String,
+            obra_numero: String,
+            dias_cedula: i64,
+            dias_obra: i64,
+            lic: f64,
+            inc: f64,
+            aus: f64,
+            cf: f64,
+            exc_pat: f64,
+            exc_obr: f64,
+            pd_pat: f64,
+            pd_obr: f64,
+            gmp_pat: f64,
+            gmp_obr: f64,
+            rt: f64,
+            iv_pat: f64,
+            iv_obr: f64,
+            gps: f64,
+            patronal: f64,
+            obrera: f64,
+            subtotal: f64,
+            subtotal_orig: f64,
+        }
+
+        let mut groups_s2: HashMap<(Uuid, Uuid), AggEmpObra> = HashMap::new();
+
+        for r in all_rows {
+            if !is_valid_user_obra(r) {
+                continue;
+            }
+            let obra_id = r.id_registro_obra.unwrap();
+            let key = (r.id_empleado, obra_id);
+
+            let entry = groups_s2.entry(key).or_insert_with(|| {
+                AggEmpObra {
+                    nss: r.nss.clone(),
+                    rfc: r.rfc.clone(),
+                    curp: r.curp.clone(),
+                    nombre_trabajador: r.nombre_trabajador.clone(),
+                    registro_patronal: clean_rp_text(&r.registro_patronal).to_string(),
+                    obra_numero: clean_obra_text(&r.obra_numero, &r.obra_label, true).to_string(),
+                    dias_cedula: 0,
+                    dias_obra: 0,
+                    lic: 0.0,
+                    inc: 0.0,
+                    aus: 0.0,
+                    cf: 0.0,
+                    exc_pat: 0.0,
+                    exc_obr: 0.0,
+                    pd_pat: 0.0,
+                    pd_obr: 0.0,
+                    gmp_pat: 0.0,
+                    gmp_obr: 0.0,
+                    rt: 0.0,
+                    iv_pat: 0.0,
+                    iv_obr: 0.0,
+                    gps: 0.0,
+                    patronal: 0.0,
+                    obrera: 0.0,
+                    subtotal: 0.0,
+                    subtotal_orig: 0.0,
+                }
+            });
+
+            entry.dias_cedula += r.dias_cedula as i64;
+            entry.dias_obra += r.dias_obra as i64;
+            entry.lic += r.lic;
+            entry.inc += r.inc;
+            entry.aus += r.aus;
+            entry.cf += r.cf;
+            entry.exc_pat += r.exc_pat;
+            entry.exc_obr += r.exc_obr;
+            entry.pd_pat += r.pd_pat;
+            entry.pd_obr += r.pd_obr;
+            entry.gmp_pat += r.gmp_pat;
+            entry.gmp_obr += r.gmp_obr;
+            entry.rt += r.rt;
+            entry.iv_pat += r.iv_pat;
+            entry.iv_obr += r.iv_obr;
+            entry.gps += r.gps;
+            entry.patronal += r.patronal;
+            entry.obrera += r.obrera;
+            entry.subtotal += r.subtotal;
+            entry.subtotal_orig += r.subtotal_orig;
+        }
+
+        let mut list_s2: Vec<AggEmpObra> = groups_s2.into_values().collect();
+        list_s2.sort_by(|a, b| {
+            a.nombre_trabajador.to_lowercase()
+                .cmp(&b.nombre_trabajador.to_lowercase())
+                .then_with(|| a.obra_numero.cmp(&b.obra_numero))
+        });
+
+        let mut s2_dias_ced: f64 = 0.0;
+        let mut s2_dias_obr: f64 = 0.0;
+        let mut s2_lic: f64 = 0.0;
+        let mut s2_inc: f64 = 0.0;
+        let mut s2_aus: f64 = 0.0;
+        let mut s2_cf: f64 = 0.0;
+        let mut s2_exc_pat: f64 = 0.0;
+        let mut s2_exc_obr: f64 = 0.0;
+        let mut s2_pd_pat: f64 = 0.0;
+        let mut s2_pd_obr: f64 = 0.0;
+        let mut s2_gmp_pat: f64 = 0.0;
+        let mut s2_gmp_obr: f64 = 0.0;
+        let mut s2_rt: f64 = 0.0;
+        let mut s2_iv_pat: f64 = 0.0;
+        let mut s2_iv_obr: f64 = 0.0;
+        let mut s2_gps: f64 = 0.0;
+        let mut s2_patronal: f64 = 0.0;
+        let mut s2_obrera: f64 = 0.0;
+        let mut s2_subtotal: f64 = 0.0;
+        let mut s2_subtotal_orig: f64 = 0.0;
+
+        let mut curr_r_s2 = header_row_s2 + 1;
+        for (idx, item) in list_s2.iter().enumerate() {
+            ws_emp_obra.write_number_with_format(curr_r_s2, 0, (idx + 1) as f64, &integer_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_string_with_format(curr_r_s2, 1, &item.nss, &text_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_string_with_format(curr_r_s2, 2, &item.rfc, &text_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_string_with_format(curr_r_s2, 3, &item.curp, &text_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_string_with_format(curr_r_s2, 4, &item.nombre_trabajador, &text_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_string_with_format(curr_r_s2, 5, &item.registro_patronal, &text_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_string_with_format(curr_r_s2, 6, &item.obra_numero, &text_format).map_err(|e| e.to_string())?;
+
+            ws_emp_obra.write_number_with_format(curr_r_s2, 7, item.dias_cedula as f64, &integer_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 8, item.dias_obra as f64, &integer_format).map_err(|e| e.to_string())?;
+
+            if item.lic > 0.001 {
+                ws_emp_obra.write_number_with_format(curr_r_s2, 9, item.lic, &integer_format).map_err(|e| e.to_string())?;
+            } else {
+                ws_emp_obra.write_string_with_format(curr_r_s2, 9, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+            if item.inc > 0.001 {
+                ws_emp_obra.write_number_with_format(curr_r_s2, 10, item.inc, &integer_format).map_err(|e| e.to_string())?;
+            } else {
+                ws_emp_obra.write_string_with_format(curr_r_s2, 10, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+            if item.aus > 0.001 {
+                ws_emp_obra.write_number_with_format(curr_r_s2, 11, item.aus, &integer_format).map_err(|e| e.to_string())?;
+            } else {
+                ws_emp_obra.write_string_with_format(curr_r_s2, 11, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+
+            ws_emp_obra.write_number_with_format(curr_r_s2, 12, item.cf, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 13, item.exc_pat, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 14, item.exc_obr, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 15, item.pd_pat, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 16, item.pd_obr, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 17, item.gmp_pat, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 18, item.gmp_obr, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 19, item.rt, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 20, item.iv_pat, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 21, item.iv_obr, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 22, item.gps, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 23, item.patronal, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 24, item.obrera, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 25, item.subtotal, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp_obra.write_number_with_format(curr_r_s2, 26, item.subtotal_orig, &currency_format).map_err(|e| e.to_string())?;
+
+            s2_dias_ced += item.dias_cedula as f64;
+            s2_dias_obr += item.dias_obra as f64;
+            s2_lic += item.lic;
+            s2_inc += item.inc;
+            s2_aus += item.aus;
+            s2_cf += item.cf;
+            s2_exc_pat += item.exc_pat;
+            s2_exc_obr += item.exc_obr;
+            s2_pd_pat += item.pd_pat;
+            s2_pd_obr += item.pd_obr;
+            s2_gmp_pat += item.gmp_pat;
+            s2_gmp_obr += item.gmp_obr;
+            s2_rt += item.rt;
+            s2_iv_pat += item.iv_pat;
+            s2_iv_obr += item.iv_obr;
+            s2_gps += item.gps;
+            s2_patronal += item.patronal;
+            s2_obrera += item.obrera;
+            s2_subtotal += item.subtotal;
+            s2_subtotal_orig += item.subtotal_orig;
+
+            curr_r_s2 += 1;
+        }
+
+        // Fila Total General Sheet 2
+        for c in 0..=3 {
+            ws_emp_obra.write_string_with_format(curr_r_s2, c as u16, "", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+        ws_emp_obra.write_string_with_format(curr_r_s2, 4, "TOTAL GENERAL", &grand_total_label_format).map_err(|e| e.to_string())?;
+        for c in 5..=6 {
+            ws_emp_obra.write_string_with_format(curr_r_s2, c as u16, "", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+
+        ws_emp_obra.write_number_with_format(curr_r_s2, 7, s2_dias_ced, &grand_total_int_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 8, s2_dias_obr, &grand_total_int_format).map_err(|e| e.to_string())?;
+
+        if s2_lic > 0.001 {
+            ws_emp_obra.write_number_with_format(curr_r_s2, 9, s2_lic, &grand_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            ws_emp_obra.write_string_with_format(curr_r_s2, 9, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+        if s2_inc > 0.001 {
+            ws_emp_obra.write_number_with_format(curr_r_s2, 10, s2_inc, &grand_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            ws_emp_obra.write_string_with_format(curr_r_s2, 10, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+        if s2_aus > 0.001 {
+            ws_emp_obra.write_number_with_format(curr_r_s2, 11, s2_aus, &grand_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            ws_emp_obra.write_string_with_format(curr_r_s2, 11, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+
+        ws_emp_obra.write_number_with_format(curr_r_s2, 12, s2_cf, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 13, s2_exc_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 14, s2_exc_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 15, s2_pd_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 16, s2_pd_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 17, s2_gmp_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 18, s2_gmp_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 19, s2_rt, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 20, s2_iv_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 21, s2_iv_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 22, s2_gps, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 23, s2_patronal, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 24, s2_obrera, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 25, s2_subtotal, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp_obra.write_number_with_format(curr_r_s2, 26, s2_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
+
+        ws_emp_obra.autofit();
+    }
+
+    // =========================================================================
+    // SHEET 3: Totales por Empleado (Todos los registros de obra de la revisión)
+    // =========================================================================
+    {
+        let ws_emp = workbook.add_worksheet();
+        ws_emp.set_name("Totales por Empleado").map_err(|e| e.to_string())?;
+
+        // Encabezado del Reporte
+        ws_emp.write_string_with_format(
+            0,
+            0,
+            "Reporte de Liquidaciones - Totales por Empleado (Todos los Registros de Obra) - CONSTRUAUDIT",
+            &title_format,
+        ).map_err(|e| e.to_string())?;
+
+        ws_emp.write_string_with_format(
+            1,
+            0,
+            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_nombre),
+            &subtitle_format,
+        ).map_err(|e| e.to_string())?;
+
+        ws_emp.write_string_with_format(
+            2,
+            0,
+            "Filtro: Consolidados de Registros de Obra de la Revisión | Acumulado de todos los meses de la revisión",
+            &subtitle_format,
+        ).map_err(|e| e.to_string())?;
+
+        let headers_s3 = [
+            "#", "NSS", "RFC", "CURP", "Nombre del Trabajador", "Reg. Patronal",
+            "Registros de Obra", "Días Cédula", "Días Obra",
+            "Lic.", "Inc.", "Aus.",
+            "Cuota Fija", "Exc. Pat.", "Exc. Obr.", "PD Pat.", "PD Obr.", "GMP Pat.", "GMP Obr.",
+            "Riesgo Trab.", "IV Pat.", "IV Obr.", "Guard y PS", "Suma Patronal", "Suma Obrera", "Subtotal", "Subtotal Cédula"
+        ];
+
+        let header_row_s3 = 4;
+        for (col, h) in headers_s3.iter().enumerate() {
+            ws_emp.write_string_with_format(header_row_s3, col as u16, *h, &header_format).map_err(|e| e.to_string())?;
+        }
+
+        struct AggEmpTotal {
+            nss: String,
+            rfc: String,
+            curp: String,
+            nombre_trabajador: String,
+            registro_patronal: String,
+            obras_set: BTreeSet<String>,
+            dias_cedula: i64,
+            dias_obra: i64,
+            lic: f64,
+            inc: f64,
+            aus: f64,
+            cf: f64,
+            exc_pat: f64,
+            exc_obr: f64,
+            pd_pat: f64,
+            pd_obr: f64,
+            gmp_pat: f64,
+            gmp_obr: f64,
+            rt: f64,
+            iv_pat: f64,
+            iv_obr: f64,
+            gps: f64,
+            patronal: f64,
+            obrera: f64,
+            subtotal: f64,
+            subtotal_orig: f64,
+        }
+
+        let mut groups_s3: HashMap<Uuid, AggEmpTotal> = HashMap::new();
+
+        for r in all_rows {
+            if !is_valid_user_obra(r) {
+                continue;
+            }
+
+            let entry = groups_s3.entry(r.id_empleado).or_insert_with(|| {
+                AggEmpTotal {
+                    nss: r.nss.clone(),
+                    rfc: r.rfc.clone(),
+                    curp: r.curp.clone(),
+                    nombre_trabajador: r.nombre_trabajador.clone(),
+                    registro_patronal: clean_rp_text(&r.registro_patronal).to_string(),
+                    obras_set: BTreeSet::new(),
+                    dias_cedula: 0,
+                    dias_obra: 0,
+                    lic: 0.0,
+                    inc: 0.0,
+                    aus: 0.0,
+                    cf: 0.0,
+                    exc_pat: 0.0,
+                    exc_obr: 0.0,
+                    pd_pat: 0.0,
+                    pd_obr: 0.0,
+                    gmp_pat: 0.0,
+                    gmp_obr: 0.0,
+                    rt: 0.0,
+                    iv_pat: 0.0,
+                    iv_obr: 0.0,
+                    gps: 0.0,
+                    patronal: 0.0,
+                    obrera: 0.0,
+                    subtotal: 0.0,
+                    subtotal_orig: 0.0,
+                }
+            });
+
+            let ob_num = clean_obra_text(&r.obra_numero, &r.obra_label, true);
+            if !ob_num.is_empty() {
+                entry.obras_set.insert(ob_num.to_string());
+            }
+
+            entry.dias_cedula += r.dias_cedula as i64;
+            entry.dias_obra += r.dias_obra as i64;
+            entry.lic += r.lic;
+            entry.inc += r.inc;
+            entry.aus += r.aus;
+            entry.cf += r.cf;
+            entry.exc_pat += r.exc_pat;
+            entry.exc_obr += r.exc_obr;
+            entry.pd_pat += r.pd_pat;
+            entry.pd_obr += r.pd_obr;
+            entry.gmp_pat += r.gmp_pat;
+            entry.gmp_obr += r.gmp_obr;
+            entry.rt += r.rt;
+            entry.iv_pat += r.iv_pat;
+            entry.iv_obr += r.iv_obr;
+            entry.gps += r.gps;
+            entry.patronal += r.patronal;
+            entry.obrera += r.obrera;
+            entry.subtotal += r.subtotal;
+            entry.subtotal_orig += r.subtotal_orig;
+        }
+
+        let mut list_s3: Vec<AggEmpTotal> = groups_s3.into_values().collect();
+        list_s3.sort_by(|a, b| {
+            a.nombre_trabajador.to_lowercase()
+                .cmp(&b.nombre_trabajador.to_lowercase())
+        });
+
+        let mut s3_dias_ced: f64 = 0.0;
+        let mut s3_dias_obr: f64 = 0.0;
+        let mut s3_lic: f64 = 0.0;
+        let mut s3_inc: f64 = 0.0;
+        let mut s3_aus: f64 = 0.0;
+        let mut s3_cf: f64 = 0.0;
+        let mut s3_exc_pat: f64 = 0.0;
+        let mut s3_exc_obr: f64 = 0.0;
+        let mut s3_pd_pat: f64 = 0.0;
+        let mut s3_pd_obr: f64 = 0.0;
+        let mut s3_gmp_pat: f64 = 0.0;
+        let mut s3_gmp_obr: f64 = 0.0;
+        let mut s3_rt: f64 = 0.0;
+        let mut s3_iv_pat: f64 = 0.0;
+        let mut s3_iv_obr: f64 = 0.0;
+        let mut s3_gps: f64 = 0.0;
+        let mut s3_patronal: f64 = 0.0;
+        let mut s3_obrera: f64 = 0.0;
+        let mut s3_subtotal: f64 = 0.0;
+        let mut s3_subtotal_orig: f64 = 0.0;
+
+        let mut curr_r_s3 = header_row_s3 + 1;
+        for (idx, item) in list_s3.iter().enumerate() {
+            let obras_str = item.obras_set.iter().cloned().collect::<Vec<_>>().join(", ");
+
+            ws_emp.write_number_with_format(curr_r_s3, 0, (idx + 1) as f64, &integer_format).map_err(|e| e.to_string())?;
+            ws_emp.write_string_with_format(curr_r_s3, 1, &item.nss, &text_format).map_err(|e| e.to_string())?;
+            ws_emp.write_string_with_format(curr_r_s3, 2, &item.rfc, &text_format).map_err(|e| e.to_string())?;
+            ws_emp.write_string_with_format(curr_r_s3, 3, &item.curp, &text_format).map_err(|e| e.to_string())?;
+            ws_emp.write_string_with_format(curr_r_s3, 4, &item.nombre_trabajador, &text_format).map_err(|e| e.to_string())?;
+            ws_emp.write_string_with_format(curr_r_s3, 5, &item.registro_patronal, &text_format).map_err(|e| e.to_string())?;
+            ws_emp.write_string_with_format(curr_r_s3, 6, &obras_str, &text_format).map_err(|e| e.to_string())?;
+
+            ws_emp.write_number_with_format(curr_r_s3, 7, item.dias_cedula as f64, &integer_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 8, item.dias_obra as f64, &integer_format).map_err(|e| e.to_string())?;
+
+            if item.lic > 0.001 {
+                ws_emp.write_number_with_format(curr_r_s3, 9, item.lic, &integer_format).map_err(|e| e.to_string())?;
+            } else {
+                ws_emp.write_string_with_format(curr_r_s3, 9, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+            if item.inc > 0.001 {
+                ws_emp.write_number_with_format(curr_r_s3, 10, item.inc, &integer_format).map_err(|e| e.to_string())?;
+            } else {
+                ws_emp.write_string_with_format(curr_r_s3, 10, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+            if item.aus > 0.001 {
+                ws_emp.write_number_with_format(curr_r_s3, 11, item.aus, &integer_format).map_err(|e| e.to_string())?;
+            } else {
+                ws_emp.write_string_with_format(curr_r_s3, 11, "-", &text_format).map_err(|e| e.to_string())?;
+            }
+
+            ws_emp.write_number_with_format(curr_r_s3, 12, item.cf, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 13, item.exc_pat, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 14, item.exc_obr, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 15, item.pd_pat, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 16, item.pd_obr, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 17, item.gmp_pat, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 18, item.gmp_obr, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 19, item.rt, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 20, item.iv_pat, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 21, item.iv_obr, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 22, item.gps, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 23, item.patronal, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 24, item.obrera, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 25, item.subtotal, &currency_format).map_err(|e| e.to_string())?;
+            ws_emp.write_number_with_format(curr_r_s3, 26, item.subtotal_orig, &currency_format).map_err(|e| e.to_string())?;
+
+            s3_dias_ced += item.dias_cedula as f64;
+            s3_dias_obr += item.dias_obra as f64;
+            s3_lic += item.lic;
+            s3_inc += item.inc;
+            s3_aus += item.aus;
+            s3_cf += item.cf;
+            s3_exc_pat += item.exc_pat;
+            s3_exc_obr += item.exc_obr;
+            s3_pd_pat += item.pd_pat;
+            s3_pd_obr += item.pd_obr;
+            s3_gmp_pat += item.gmp_pat;
+            s3_gmp_obr += item.gmp_obr;
+            s3_rt += item.rt;
+            s3_iv_pat += item.iv_pat;
+            s3_iv_obr += item.iv_obr;
+            s3_gps += item.gps;
+            s3_patronal += item.patronal;
+            s3_obrera += item.obrera;
+            s3_subtotal += item.subtotal;
+            s3_subtotal_orig += item.subtotal_orig;
+
+            curr_r_s3 += 1;
+        }
+
+        // Fila Total General Sheet 3
+        for c in 0..=3 {
+            ws_emp.write_string_with_format(curr_r_s3, c as u16, "", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+        ws_emp.write_string_with_format(curr_r_s3, 4, "TOTAL GENERAL", &grand_total_label_format).map_err(|e| e.to_string())?;
+        for c in 5..=6 {
+            ws_emp.write_string_with_format(curr_r_s3, c as u16, "", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+
+        ws_emp.write_number_with_format(curr_r_s3, 7, s3_dias_ced, &grand_total_int_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 8, s3_dias_obr, &grand_total_int_format).map_err(|e| e.to_string())?;
+
+        if s3_lic > 0.001 {
+            ws_emp.write_number_with_format(curr_r_s3, 9, s3_lic, &grand_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            ws_emp.write_string_with_format(curr_r_s3, 9, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+        if s3_inc > 0.001 {
+            ws_emp.write_number_with_format(curr_r_s3, 10, s3_inc, &grand_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            ws_emp.write_string_with_format(curr_r_s3, 10, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+        if s3_aus > 0.001 {
+            ws_emp.write_number_with_format(curr_r_s3, 11, s3_aus, &grand_total_int_format).map_err(|e| e.to_string())?;
+        } else {
+            ws_emp.write_string_with_format(curr_r_s3, 11, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
+
+        ws_emp.write_number_with_format(curr_r_s3, 12, s3_cf, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 13, s3_exc_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 14, s3_exc_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 15, s3_pd_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 16, s3_pd_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 17, s3_gmp_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 18, s3_gmp_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 19, s3_rt, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 20, s3_iv_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 21, s3_iv_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 22, s3_gps, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 23, s3_patronal, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 24, s3_obrera, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 25, s3_subtotal, &grand_total_curr_format).map_err(|e| e.to_string())?;
+        ws_emp.write_number_with_format(curr_r_s3, 26, s3_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
+
+        ws_emp.autofit();
+    }
+
     workbook.save(file_path).map_err(|e| format!("Error guardando archivo Excel: {}", e))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_export_reporte_liquidaciones_excel_multi_sheet() {
+        let obra_user_1 = Uuid::new_v4();
+        let obra_user_2 = Uuid::new_v4();
+        let obra_cedula = Uuid::new_v4();
+
+        let emp_1 = Uuid::new_v4();
+        let emp_2 = Uuid::new_v4();
+        let emp_3 = Uuid::new_v4();
+
+        let mut valid_obras = HashSet::new();
+        valid_obras.insert(obra_user_1);
+        valid_obras.insert(obra_user_2);
+
+        let make_row = |emp_id: Uuid, nombre: &str, oid: Option<Uuid>, obra_num: &str, is_user: bool, mes: &str, anio: i16, dias: i16, sub: f64| -> ReporteLiquidacionRowDb {
+            ReporteLiquidacionRowDb {
+                id_reporte_liq: Uuid::new_v4(),
+                id_parent_reporte_liq: Uuid::new_v4(),
+                id_liquidacion: Uuid::new_v4(),
+                id_empleado: emp_id,
+                nombre_trabajador: nombre.to_string(),
+                rfc: "XAXX010101000".to_string(),
+                curp: "XAXX010101HDF00".to_string(),
+                nss: "12345678901".to_string(),
+                registro_patronal: "Y5410204108".to_string(),
+                mes_periodo: mes.to_string(),
+                anio_periodo: anio,
+                periodo_str: format!("{}/{}", mes, anio),
+                dias_cedula: dias,
+                id_registro_obra: oid,
+                obra_numero: obra_num.to_string(),
+                obra_label: if oid.is_some() { obra_num.to_string() } else { "⚠️ Sin Asignar".to_string() },
+                dias_obra: dias,
+                obra_creado_usuario: is_user,
+                clave: "".to_string(),
+                fecha: None,
+                fecha_str: "-".to_string(),
+                sdi: 350.0,
+                lic: 0.0,
+                inc: 0.0,
+                aus: 0.0,
+                cf: sub * 0.4,
+                exc_pat: 0.0,
+                exc_obr: 0.0,
+                pd_pat: 0.0,
+                pd_obr: 0.0,
+                gmp_pat: 0.0,
+                gmp_obr: 0.0,
+                rt: 0.0,
+                iv_pat: 0.0,
+                iv_obr: 0.0,
+                gps: 0.0,
+                patronal: sub * 0.8,
+                obrera: sub * 0.2,
+                subtotal: sub,
+                cf_orig: sub * 0.4,
+                exc_pat_orig: 0.0,
+                exc_obr_orig: 0.0,
+                pd_pat_orig: 0.0,
+                pd_obr_orig: 0.0,
+                gmp_pat_orig: 0.0,
+                gmp_obr_orig: 0.0,
+                rt_orig: 0.0,
+                iv_pat_orig: 0.0,
+                iv_obr_orig: 0.0,
+                gps_orig: 0.0,
+                patronal_orig: sub * 0.8,
+                obrera_orig: sub * 0.2,
+                subtotal_orig: sub,
+            }
+        };
+
+        let rows = vec![
+            // Emp 1 en Obra 1 (Usuario) - Mes 1
+            make_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_1), "OBRA-USER-01", true, "ENERO", 2024, 30, 1000.0),
+            // Emp 1 en Obra 1 (Usuario) - Mes 2
+            make_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_1), "OBRA-USER-01", true, "FEBRERO", 2024, 28, 900.0),
+            // Emp 1 en Obra 2 (Usuario) - Mes 2
+            make_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_2), "OBRA-USER-02", true, "FEBRERO", 2024, 15, 500.0),
+            // Emp 2 en Obra Cédula (NO Usuario) - debe ser omitido en Sheets 2 y 3
+            make_row(emp_2, "LOPEZ PEREZ JUAN", Some(obra_cedula), "OBRA-CEDULA-AUTO", false, "ENERO", 2024, 30, 800.0),
+            // Emp 3 Sin Obra - debe ser omitido en Sheets 2 y 3
+            make_row(emp_3, "GONZALEZ HERNANDEZ PEDRO", None, "", false, "ENERO", 2024, 30, 700.0),
+        ];
+
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join(format!("test_export_liq_{}.xlsx", Uuid::new_v4()));
+
+        let res = export_reporte_liquidaciones_to_excel(
+            &rows,
+            &rows,
+            Some(&valid_obras),
+            &test_file,
+            "EMPRESA PRUEBA S.A. DE C.V.",
+            "Y54-10204-10-8",
+            "REVISION 2024-01",
+        );
+
+        assert!(res.is_ok(), "El reporte en Excel debe generarse correctamente: {:?}", res.err());
+        assert!(test_file.exists(), "El archivo Excel generado debe existir físicamente");
+        let metadata = std::fs::metadata(&test_file).unwrap();
+        assert!(metadata.len() > 1000, "El archivo Excel generado debe contener datos");
+
+        let _ = std::fs::remove_file(test_file);
+    }
+}
+

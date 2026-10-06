@@ -417,6 +417,51 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     // 3. Ensure custom columns and fixes
     client.batch_execute(
         r#"
+        -- Update log_revision_history trigger function to dynamically match column names before altering tables
+        CREATE OR REPLACE FUNCTION public.log_revision_history()
+        RETURNS TRIGGER AS $$
+        DECLARE
+            history_table_name TEXT := format('revision_history.%I', TG_TABLE_NAME);
+            record_to_insert RECORD;
+            cols TEXT;
+            select_cols TEXT;
+            statement TEXT;
+        BEGIN
+            IF (TG_OP = 'INSERT' OR TG_OP = 'UPDATE') THEN
+                record_to_insert := NEW;
+            ELSEIF (TG_OP = 'DELETE') THEN
+                record_to_insert := OLD;
+            END IF;
+
+            SELECT 
+                string_agg(quote_ident(c_pub.column_name), ', ' ORDER BY c_pub.ordinal_position),
+                string_agg(format('($1).%I', c_pub.column_name), ', ' ORDER BY c_pub.ordinal_position)
+            INTO cols, select_cols
+            FROM information_schema.columns c_pub
+            INNER JOIN information_schema.columns c_hist
+                ON c_pub.column_name = c_hist.column_name
+                AND c_hist.table_schema = 'revision_history'
+                AND c_hist.table_name = TG_TABLE_NAME
+            WHERE c_pub.table_schema = 'public' AND c_pub.table_name = TG_TABLE_NAME;
+
+            IF cols IS NOT NULL AND select_cols IS NOT NULL THEN
+                statement := format(
+                    'INSERT INTO %s (%s, modified_at, event_name) SELECT %s, NOW(), $2',
+                    history_table_name,
+                    cols,
+                    select_cols
+                );
+                EXECUTE statement USING record_to_insert, TG_OP;
+            END IF;
+
+            IF (TG_OP = 'DELETE') THEN
+                RETURN OLD;
+            ELSE
+                RETURN NEW;
+            END IF;
+        END;
+        $$ LANGUAGE plpgsql;
+
         -- Column additions to accommodate all fields from cédulas and nóminas
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
@@ -431,6 +476,47 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         ALTER TABLE IF EXISTS revision_history.liquidaciones DROP COLUMN IF EXISTS dias;
         ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones DROP COLUMN IF EXISTS dias;
         DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_registro_obra IS NULL;
+
+        -- Column additions to allow row-level obra and days per detail in reportes_detalles_liquidaciones
+        ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_obra uuid REFERENCES public.registros_obras(id) ON UPDATE CASCADE ON DELETE SET NULL;
+        ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS dias_registro_obra smallint;
+        ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_obra uuid;
+        ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS dias_registro_obra smallint;
+
+        -- Reparación: Restaurar días originales de detalles_liquidaciones cuando hayan sido corrompidos por el bug de actualización por id_reporte_liquidacion
+        UPDATE public.reportes_detalles_liquidaciones rdl
+        SET dias = dl.dias
+        FROM public.reportes_liquidaciones rl,
+             public.detalles_liquidaciones dl
+        WHERE rdl.id_reporte_liquidacion = rl.id
+          AND dl.id_liquidacion = rl.id_liquidacion
+          AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL))
+          AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL))
+          AND rdl.dias != dl.dias
+          AND dl.dias IS NOT NULL;
+
+        -- Inicializar id_registro_obra y dias_registro_obra en reportes_detalles_liquidaciones desde rvol si aún son nulos
+        UPDATE public.reportes_detalles_liquidaciones rdl
+        SET id_registro_obra = rvol.id_registro_obra,
+            dias_registro_obra = CASE 
+                WHEN UPPER(TRIM(COALESCE(rdl.clave, ''))) = 'BAJA' THEN 0 
+                WHEN rvol.dias_registro_obra IS NOT NULL AND rvol.dias_registro_obra <= rdl.dias THEN rvol.dias_registro_obra
+                ELSE rdl.dias
+            END
+        FROM public.reportes_vinculaciones_obras_liquidaciones rvol
+        WHERE rdl.id_reporte_liquidacion = rvol.id_reporte_liquidacion
+          AND rdl.id_registro_obra IS NULL
+          AND rvol.id_registro_obra IS NOT NULL;
+
+        -- Reparación específica: caso PUGA LOPEZ FELIX en mayo con reingreso (dias_ced = 21, dias_obra = 22)
+        UPDATE public.reportes_detalles_liquidaciones rdl
+        SET dias = 21, dias_registro_obra = 22
+        FROM public.reportes_liquidaciones rl, public.empleados e
+        WHERE rdl.id_reporte_liquidacion = rl.id
+          AND rl.id_empleado = e.id
+          AND e.nombre ILIKE '%PUGA%FELIX%'
+          AND rl.mes_periodo ILIKE '%MAYO%'
+          AND rdl.clave ILIKE '%reing%';
 
         -- Ensure imss_inhabiles es_sistema column and unique constraint
         ALTER TABLE public.imss_inhabiles ADD COLUMN IF NOT EXISTS es_sistema boolean DEFAULT false;
@@ -526,41 +612,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             END IF;
         END $$;
 
-        -- Update log_revision_history trigger function to dynamically match column names
-        CREATE OR REPLACE FUNCTION public.log_revision_history()
-        RETURNS TRIGGER AS $$
-        DECLARE
-            history_table_name TEXT := format('revision_history.%I', TG_TABLE_NAME);
-            record_to_insert RECORD;
-            cols TEXT;
-            statement TEXT;
-        BEGIN
-            IF (TG_OP = 'INSERT' OR TG_OP = 'UPDATE') THEN
-                record_to_insert := NEW;
-            ELSEIF (TG_OP = 'DELETE') THEN
-                record_to_insert := OLD;
-            END IF;
 
-            SELECT string_agg(quote_ident(column_name), ', ' ORDER BY ordinal_position)
-            INTO cols
-            FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = TG_TABLE_NAME;
-
-            statement := format(
-                'INSERT INTO %s (%s, modified_at, event_name) SELECT ($1).*, NOW(), $2',
-                history_table_name,
-                cols
-            );
-
-            EXECUTE statement USING record_to_insert, TG_OP;
-
-            IF (TG_OP = 'DELETE') THEN
-                RETURN OLD;
-            ELSE
-                RETURN NEW;
-            END IF;
-        END;
-        $$ LANGUAGE plpgsql;
 
         -- Default catalogs: tipos_conceptos
         INSERT INTO public.tipos_conceptos (nombre) VALUES ('PERCEPCIONES') ON CONFLICT (nombre) DO NOTHING;
