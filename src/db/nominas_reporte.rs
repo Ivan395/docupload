@@ -210,7 +210,7 @@ pub fn fetch_nominas_reporte(
     let sql = format!(
         r#"
         WITH per AS (
-            SELECT rn.id_nomina AS id_nomina,
+            SELECT rdn.id_reporte_nomina AS id_nomina,
                    SUM(COALESCE(rdn.importe, 0))
                        FILTER (WHERE UPPER(TRIM(t.nombre)) = 'PERCEPCIONES') AS total_percepciones,
                    SUM(COALESCE(rdn.importe_gravado, 0))
@@ -222,7 +222,7 @@ pub fn fetch_nominas_reporte(
             JOIN public.reportes_nominas rn ON rn.id = rdn.id_reporte_nomina
             JOIN public.conceptos c ON c.id = rdn.id_concepto
             JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
-            GROUP BY rn.id_nomina
+            GROUP BY rdn.id_reporte_nomina
         ),
         ced AS (
             SELECT rl.id_empleado,
@@ -232,11 +232,14 @@ pub fn fetch_nominas_reporte(
             FROM public.reportes_liquidaciones rl
             JOIN public.reportes_vinculaciones_obras_liquidaciones rv
                  ON rv.id_reporte_liquidacion = rl.id
+            JOIN public.registros_obras ro
+                 ON ro.id = rv.id_registro_obra
+            WHERE COALESCE(ro.creado_usuario, false) = true
             GROUP BY rl.id_empleado, rl.anio_periodo, UPPER(TRIM(rl.mes_periodo))
         ),
         base AS (
             SELECT
-                rn.id_nomina AS id_nomina,
+                rn.id AS id_nomina,
                 rn.id_empleado,
                 TRIM(COALESCE(e.nombre, '')) AS nombre,
                 TRIM(COALESCE(e.nss, '')) AS nss,
@@ -250,12 +253,7 @@ pub fn fetch_nominas_reporte(
                 ct.fecha_inicio_relacion_laboral,
                 cf.fecha_emision::date AS fecha_emision_cfdi,
                 rn.timbre_fecha,
-                -- "Días Nóm.": inclusivo entre Fecha Inicio y Fecha Fin.
-                CASE
-                    WHEN rn.fecha_inicial_pago IS NOT NULL AND rn.fecha_final_pago IS NOT NULL
-                        THEN (rn.fecha_final_pago - rn.fecha_inicial_pago) + 1
-                    ELSE COALESCE(rn.num_dias_pagados, 0)
-                END::float8 AS num_dias_pagados,
+                COALESCE(rn.num_dias_pagados, 0)::float8 AS num_dias_pagados,
                 COALESCE(rn.total_sueldos, 0)::float8 AS total_sueldos,
                 COALESCE(rn.total_gravado, 0)::float8 AS total_gravado,
                 COALESCE(rn.total_exento, 0)::float8 AS total_exento,
@@ -276,7 +274,7 @@ pub fn fetch_nominas_reporte(
             LEFT JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal
             LEFT JOIN public.cfdis cf ON cf.id = n.id_cfdi
             LEFT JOIN public.contratos ct ON ct.id_cfdi = n.id_cfdi
-            LEFT JOIN per ON per.id_nomina = rn.id_nomina
+            LEFT JOIN per ON per.id_nomina = rn.id
             WHERE ($1::uuid IS NULL OR e.id_cliente = $1)
         )
         SELECT
@@ -382,13 +380,9 @@ pub fn fetch_nominas_reporte(
 /// (`registros_obras.creado_usuario = true`) vinculados en las
 /// tablas de reporte de cédulas (`reportes_liquidaciones` +
 /// `reportes_vinculaciones_obras_liquidaciones`), y cuyas
-/// fechas de la nómina coincidan (se traslapan) con las fechas
+/// fechas de la nómina coincidan (se traslapen) con las fechas
 /// del registro de obra (`registros_obras.fecha_inicio`..
 /// `fecha_fin`).
-///
-/// Las tablas de reporte se reemplazan en su totalidad para
-/// que la copia sea idempotente: son la vista materializada
-/// filtrada de las nóminas procesadas.
 pub fn copy_nominas_a_reportes(
     client: &mut Client,
 ) -> Result<(usize, usize), String> {
@@ -412,12 +406,12 @@ pub fn copy_nominas_a_reportes(
             format!("Error limpiando reportes_nominas: {}", e)
         })?;
 
-    // Copia de las nóminas filtradas.
+    // Copia de las nóminas filtradas estrictamente por obra de usuario y rango de fechas.
     let nominas = client
         .execute(
             r#"
             INSERT INTO public.reportes_nominas (
-                id_nomina, id_revision, id_empleado, version_nomina,
+                id, id_nomina, id_revision, id_empleado, version_nomina,
                 tipo_nomina, fecha_pago, fecha_inicial_pago,
                 fecha_final_pago, num_dias_pagados, total_sueldos,
                 total_gravado, total_exento, total_otras_deducciones,
@@ -431,9 +425,15 @@ pub fn copy_nominas_a_reportes(
                 nombre_archivo
             )
             SELECT
-                n.id, n.id_revision, n.id_empleado, n.version_nomina,
+                uuidv7(), n.id, n.id_revision, n.id_empleado, n.version_nomina,
                 n.tipo_nomina, n.fecha_pago, n.fecha_inicial_pago,
-                n.fecha_final_pago, n.num_dias_pagados, n.total_sueldos,
+                n.fecha_final_pago,
+                CASE
+                    WHEN n.fecha_inicial_pago IS NOT NULL AND n.fecha_final_pago IS NOT NULL
+                        THEN (n.fecha_final_pago - n.fecha_inicial_pago) + 1
+                    ELSE COALESCE(n.num_dias_pagados, 0)
+                END,
+                n.total_sueldos,
                 n.total_gravado, n.total_exento, n.total_otras_deducciones,
                 n.total_impuestos_retenidos,
                 n.salario_base_cotizacion_aportacion,
@@ -449,8 +449,12 @@ pub fn copy_nominas_a_reportes(
                 FROM public.reportes_liquidaciones rl
                 JOIN public.reportes_vinculaciones_obras_liquidaciones rv
                      ON rv.id_reporte_liquidacion = rl.id
+                JOIN public.registros_obras ro
+                     ON ro.id = rv.id_registro_obra
                 WHERE rl.id_empleado = n.id_empleado
-                  AND rv.id_registro_obra IS NOT NULL
+                  AND COALESCE(ro.creado_usuario, false) = true
+                  AND COALESCE(n.fecha_final_pago, n.fecha_pago, n.fecha_inicial_pago) >= ro.fecha_inicio
+                  AND COALESCE(n.fecha_inicial_pago, n.fecha_pago, n.fecha_final_pago) <= ro.fecha_fin
             )
             "#,
             &[],
@@ -459,8 +463,7 @@ pub fn copy_nominas_a_reportes(
             format!("Error copiando nóminas a reportes: {}", e)
         })?;
 
-    // Copia de los detalles (percepciones, deducciones y otros
-    // pagos) de cada nómina copiada.
+    // Copia de los detalles (percepciones) de cada nómina copiada.
     let detalles = client
         .execute(
             r#"
@@ -535,7 +538,7 @@ pub fn fetch_percepciones_por_nomina(
     let rows = client
         .query(
             r#"
-            SELECT rn.id_nomina, TRIM(rdn.concepto) AS nombre,
+            SELECT rn.id, TRIM(rdn.concepto) AS nombre,
                    COALESCE(rdn.importe, 0)::float8 AS importe
             FROM public.reportes_detalles_nominas rdn
             JOIN public.reportes_nominas rn ON rn.id = rdn.id_reporte_nomina
@@ -738,25 +741,25 @@ pub struct NominaPercepcionDb {
 
 pub fn fetch_percepciones_nomina(
     client: &mut Client,
-    id_nomina: Uuid,
+    id_reporte_nomina: Uuid,
 ) -> Result<Vec<NominaPercepcionDb>, String> {
     let rows = client
         .query(
             r#"
-            SELECT TRIM(COALESCE(d.clave, '')) AS clave,
-                   TRIM(COALESCE(d.concepto, '')) AS concepto,
+            SELECT TRIM(COALESCE(rdn.clave, '')) AS clave,
+                   TRIM(COALESCE(rdn.concepto, '')) AS concepto,
                    TRIM(COALESCE(c.tipo, '')) AS tipo_sat,
-                   COALESCE(d.importe_gravado, 0)::float8,
-                   COALESCE(d.importe_exento, 0)::float8,
-                   COALESCE(d.importe, 0)::float8
-            FROM public.detalles_nominas d
-            JOIN public.conceptos c ON c.id = d.id_concepto
+                   COALESCE(rdn.importe_gravado, 0)::float8,
+                   COALESCE(rdn.importe_exento, 0)::float8,
+                   COALESCE(rdn.importe, 0)::float8
+            FROM public.reportes_detalles_nominas rdn
+            JOIN public.conceptos c ON c.id = rdn.id_concepto
             JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
-            WHERE d.id_nomina = $1
+            WHERE rdn.id_reporte_nomina = $1
               AND UPPER(TRIM(t.nombre)) = 'PERCEPCIONES'
-            ORDER BY d.clave ASC, d.concepto ASC
+            ORDER BY rdn.clave ASC, rdn.concepto ASC
             "#,
-            &[&id_nomina],
+            &[&id_reporte_nomina],
         )
         .map_err(|e| format!("Error consultando percepciones de la nómina: {}", e))?;
 
@@ -820,6 +823,473 @@ pub fn summarize_nominas(rows: &[NominaReporteRowDb]) -> NominaReporteSummaryDb 
     s
 }
  
+pub fn month_num_from_es(mes: &str) -> u32 {
+    match mes.trim().to_uppercase().as_str() {
+        "ENERO" => 1,
+        "FEBRERO" => 2,
+        "MARZO" => 3,
+        "ABRIL" => 4,
+        "MAYO" => 5,
+        "JUNIO" => 6,
+        "JULIO" => 7,
+        "AGOSTO" => 8,
+        "SEPTIEMBRE" => 9,
+        "OCTUBRE" => 10,
+        "NOVIEMBRE" => 11,
+        "DICIEMBRE" => 12,
+        _ => 1,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RegistroPatronalTotalDb {
+    pub registro_patronal: String,
+    pub obra_numero: String,
+    pub tipo_obra: String,
+    pub total_dias_cedula: f64,
+}
+
+/// Obtiene el total de días Cédula de cada registro patronal / obra
+/// que el usuario creó en la base de datos (creado_usuario = true),
+/// no las que se crearon automáticamente desde la cédula.
+pub fn fetch_totales_dias_cedula_por_registro_patronal(
+    client: &mut Client,
+    id_cliente: Option<Uuid>,
+) -> Result<Vec<RegistroPatronalTotalDb>, String> {
+    let sql = r#"
+        SELECT
+            TRIM(COALESCE(rp.registro, 'SIN REGISTRO')) AS registro_patronal,
+            TRIM(COALESCE(ro.numero, 'SIN NÚMERO')) AS obra_numero,
+            TRIM(COALESCE(ro.tipo_obra, '')) AS tipo_obra,
+            SUM(COALESCE(rv.dias_registro_obra, 0))::float8 AS total_dias_cedula
+        FROM public.registros_obras ro
+        JOIN public.registros_patronales rp ON rp.id = ro.id_registro_patronal
+        LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rv ON rv.id_registro_obra = ro.id
+        WHERE COALESCE(ro.creado_usuario, false) = true
+          AND ($1::uuid IS NULL OR rp.id_cliente = $1)
+        GROUP BY rp.registro, ro.numero, ro.tipo_obra
+        ORDER BY rp.registro ASC, ro.numero ASC
+    "#;
+
+    let rows = client
+        .query(sql, &[&id_cliente])
+        .map_err(|e| format!("Error consultando totales de días cédula por registro patronal: {}", e))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| RegistroPatronalTotalDb {
+            registro_patronal: row_get_str(r, 0),
+            obra_numero: row_get_str(r, 1),
+            tipo_obra: row_get_str(r, 2),
+            total_dias_cedula: row_get_f64(r, 3),
+        })
+        .collect())
+}
+
+/// Verifica si un empleado cuenta con registro de BAJA en la cédula de liquidaciones
+/// para el periodo especificado.
+pub fn check_empleado_tiene_baja_periodo(
+    client: &mut Client,
+    id_empleado: Uuid,
+    mes: &str,
+    anio: i32,
+) -> Result<bool, String> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT 1
+            FROM public.reportes_liquidaciones rl
+            JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
+            WHERE rl.id_empleado = $1
+              AND UPPER(TRIM(rl.mes_periodo)) = UPPER(TRIM($2))
+              AND rl.anio_periodo = $3
+              AND UPPER(TRIM(rdl.clave)) = 'BAJA'
+            LIMIT 1
+            "#,
+            &[&id_empleado, &mes, &(anio as i16)],
+        )
+        .map_err(|e| format!("Error verificando baja de empleado: {}", e))?;
+    Ok(row.is_some())
+}
+
+#[derive(Debug, Clone)]
+pub struct NominaConceptoEditableDb {
+    pub id_detalle: Uuid,
+    pub id_concepto: Uuid,
+    pub clave: String,
+    pub concepto: String,
+    pub importe_original: f64,
+    pub importe: f64,
+}
+
+/// Carga los conceptos editables de una nómina desde `reportes_detalles_nominas`.
+pub fn fetch_conceptos_nomina_detalle(
+    client: &mut Client,
+    id_reporte_nomina: Uuid,
+) -> Result<Vec<NominaConceptoEditableDb>, String> {
+    let rows = client
+        .query(
+            r#"
+            SELECT rdn.id, rdn.id_concepto, TRIM(COALESCE(rdn.clave, '')),
+                   TRIM(COALESCE(rdn.concepto, '')), COALESCE(rdn.importe, 0)::float8
+            FROM public.reportes_detalles_nominas rdn
+            JOIN public.conceptos c ON c.id = rdn.id_concepto
+            JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
+            WHERE rdn.id_reporte_nomina = $1
+              AND UPPER(TRIM(t.nombre)) = 'PERCEPCIONES'
+            ORDER BY rdn.clave ASC, rdn.concepto ASC
+            "#,
+            &[&id_reporte_nomina],
+        )
+        .map_err(|e| format!("Error consultando conceptos editables: {}", e))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| NominaConceptoEditableDb {
+            id_detalle: r.get(0),
+            id_concepto: r.get(1),
+            clave: row_get_str(r, 2),
+            concepto: row_get_str(r, 3),
+            importe_original: row_get_f64(r, 4),
+            importe: row_get_f64(r, 4),
+        })
+        .collect())
+}
+
+/// Actualiza los días y percepciones de una nómina en `reportes_nominas` y `reportes_detalles_nominas`.
+pub fn update_dias_y_conceptos_nomina(
+    client: &mut Client,
+    id_reporte_nomina: Uuid,
+    nuevos_dias: f64,
+    conceptos: &[(Uuid, f64)],
+) -> Result<(), String> {
+    let mut total: f64 = 0.0;
+    for (id_det, nuevo_imp) in conceptos {
+        total += *nuevo_imp;
+        client
+            .execute(
+                "UPDATE public.reportes_detalles_nominas SET importe = $2 WHERE id = $1",
+                &[id_det, nuevo_imp],
+            )
+            .map_err(|e| format!("Error actualizando detalle de percepción {}: {}", id_det, e))?;
+    }
+
+    client
+        .execute(
+            r#"
+            UPDATE public.reportes_nominas
+            SET num_dias_pagados = $2,
+                total_sueldos = $3,
+                total_gravado = $3
+            WHERE id = $1
+            "#,
+            &[&id_reporte_nomina, &nuevos_dias, &total],
+        )
+        .map_err(|e| format!("Error actualizando reporte de nómina: {}", e))?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct NominaFaltanteDb {
+    pub id_empleado: Uuid,
+    pub nombre_trabajador: String,
+    pub nss: String,
+    pub rfc: String,
+    pub mes_periodo: String,
+    pub anio_periodo: i32,
+    pub dias_cedula: f64,
+    pub dias_nomina_actuales: f64,
+    pub dias_faltantes: f64,
+    pub clave: String,
+    pub is_baja: bool,
+    pub id_template_sugerido: Option<Uuid>,
+    pub template_label: String,
+    pub template_dias: f64,
+}
+
+/// Detecta nóminas faltantes cruzando las cédulas de cuotas (con clave Alta, Baja, Reing, etc.)
+/// con las nóminas registradas para cada empleado y periodo.
+pub fn fetch_nominas_faltantes(
+    client: &mut Client,
+    id_cliente: Option<Uuid>,
+) -> Result<Vec<NominaFaltanteDb>, String> {
+    let sql = format!(
+        r#"
+        WITH ced_emp AS (
+            SELECT
+                rl.id_empleado,
+                TRIM(COALESCE(e.nombre, '')) AS nombre,
+                TRIM(COALESCE(e.nss, '')) AS nss,
+                TRIM(COALESCE(e.rfc, '')) AS rfc,
+                UPPER(TRIM(rl.mes_periodo)) AS mes_periodo,
+                rl.anio_periodo::int AS anio_periodo,
+                SUM(COALESCE(rv.dias_registro_obra, 0))::float8 AS dias_cedula,
+                COALESCE(MAX(TRIM(rdl.clave)), 'NORMAL') AS clave
+            FROM public.reportes_liquidaciones rl
+            JOIN public.empleados e ON e.id = rl.id_empleado
+            JOIN public.reportes_vinculaciones_obras_liquidaciones rv ON rv.id_reporte_liquidacion = rl.id
+            JOIN public.registros_obras ro ON ro.id = rv.id_registro_obra
+            LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
+            WHERE COALESCE(ro.creado_usuario, false) = true
+              AND ($1::uuid IS NULL OR e.id_cliente = $1)
+            GROUP BY rl.id_empleado, e.nombre, e.nss, e.rfc, UPPER(TRIM(rl.mes_periodo)), rl.anio_periodo
+        ),
+        nom_emp AS (
+            SELECT
+                rn.id_empleado,
+                {MES} AS mes_periodo,
+                EXTRACT(YEAR FROM COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago))::int AS anio_periodo,
+                SUM(COALESCE(rn.num_dias_pagados, 0))::float8 AS dias_nomina
+            FROM public.reportes_nominas rn
+            WHERE (rn.fecha_final_pago IS NOT NULL OR rn.fecha_pago IS NOT NULL OR rn.fecha_inicial_pago IS NOT NULL)
+            GROUP BY rn.id_empleado, {MES}, EXTRACT(YEAR FROM COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago))
+        )
+        SELECT
+            c.id_empleado,
+            c.nombre,
+            c.nss,
+            c.rfc,
+            c.mes_periodo,
+            c.anio_periodo,
+            c.dias_cedula,
+            COALESCE(n.dias_nomina, 0.0)::float8 AS dias_nomina_actuales,
+            (c.dias_cedula - COALESCE(n.dias_nomina, 0.0))::float8 AS dias_faltantes,
+            c.clave
+        FROM ced_emp c
+        LEFT JOIN nom_emp n
+               ON n.id_empleado = c.id_empleado
+              AND n.mes_periodo = c.mes_periodo
+              AND n.anio_periodo = c.anio_periodo
+        WHERE c.dias_cedula > 0
+          AND (n.dias_nomina IS NULL OR n.dias_nomina < c.dias_cedula - 0.01)
+        ORDER BY c.anio_periodo ASC, c.mes_periodo ASC, c.nombre ASC
+        "#,
+        MES = mes_es_sql("COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago)")
+    );
+
+    let rows = client
+        .query(sql.as_str(), &[&id_cliente])
+        .map_err(|e| format!("Error consultando nóminas faltantes: {}", e))?;
+
+    let mut result = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let emp_id: Uuid = r.get(0);
+        let clave = row_get_str(r, 9);
+        let is_baja = clave.to_uppercase().contains("BAJA");
+
+        // Buscar plantilla más reciente disponible para este empleado
+        let template_row = client.query_opt(
+            r#"
+            SELECT rn.id, COALESCE(rn.num_dias_pagados, 0)::float8,
+                   COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago)
+            FROM public.reportes_nominas rn
+            WHERE rn.id_empleado = $1
+            ORDER BY COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago) DESC NULLS LAST
+            LIMIT 1
+            "#,
+            &[&emp_id],
+        ).ok().flatten();
+
+        let (tpl_id, tpl_dias, tpl_label) = if let Some(t) = template_row {
+            let tid: Uuid = t.get(0);
+            let td: f64 = t.get(1);
+            let tf: Option<NaiveDate> = t.get(2);
+            let lbl = tf.map(|d| format!("{}/{} ({}d)", month_name_es(d.month()), d.year(), td))
+                .unwrap_or_else(|| format!("Plantilla ({}d)", td));
+            (Some(tid), td, lbl)
+        } else {
+            (None, 0.0, "Sin plantilla previa".to_string())
+        };
+
+        result.push(NominaFaltanteDb {
+            id_empleado: emp_id,
+            nombre_trabajador: row_get_str(r, 1),
+            nss: row_get_str(r, 2),
+            rfc: row_get_str(r, 3),
+            mes_periodo: row_get_str(r, 4),
+            anio_periodo: row_get_i32(r, 5),
+            dias_cedula: row_get_f64(r, 6),
+            dias_nomina_actuales: row_get_f64(r, 7),
+            dias_faltantes: row_get_f64(r, 8),
+            clave,
+            is_baja,
+            id_template_sugerido: tpl_id,
+            template_label: tpl_label,
+            template_dias: tpl_dias,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Clona una nómina plantilla hacia un nuevo periodo destino aplicando la fórmula
+/// proporcional: (Concepto Percepcion / Valor dia original) * dias usuario.
+pub fn create_nomina_from_template(
+    client: &mut Client,
+    id_empleado: Uuid,
+    id_template: Uuid,
+    target_mes: &str,
+    target_anio: i32,
+    target_dias: f64,
+    conceptos_custom: Option<&[(Uuid, f64)]>,
+) -> Result<Uuid, String> {
+    let tpl_row = client
+        .query_opt(
+            r#"
+            SELECT rn.id_revision, rn.version_nomina, rn.tipo_nomina,
+                   COALESCE(rn.num_dias_pagados, 1.0)::float8,
+                   COALESCE(rn.salario_base_cotizacion_aportacion, 0)::float8,
+                   COALESCE(rn.salario_diario_integrado, 0)::float8,
+                   COALESCE(rn.salario_diario_calculado, 0)::float8,
+                   rn.nombre_archivo
+            FROM public.reportes_nominas rn
+            WHERE rn.id = $1
+            LIMIT 1
+            "#,
+            &[&id_template],
+        )
+        .map_err(|e| format!("Error consultando nómina plantilla: {}", e))?
+        .ok_or_else(|| "No se encontró la nómina plantilla especificada".to_string())?;
+
+    let id_revision: Uuid = tpl_row.get(0);
+    let version_nomina: Option<String> = tpl_row.get(1);
+    let tipo_nomina: Option<String> = tpl_row.get(2);
+    let dias_plantilla: f64 = tpl_row.get(3);
+    let sbc: f64 = tpl_row.get(4);
+    let sdi: f64 = tpl_row.get(5);
+    let sdi_calc: f64 = tpl_row.get(6);
+    let nombre_archivo: Option<String> = tpl_row.get(7);
+
+    let mes_num = month_num_from_es(target_mes);
+    let f_inicio = NaiveDate::from_ymd_opt(target_anio, mes_num, 1)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(target_anio, 1, 1).unwrap());
+    let dias_i64 = (target_dias.round() as i64).max(1);
+    let f_fin = f_inicio + chrono::Duration::days(dias_i64 - 1);
+    let f_pago = f_fin;
+
+    let new_id = Uuid::now_v7();
+
+    let tpl_detalles = client
+        .query(
+            r#"
+            SELECT rdn.id, rdn.id_concepto, rdn.clave, rdn.concepto,
+                   COALESCE(rdn.importe, 0)::float8
+            FROM public.reportes_detalles_nominas rdn
+            JOIN public.conceptos c ON c.id = rdn.id_concepto
+            JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
+            WHERE rdn.id_reporte_nomina = $1
+              AND UPPER(TRIM(t.nombre)) = 'PERCEPCIONES'
+            "#,
+            &[&id_template],
+        )
+        .map_err(|e| format!("Error consultando detalles de la plantilla: {}", e))?;
+
+    let mut total_sueldos: f64 = 0.0;
+    let factor = if dias_plantilla > 0.0 { target_dias / dias_plantilla } else { 1.0 };
+
+    let mut detalles_to_insert: Vec<(Uuid, String, String, f64)> = Vec::new();
+    for row in &tpl_detalles {
+        let id_conc: Uuid = row.get(1);
+        let clave = row_get_str(row, 2);
+        let conc = row_get_str(row, 3);
+        let imp_orig = row_get_f64(row, 4);
+
+        let imp_final = if let Some(custom) = conceptos_custom {
+            custom.iter().find(|(cid, _)| *cid == id_conc).map(|(_, v)| *v)
+                .unwrap_or_else(|| (imp_orig * factor * 100.0).round() / 100.0)
+        } else {
+            (imp_orig * factor * 100.0).round() / 100.0
+        };
+
+        total_sueldos += imp_final;
+        detalles_to_insert.push((id_conc, clave, conc, imp_final));
+    }
+
+    client
+        .execute(
+            r#"
+            INSERT INTO public.reportes_nominas (
+                id, id_revision, id_empleado, version_nomina,
+                tipo_nomina, fecha_pago, fecha_inicial_pago,
+                fecha_final_pago, num_dias_pagados, total_sueldos,
+                total_gravado, total_exento, total_otras_deducciones,
+                total_impuestos_retenidos,
+                salario_base_cotizacion_aportacion,
+                salario_diario_integrado, salario_diario_calculado,
+                nombre_archivo
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, 0.0, 0.0, 0.0, $11, $12, $13, $14)
+            "#,
+            &[
+                &new_id,
+                &id_revision,
+                &id_empleado,
+                &version_nomina,
+                &tipo_nomina,
+                &f_pago,
+                &f_inicio,
+                &f_fin,
+                &target_dias,
+                &total_sueldos,
+                &sbc,
+                &sdi,
+                &sdi_calc,
+                &nombre_archivo,
+            ],
+        )
+        .map_err(|e| format!("Error creando nómina en reportes_nominas: {}", e))?;
+
+    for (id_conc, clave, conc, imp) in detalles_to_insert {
+        client
+            .execute(
+                r#"
+                INSERT INTO public.reportes_detalles_nominas (
+                    id, id_reporte_nomina, id_concepto, clave, concepto,
+                    importe_gravado, importe_exento, importe
+                )
+                VALUES (uuidv7(), $1, $2, $3, $4, $5, 0.0, $5)
+                "#,
+                &[&new_id, &id_conc, &clave, &conc, &imp],
+            )
+            .map_err(|e| format!("Error insertando detalle de nómina: {}", e))?;
+    }
+
+    Ok(new_id)
+}
+
+#[derive(Debug, Clone)]
+pub struct NominaFaltanteCreateRequest {
+    pub id_empleado: Uuid,
+    pub id_template: Uuid,
+    pub target_mes: String,
+    pub target_anio: i32,
+    pub target_dias: f64,
+}
+
+/// Creación masiva de nóminas faltantes usando plantillas disponibles.
+pub fn create_bulk_missing_nominas(
+    client: &mut Client,
+    requests: &[NominaFaltanteCreateRequest],
+) -> Result<usize, String> {
+    let mut count = 0;
+    for req in requests {
+        let res = create_nomina_from_template(
+            client,
+            req.id_empleado,
+            req.id_template,
+            &req.target_mes,
+            req.target_anio,
+            req.target_dias,
+            None,
+        );
+        if res.is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
  /// Verifica si existen cédulas para una revisión dada.
 pub fn check_cedulas_exists(
     client: &mut Client,

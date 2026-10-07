@@ -362,6 +362,51 @@ export struct NominaMesTotalItem {
     percepciones_str: string,
 }
 
+export struct NominaRegistroPatronalTotalItem {
+    registro_patronal: string,
+    obra_numero: string,
+    tipo_obra: string,
+    total_dias_cedula_str: string,
+}
+
+export struct NominaEditableConceptoItem {
+    id_detalle: string,
+    id_concepto: string,
+    clave: string,
+    concepto: string,
+    importe_original: float,
+    importe_original_str: string,
+    importe_actual_str: string,
+}
+
+export struct NominaTemplateOptionItem {
+    id_nomina: string,
+    label: string,
+    dias: float,
+    dias_str: string,
+}
+
+export struct NominaFaltanteItem {
+    id_empleado: string,
+    nombre_trabajador: string,
+    nss: string,
+    rfc: string,
+    mes_periodo: string,
+    anio_periodo: int,
+    periodo_str: string,
+    dias_cedula_str: string,
+    dias_nomina_str: string,
+    dias_faltantes: float,
+    dias_faltantes_str: string,
+    clave: string,
+    is_baja: bool,
+    tiene_plantilla: bool,
+    template_label: string,
+    id_template: string,
+    template_dias_str: string,
+    selected: bool,
+}
+
 export struct EmpleadoMesStatsRow {
     nombre: string,
     nss: string,
@@ -1072,6 +1117,45 @@ export global AppData {
     in-out property <string> nominas_percepciones_empleado: "";
     in-out property <string> nominas_percepciones_periodo: "";
     in-out property <string> nominas_percepciones_total_str: "$0.00";
+
+    // Totales por registro patronal de obras creadas por el usuario
+    in-out property <[NominaRegistroPatronalTotalItem]> nominas_totales_por_registro_patronal: [];
+
+    // Modal de edición de días y percepciones (con fórmula)
+    in-out property <bool> nominas_show_edit_modal: false;
+    in-out property <string> nominas_edit_id_nomina: "";
+    in-out property <string> nominas_edit_empleado: "";
+    in-out property <string> nominas_edit_periodo: "";
+    in-out property <string> nominas_edit_dias_original_str: "";
+    in-out property <string> nominas_edit_dias_input: "";
+    in-out property <[NominaEditableConceptoItem]> nominas_edit_conceptos: [];
+    in-out property <string> nominas_edit_total_str: "$0.00";
+    in-out property <bool> nominas_edit_is_baja: false;
+    in-out property <string> nominas_edit_baja_warning: "";
+
+    // Modal de copia/creación con plantilla
+    in-out property <bool> nominas_show_copy_modal: false;
+    in-out property <string> nominas_copy_id_empleado: "";
+    in-out property <string> nominas_copy_empleado: "";
+    in-out property <[NominaTemplateOptionItem]> nominas_copy_templates_list: [];
+    in-out property <[string]> nominas_copy_template_labels: [];
+    in-out property <int> nominas_copy_selected_template_idx: 0;
+    in-out property <[string]> nominas_copy_mes_options: ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"];
+    in-out property <int> nominas_copy_target_mes_idx: 0;
+    in-out property <string> nominas_copy_target_anio: "2026";
+    in-out property <string> nominas_copy_dias_original_str: "";
+    in-out property <string> nominas_copy_dias_input: "";
+    in-out property <[NominaEditableConceptoItem]> nominas_copy_conceptos: [];
+    in-out property <string> nominas_copy_total_str: "$0.00";
+
+    // Detector de nóminas faltantes y creación masiva
+    in-out property <bool> nominas_show_faltantes_modal: false;
+    in-out property <[NominaFaltanteItem]> nominas_faltantes_list: [];
+    in-out property <int> nominas_faltantes_count: 0;
+    in-out property <int> nominas_faltantes_selected_count: 0;
+    in-out property <bool> nominas_faltantes_all_selected: false;
+    in-out property <string> nominas_faltantes_search: "";
+    in-out property <string> nominas_faltantes_status_msg: "";
 }
 
 export global AppLogic {
@@ -1312,4 +1396,29 @@ callback recargar_cedulas_view();
     callback nominas_open_percepciones(string, string, string);
     callback nominas_close_percepciones();
     callback nominas_export_excel();
+
+    // Callbacks de edición de días y fórmula
+    callback nominas_open_edit(string);
+    callback nominas_close_edit();
+    callback nominas_edit_recalc_dias(string);
+    callback nominas_edit_update_concepto(int, string);
+    callback nominas_save_edit();
+
+    // Callbacks de creación/copia por plantilla
+    callback nominas_open_copy_modal(string, string);
+    callback nominas_close_copy_modal();
+    callback nominas_copy_select_template(int);
+    callback nominas_copy_select_mes(int);
+    callback nominas_copy_set_anio(string);
+    callback nominas_copy_recalc_dias(string);
+    callback nominas_copy_update_concepto(int, string);
+    callback nominas_submit_create_nomina();
+
+    // Callbacks de detector de nóminas faltantes y masivo
+    callback nominas_open_faltantes_modal();
+    callback nominas_close_faltantes_modal();
+    callback nominas_faltantes_toggle_item(int);
+    callback nominas_faltantes_toggle_all(bool);
+    callback nominas_faltantes_crear_individual(int);
+    callback nominas_faltantes_crear_masivo();
 }

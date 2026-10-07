@@ -93,7 +93,7 @@ pub fn detect_system_language() -> &'static str {
     // 3. Check Windows UI language on Windows targets
     #[cfg(windows)]
     {
-        extern "system" {
+        unsafe extern "system" {
             fn GetUserDefaultUILanguage() -> u16;
             fn GetUserDefaultLocaleName(lpLocaleName: *mut u16, cchLocaleName: i32) -> i32;
         }
