@@ -19,6 +19,61 @@ pub struct ObraOptionDb {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReporteGuarderiaKpiDb {
+    pub id_obra: Uuid,
+    pub obra_numero: String,
+    pub obra_label: String,
+    pub total_gps: f64,
+    pub valor_guarderias: f64,
+    pub monto_obra: f64,
+    pub limite_18_obra: f64,
+    pub supera_18: bool,
+    pub empleados_count: usize,
+}
+
+/// Calcula los KPIs de Guarderías (Tope 18%) para cada registro de obra aplicable
+pub fn compute_guarderias_kpis(
+    rows: &[ReporteLiquidacionRowDb],
+    obras_options: &[ObraOptionDb],
+    filter_obra_id: Option<Uuid>,
+) -> Vec<ReporteGuarderiaKpiDb> {
+    let mut result = Vec::new();
+    for o in obras_options.iter().filter(|o| o.creado_usuario || o.monto > 0.0 || rows.iter().any(|r| r.id_registro_obra == Some(o.id))) {
+        if let Some(target_id) = filter_obra_id {
+            if o.id != target_id {
+                continue;
+            }
+        }
+        let mut total_gps_obra = 0.0;
+        let mut emps_count = 0;
+        for r in rows {
+            if r.id_registro_obra == Some(o.id) {
+                total_gps_obra += r.gps;
+                emps_count += 1;
+            }
+        }
+        let monto_obra = o.monto;
+        let limite_18 = monto_obra * 0.18;
+        // Para calcular el valor de las guarderías es el total de gps de todos los empleados vinculados al registro de obra dividido entre 1% (0.01):
+        let valor_guarderias = total_gps_obra / 0.01;
+        let supera_18 = (monto_obra > 0.0 && valor_guarderias > limite_18) || (monto_obra == 0.0 && valor_guarderias > 0.0);
+
+        result.push(ReporteGuarderiaKpiDb {
+            id_obra: o.id,
+            obra_numero: o.numero.clone(),
+            obra_label: o.label.clone(),
+            total_gps: total_gps_obra,
+            valor_guarderias,
+            monto_obra,
+            limite_18_obra: limite_18,
+            supera_18,
+            empleados_count: emps_count,
+        });
+    }
+    result
+}
+
+#[derive(Debug, Clone)]
 pub struct ReporteLiquidacionRowDb {
     pub id_reporte_liq: Uuid,
     pub id_parent_reporte_liq: Uuid,
@@ -642,9 +697,14 @@ pub fn fetch_reporte_liquidaciones(
     LEFT JOIN public.registros_obras AS ro_det
         ON rdl.id_registro_obra = ro_det.id
     LEFT JOIN public.detalles_liquidaciones AS dl
-        ON (dl.id_liquidacion = rl.id_liquidacion 
-            AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL)) 
-            AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL)))
+        ON dl.id_liquidacion = rl.id_liquidacion 
+        AND (
+            (COALESCE(TRIM(LOWER(dl.clave)), '') = COALESCE(TRIM(LOWER(rdl.clave)), '')
+             AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL)))
+            OR (
+                (SELECT COUNT(*) FROM public.detalles_liquidaciones sub_dl WHERE sub_dl.id_liquidacion = rl.id_liquidacion) = 1
+            )
+        )
     JOIN public.empleados AS e
         ON rl.id_empleado = e.id
     JOIN public.revisiones AS rev
@@ -849,26 +909,31 @@ pub fn batch_save_reporte_row_updates(
             r#"
             UPDATE public.reportes_detalles_liquidaciones rdl
             SET 
-                cf = ROUND((dl.cf * $2)::numeric, 2)::float8,
-                exc_pat = ROUND((dl.exc_pat * $2)::numeric, 2)::float8,
-                exc_obr = ROUND((dl.exc_obr * $2)::numeric, 2)::float8,
-                pd_pat = ROUND((dl.pd_pat * $2)::numeric, 2)::float8,
-                pd_obr = ROUND((dl.pd_obr * $2)::numeric, 2)::float8,
-                gmp_pat = ROUND((dl.gmp_pat * $2)::numeric, 2)::float8,
-                gmp_obr = ROUND((dl.gmp_obr * $2)::numeric, 2)::float8,
-                rt = ROUND((dl.rt * $2)::numeric, 2)::float8,
-                iv_pat = ROUND((dl.iv_pat * $2)::numeric, 2)::float8,
-                iv_obr = ROUND((dl.iv_obr * $2)::numeric, 2)::float8,
-                gps = ROUND((dl.gps * $2)::numeric, 2)::float8,
-                patronal = ROUND((dl.patronal * $2)::numeric, 2)::float8,
-                obrera = ROUND((dl.obrera * $2)::numeric, 2)::float8,
-                subtotal = ROUND((dl.subtotal * $2)::numeric, 2)::float8
-            FROM public.reportes_liquidaciones rl,
-                 public.detalles_liquidaciones dl
+                cf = ROUND((COALESCE(dl.cf, rdl.cf, 0.0) * $2)::numeric, 2)::float8,
+                exc_pat = ROUND((COALESCE(dl.exc_pat, rdl.exc_pat, 0.0) * $2)::numeric, 2)::float8,
+                exc_obr = ROUND((COALESCE(dl.exc_obr, rdl.exc_obr, 0.0) * $2)::numeric, 2)::float8,
+                pd_pat = ROUND((COALESCE(dl.pd_pat, rdl.pd_pat, 0.0) * $2)::numeric, 2)::float8,
+                pd_obr = ROUND((COALESCE(dl.pd_obr, rdl.pd_obr, 0.0) * $2)::numeric, 2)::float8,
+                gmp_pat = ROUND((COALESCE(dl.gmp_pat, rdl.gmp_pat, 0.0) * $2)::numeric, 2)::float8,
+                gmp_obr = ROUND((COALESCE(dl.gmp_obr, rdl.gmp_obr, 0.0) * $2)::numeric, 2)::float8,
+                rt = ROUND((COALESCE(dl.rt, rdl.rt, 0.0) * $2)::numeric, 2)::float8,
+                iv_pat = ROUND((COALESCE(dl.iv_pat, rdl.iv_pat, 0.0) * $2)::numeric, 2)::float8,
+                iv_obr = ROUND((COALESCE(dl.iv_obr, rdl.iv_obr, 0.0) * $2)::numeric, 2)::float8,
+                gps = ROUND((COALESCE(dl.gps, rdl.gps, 0.0) * $2)::numeric, 2)::float8,
+                patronal = ROUND((COALESCE(dl.patronal, rdl.patronal, 0.0) * $2)::numeric, 2)::float8,
+                obrera = ROUND((COALESCE(dl.obrera, rdl.obrera, 0.0) * $2)::numeric, 2)::float8,
+                subtotal = ROUND((COALESCE(dl.subtotal, rdl.subtotal, 0.0) * $2)::numeric, 2)::float8
+            FROM public.reportes_liquidaciones rl
+            LEFT JOIN public.detalles_liquidaciones dl
+                ON dl.id_liquidacion = rl.id_liquidacion
+               AND (
+                   (COALESCE(TRIM(LOWER(dl.clave)), '') = COALESCE(TRIM(LOWER(rdl.clave)), '')
+                    AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL)))
+                   OR (
+                       (SELECT COUNT(*) FROM public.detalles_liquidaciones sub_dl WHERE sub_dl.id_liquidacion = rl.id_liquidacion) = 1
+                   )
+               )
             WHERE rdl.id_reporte_liquidacion = rl.id 
-              AND dl.id_liquidacion = rl.id_liquidacion
-              AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL))
-              AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL))
               AND rdl.id = $1
             "#,
             &[&id_reporte_liq, &factor],
@@ -882,11 +947,7 @@ pub fn batch_save_reporte_row_updates(
 
         if let Some(parent_id) = parent_opt {
             if let Some(obra_id) = id_registro_obra_opt {
-                let dias_obra_val = if dias_obra > 0 {
-                    dias_obra.clamp(1, 31)
-                } else {
-                    dias_cedula.clamp(1, 31)
-                };
+                let dias_obra_val = dias_obra.clamp(0, 31);
 
                 let vinc_exists = tx.query_opt(
                     "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 LIMIT 1",
@@ -998,11 +1059,7 @@ pub fn batch_update_reporte_rows(
             };
 
             if let Some(obra_id) = new_obra {
-                let dias_obra_val = if new_dias_obra > 0 {
-                    new_dias_obra.clamp(1, 31)
-                } else {
-                    dias_ced.clamp(1, 31)
-                };
+                let dias_obra_val = new_dias_obra.clamp(0, 31);
 
                 let vinc_exists = tx.query_opt(
                     "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 LIMIT 1",
@@ -1043,26 +1100,31 @@ pub fn batch_update_reporte_rows(
                 r#"
                 UPDATE public.reportes_detalles_liquidaciones rdl
                 SET 
-                    cf = ROUND((dl.cf * $2)::numeric, 2)::float8,
-                    exc_pat = ROUND((dl.exc_pat * $2)::numeric, 2)::float8,
-                    exc_obr = ROUND((dl.exc_obr * $2)::numeric, 2)::float8,
-                    pd_pat = ROUND((dl.pd_pat * $2)::numeric, 2)::float8,
-                    pd_obr = ROUND((dl.pd_obr * $2)::numeric, 2)::float8,
-                    gmp_pat = ROUND((dl.gmp_pat * $2)::numeric, 2)::float8,
-                    gmp_obr = ROUND((dl.gmp_obr * $2)::numeric, 2)::float8,
-                    rt = ROUND((dl.rt * $2)::numeric, 2)::float8,
-                    iv_pat = ROUND((dl.iv_pat * $2)::numeric, 2)::float8,
-                    iv_obr = ROUND((dl.iv_obr * $2)::numeric, 2)::float8,
-                    gps = ROUND((dl.gps * $2)::numeric, 2)::float8,
-                    patronal = ROUND((dl.patronal * $2)::numeric, 2)::float8,
-                    obrera = ROUND((dl.obrera * $2)::numeric, 2)::float8,
-                    subtotal = ROUND((dl.subtotal * $2)::numeric, 2)::float8
-                FROM public.reportes_liquidaciones rl,
-                     public.detalles_liquidaciones dl
+                    cf = ROUND((COALESCE(dl.cf, rdl.cf, 0.0) * $2)::numeric, 2)::float8,
+                    exc_pat = ROUND((COALESCE(dl.exc_pat, rdl.exc_pat, 0.0) * $2)::numeric, 2)::float8,
+                    exc_obr = ROUND((COALESCE(dl.exc_obr, rdl.exc_obr, 0.0) * $2)::numeric, 2)::float8,
+                    pd_pat = ROUND((COALESCE(dl.pd_pat, rdl.pd_pat, 0.0) * $2)::numeric, 2)::float8,
+                    pd_obr = ROUND((COALESCE(dl.pd_obr, rdl.pd_obr, 0.0) * $2)::numeric, 2)::float8,
+                    gmp_pat = ROUND((COALESCE(dl.gmp_pat, rdl.gmp_pat, 0.0) * $2)::numeric, 2)::float8,
+                    gmp_obr = ROUND((COALESCE(dl.gmp_obr, rdl.gmp_obr, 0.0) * $2)::numeric, 2)::float8,
+                    rt = ROUND((COALESCE(dl.rt, rdl.rt, 0.0) * $2)::numeric, 2)::float8,
+                    iv_pat = ROUND((COALESCE(dl.iv_pat, rdl.iv_pat, 0.0) * $2)::numeric, 2)::float8,
+                    iv_obr = ROUND((COALESCE(dl.iv_obr, rdl.iv_obr, 0.0) * $2)::numeric, 2)::float8,
+                    gps = ROUND((COALESCE(dl.gps, rdl.gps, 0.0) * $2)::numeric, 2)::float8,
+                    patronal = ROUND((COALESCE(dl.patronal, rdl.patronal, 0.0) * $2)::numeric, 2)::float8,
+                    obrera = ROUND((COALESCE(dl.obrera, rdl.obrera, 0.0) * $2)::numeric, 2)::float8,
+                    subtotal = ROUND((COALESCE(dl.subtotal, rdl.subtotal, 0.0) * $2)::numeric, 2)::float8
+                FROM public.reportes_liquidaciones rl
+                LEFT JOIN public.detalles_liquidaciones dl
+                    ON dl.id_liquidacion = rl.id_liquidacion
+                   AND (
+                       (COALESCE(TRIM(LOWER(dl.clave)), '') = COALESCE(TRIM(LOWER(rdl.clave)), '')
+                        AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL)))
+                       OR (
+                           (SELECT COUNT(*) FROM public.detalles_liquidaciones sub_dl WHERE sub_dl.id_liquidacion = rl.id_liquidacion) = 1
+                       )
+                   )
                 WHERE rdl.id_reporte_liquidacion = rl.id 
-                  AND dl.id_liquidacion = rl.id_liquidacion
-                  AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL))
-                  AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL))
                   AND rl.id = $1
                 "#,
                 &[&id_rep_liq, &factor],
@@ -1115,6 +1177,7 @@ pub fn export_reporte_liquidaciones_to_excel(
     rows: &[ReporteLiquidacionRowDb],
     all_rows: &[ReporteLiquidacionRowDb],
     valid_user_obra_ids: Option<&HashSet<Uuid>>,
+    guarderias_kpis: &[ReporteGuarderiaKpiDb],
     file_path: &Path,
     cliente_nombre: &str,
     rp_registro: &str,
@@ -1475,6 +1538,218 @@ pub fn export_reporte_liquidaciones_to_excel(
     worksheet.write_number_with_format(current_r, 28, g_obrera, &grand_total_curr_format).map_err(|e| e.to_string())?;
     worksheet.write_number_with_format(current_r, 29, g_subtotal, &grand_total_curr_format).map_err(|e| e.to_string())?;
     worksheet.write_number_with_format(current_r, 30, g_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
+
+    // =========================================================================
+    // SECCIÓN POST-TABLA: Análisis de Guarderías (Tope 18% por Registro de Obra)
+    // =========================================================================
+    if !guarderias_kpis.is_empty() {
+        let mut kpi_r = current_r + 3;
+
+        let kpi_sec_title_format = Format::new()
+            .set_bold()
+            .set_font_size(12)
+            .set_font_color(Color::RGB(0x1E3A8A));
+
+        let kpi_sec_sub_format = Format::new()
+            .set_font_size(9)
+            .set_italic()
+            .set_font_color(Color::RGB(0x475569));
+
+        let kpi_tbl_hdr_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0x1E3A8A))
+            .set_font_color(Color::RGB(0xFFFFFF))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_text_format = Format::new()
+            .set_font_size(10)
+            .set_border(FormatBorder::Thin);
+
+        let kpi_num_format = Format::new()
+            .set_num_format("#,##0")
+            .set_font_size(10)
+            .set_border(FormatBorder::Thin);
+
+        let kpi_curr_format = Format::new()
+            .set_num_format("$#,##0.00")
+            .set_font_size(10)
+            .set_border(FormatBorder::Thin);
+
+        let kpi_warn_curr_format = Format::new()
+            .set_bold()
+            .set_num_format("$#,##0.00")
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0xFEF9C3))
+            .set_font_color(Color::RGB(0x854D0E))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_green_curr_format = Format::new()
+            .set_bold()
+            .set_num_format("$#,##0.00")
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0xF0FDF4))
+            .set_font_color(Color::RGB(0x15803D))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_blue_curr_format = Format::new()
+            .set_bold()
+            .set_num_format("$#,##0.00")
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x2563EB))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_status_ok_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0xDCFCE7))
+            .set_font_color(Color::RGB(0x166534))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_status_warn_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0xFEF08A))
+            .set_font_color(Color::RGB(0x854D0E))
+            .set_border(FormatBorder::Thin);
+
+        worksheet.write_string_with_format(
+            kpi_r,
+            0,
+            "ANÁLISIS DE GUARDERÍAS (TOPE 18% POR REGISTRO DE OBRA)",
+            &kpi_sec_title_format,
+        ).map_err(|e| e.to_string())?;
+
+        kpi_r += 1;
+        worksheet.write_string_with_format(
+            kpi_r,
+            0,
+            "Fórmula en vivo: Valor Guarderías = Total Cuotas GPS / 0.01 (1%) | Límite 18% = Valor Total de la Obra * 18%",
+            &kpi_sec_sub_format,
+        ).map_err(|e| e.to_string())?;
+
+        kpi_r += 2;
+
+        let kpi_headers = [
+            "#",
+            "Registro de Obra",
+            "Valor Guarderías (1% GPS)",
+            "Valor Total de la Obra",
+            "Límite 18% de la Obra",
+            "Total Cuotas GPS (IMSS)",
+            "Registros Vinculados",
+            "Estatus (Tope 18%)",
+        ];
+
+        for (col, h) in kpi_headers.iter().enumerate() {
+            worksheet.write_string_with_format(kpi_r, col as u16, *h, &kpi_tbl_hdr_format)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let mut tot_valor_guarderias = 0.0;
+        let mut tot_monto_obra = 0.0;
+        let mut tot_limite_18 = 0.0;
+        let mut tot_gps = 0.0;
+        let mut tot_registros = 0;
+        let mut hay_alerta = false;
+
+        for (idx, kpi) in guarderias_kpis.iter().enumerate() {
+            kpi_r += 1;
+            worksheet.write_number_with_format(kpi_r, 0, (idx + 1) as f64, &integer_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_string_with_format(kpi_r, 1, &kpi.obra_label, &kpi_text_format)
+                .map_err(|e| e.to_string())?;
+
+            if kpi.supera_18 {
+                worksheet.write_number_with_format(kpi_r, 2, kpi.valor_guarderias, &kpi_warn_curr_format)
+                    .map_err(|e| e.to_string())?;
+                hay_alerta = true;
+            } else {
+                worksheet.write_number_with_format(kpi_r, 2, kpi.valor_guarderias, &kpi_curr_format)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            worksheet.write_number_with_format(kpi_r, 3, kpi.monto_obra, &kpi_curr_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 4, kpi.limite_18_obra, &kpi_green_curr_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 5, kpi.total_gps, &kpi_blue_curr_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 6, kpi.empleados_count as f64, &kpi_num_format)
+                .map_err(|e| e.to_string())?;
+
+            if kpi.supera_18 {
+                worksheet.write_string_with_format(kpi_r, 7, "⚠️ SUPERA EL 18%", &kpi_status_warn_format)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                worksheet.write_string_with_format(kpi_r, 7, "✅ CUMPLE (<= 18%)", &kpi_status_ok_format)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            tot_valor_guarderias += kpi.valor_guarderias;
+            tot_monto_obra += kpi.monto_obra;
+            tot_limite_18 += kpi.limite_18_obra;
+            tot_gps += kpi.total_gps;
+            tot_registros += kpi.empleados_count;
+        }
+
+        if guarderias_kpis.len() > 1 {
+            kpi_r += 1;
+            worksheet.write_string_with_format(kpi_r, 0, "", &grand_total_label_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_string_with_format(kpi_r, 1, "TOTAL CONSOLIDADO", &grand_total_label_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 2, tot_valor_guarderias, &grand_total_curr_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 3, tot_monto_obra, &grand_total_curr_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 4, tot_limite_18, &grand_total_curr_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 5, tot_gps, &grand_total_curr_format)
+                .map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 6, tot_registros as f64, &grand_total_int_format)
+                .map_err(|e| e.to_string())?;
+            let tot_status = if hay_alerta { "⚠️ OBRAS EN ALERTA" } else { "✅ TODAS CUMPLEN" };
+            worksheet.write_string_with_format(kpi_r, 7, tot_status, &grand_total_label_format)
+                .map_err(|e| e.to_string())?;
+        }
+
+        // Tarjetas individuales de cada Obra (idéntico a la vista en la aplicación)
+        kpi_r += 3;
+        for kpi in guarderias_kpis {
+            let card_header_text = format!("🏗️ Registro de Obra: {} ({} registros vinculados)", kpi.obra_label, kpi.empleados_count);
+            worksheet.write_string_with_format(kpi_r, 0, &card_header_text, &kpi_sec_title_format)
+                .map_err(|e| e.to_string())?;
+
+            if kpi.supera_18 {
+                kpi_r += 1;
+                worksheet.write_string_with_format(
+                    kpi_r,
+                    0,
+                    "⚠️ ADVERTENCIA: Guarderías supera el 18% del valor de la obra",
+                    &kpi_status_warn_format,
+                ).map_err(|e| e.to_string())?;
+            }
+
+            kpi_r += 1;
+            worksheet.write_string_with_format(kpi_r, 0, "VALOR GUARDERÍAS (1% GPS)", &kpi_tbl_hdr_format).map_err(|e| e.to_string())?;
+            worksheet.write_string_with_format(kpi_r, 1, "VALOR TOTAL DE LA OBRA", &kpi_tbl_hdr_format).map_err(|e| e.to_string())?;
+            worksheet.write_string_with_format(kpi_r, 2, "LÍMITE 18% DE LA OBRA", &kpi_tbl_hdr_format).map_err(|e| e.to_string())?;
+            worksheet.write_string_with_format(kpi_r, 3, "TOTAL CUOTAS GPS (IMSS)", &kpi_tbl_hdr_format).map_err(|e| e.to_string())?;
+
+            kpi_r += 1;
+            if kpi.supera_18 {
+                worksheet.write_number_with_format(kpi_r, 0, kpi.valor_guarderias, &kpi_warn_curr_format).map_err(|e| e.to_string())?;
+            } else {
+                worksheet.write_number_with_format(kpi_r, 0, kpi.valor_guarderias, &kpi_curr_format).map_err(|e| e.to_string())?;
+            }
+            worksheet.write_number_with_format(kpi_r, 1, kpi.monto_obra, &kpi_curr_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 2, kpi.limite_18_obra, &kpi_green_curr_format).map_err(|e| e.to_string())?;
+            worksheet.write_number_with_format(kpi_r, 3, kpi.total_gps, &kpi_blue_curr_format).map_err(|e| e.to_string())?;
+
+            kpi_r += 2;
+        }
+    }
 
     worksheet.autofit();
 
@@ -2046,6 +2321,203 @@ pub fn export_reporte_liquidaciones_to_excel(
         ws_emp.autofit();
     }
 
+    // =========================================================================
+    // SHEET 4: Análisis de Guarderías (Tope 18% por Registro de Obra)
+    // =========================================================================
+    if !guarderias_kpis.is_empty() {
+        let ws_guard = workbook.add_worksheet();
+        ws_guard.set_name("Análisis de Guarderías (18%)").map_err(|e| e.to_string())?;
+
+        ws_guard.write_string_with_format(
+            0,
+            0,
+            "Reporte de Liquidaciones - Análisis de Guarderías (Tope 18%) - CONSTRUAUDIT",
+            &title_format,
+        ).map_err(|e| e.to_string())?;
+
+        ws_guard.write_string_with_format(
+            1,
+            0,
+            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_nombre),
+            &subtitle_format,
+        ).map_err(|e| e.to_string())?;
+
+        ws_guard.write_string_with_format(
+            2,
+            0,
+            "Fórmula en vivo: Valor Guarderías = Total GPS / 0.01 (1%) | Límite = 18% del Valor de la Obra",
+            &subtitle_format,
+        ).map_err(|e| e.to_string())?;
+
+        let kpi_tbl_hdr_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0x1E3A8A))
+            .set_font_color(Color::RGB(0xFFFFFF))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_warn_curr_format = Format::new()
+            .set_bold()
+            .set_num_format("$#,##0.00")
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0xFEF9C3))
+            .set_font_color(Color::RGB(0x854D0E))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_green_curr_format = Format::new()
+            .set_bold()
+            .set_num_format("$#,##0.00")
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0xF0FDF4))
+            .set_font_color(Color::RGB(0x15803D))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_blue_curr_format = Format::new()
+            .set_bold()
+            .set_num_format("$#,##0.00")
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x2563EB))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_status_ok_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0xDCFCE7))
+            .set_font_color(Color::RGB(0x166534))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_status_warn_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0xFEF08A))
+            .set_font_color(Color::RGB(0x854D0E))
+            .set_border(FormatBorder::Thin);
+
+        let kpi_headers = [
+            "#",
+            "Registro de Obra",
+            "Valor Guarderías (1% GPS)",
+            "Valor Total de la Obra",
+            "Límite 18% de la Obra",
+            "Total Cuotas GPS (IMSS)",
+            "Registros Vinculados",
+            "Estatus (Tope 18%)",
+        ];
+
+        let header_row_s4 = 4;
+        for (col, h) in kpi_headers.iter().enumerate() {
+            ws_guard.write_string_with_format(header_row_s4, col as u16, *h, &kpi_tbl_hdr_format)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let mut curr_r_s4 = header_row_s4;
+        let mut tot_val_guard = 0.0;
+        let mut tot_monto = 0.0;
+        let mut tot_lim = 0.0;
+        let mut tot_g = 0.0;
+        let mut tot_regs = 0;
+        let mut hay_alerta_s4 = false;
+
+        for (idx, kpi) in guarderias_kpis.iter().enumerate() {
+            curr_r_s4 += 1;
+            ws_guard.write_number_with_format(curr_r_s4, 0, (idx + 1) as f64, &integer_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_string_with_format(curr_r_s4, 1, &kpi.obra_label, &text_format)
+                .map_err(|e| e.to_string())?;
+
+            if kpi.supera_18 {
+                ws_guard.write_number_with_format(curr_r_s4, 2, kpi.valor_guarderias, &kpi_warn_curr_format)
+                    .map_err(|e| e.to_string())?;
+                hay_alerta_s4 = true;
+            } else {
+                ws_guard.write_number_with_format(curr_r_s4, 2, kpi.valor_guarderias, &currency_format)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            ws_guard.write_number_with_format(curr_r_s4, 3, kpi.monto_obra, &currency_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 4, kpi.limite_18_obra, &kpi_green_curr_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 5, kpi.total_gps, &kpi_blue_curr_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 6, kpi.empleados_count as f64, &integer_format)
+                .map_err(|e| e.to_string())?;
+
+            if kpi.supera_18 {
+                ws_guard.write_string_with_format(curr_r_s4, 7, "⚠️ SUPERA EL 18%", &kpi_status_warn_format)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                ws_guard.write_string_with_format(curr_r_s4, 7, "✅ CUMPLE (<= 18%)", &kpi_status_ok_format)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            tot_val_guard += kpi.valor_guarderias;
+            tot_monto += kpi.monto_obra;
+            tot_lim += kpi.limite_18_obra;
+            tot_g += kpi.total_gps;
+            tot_regs += kpi.empleados_count;
+        }
+
+        if guarderias_kpis.len() > 1 {
+            curr_r_s4 += 1;
+            ws_guard.write_string_with_format(curr_r_s4, 0, "", &grand_total_label_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_string_with_format(curr_r_s4, 1, "TOTAL CONSOLIDADO", &grand_total_label_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 2, tot_val_guard, &grand_total_curr_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 3, tot_monto, &grand_total_curr_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 4, tot_lim, &grand_total_curr_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 5, tot_g, &grand_total_curr_format)
+                .map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 6, tot_regs as f64, &grand_total_int_format)
+                .map_err(|e| e.to_string())?;
+            let tot_status = if hay_alerta_s4 { "⚠️ OBRAS EN ALERTA" } else { "✅ TODAS CUMPLEN" };
+            ws_guard.write_string_with_format(curr_r_s4, 7, tot_status, &grand_total_label_format)
+                .map_err(|e| e.to_string())?;
+        }
+
+        // Tarjetas individuales por obra en Sheet 4
+        curr_r_s4 += 3;
+        for kpi in guarderias_kpis {
+            let card_header_text = format!("🏗️ Registro de Obra: {} ({} registros vinculados)", kpi.obra_label, kpi.empleados_count);
+            ws_guard.write_string_with_format(curr_r_s4, 0, &card_header_text, &title_format)
+                .map_err(|e| e.to_string())?;
+
+            if kpi.supera_18 {
+                curr_r_s4 += 1;
+                ws_guard.write_string_with_format(
+                    curr_r_s4,
+                    0,
+                    "⚠️ ADVERTENCIA: Guarderías supera el 18% del valor de la obra",
+                    &kpi_status_warn_format,
+                ).map_err(|e| e.to_string())?;
+            }
+
+            curr_r_s4 += 1;
+            ws_guard.write_string_with_format(curr_r_s4, 0, "VALOR GUARDERÍAS (1% GPS)", &header_format).map_err(|e| e.to_string())?;
+            ws_guard.write_string_with_format(curr_r_s4, 1, "VALOR TOTAL DE LA OBRA", &header_format).map_err(|e| e.to_string())?;
+            ws_guard.write_string_with_format(curr_r_s4, 2, "LÍMITE 18% DE LA OBRA", &header_format).map_err(|e| e.to_string())?;
+            ws_guard.write_string_with_format(curr_r_s4, 3, "TOTAL CUOTAS GPS (IMSS)", &header_format).map_err(|e| e.to_string())?;
+
+            curr_r_s4 += 1;
+            if kpi.supera_18 {
+                ws_guard.write_number_with_format(curr_r_s4, 0, kpi.valor_guarderias, &kpi_warn_curr_format).map_err(|e| e.to_string())?;
+            } else {
+                ws_guard.write_number_with_format(curr_r_s4, 0, kpi.valor_guarderias, &currency_format).map_err(|e| e.to_string())?;
+            }
+            ws_guard.write_number_with_format(curr_r_s4, 1, kpi.monto_obra, &currency_format).map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 2, kpi.limite_18_obra, &kpi_green_curr_format).map_err(|e| e.to_string())?;
+            ws_guard.write_number_with_format(curr_r_s4, 3, kpi.total_gps, &kpi_blue_curr_format).map_err(|e| e.to_string())?;
+
+            curr_r_s4 += 2;
+        }
+
+        ws_guard.autofit();
+    }
+
     workbook.save(file_path).map_err(|e| format!("Error guardando archivo Excel: {}", e))?;
     Ok(())
 }
@@ -2106,7 +2578,7 @@ mod tests {
                 rt: 0.0,
                 iv_pat: 0.0,
                 iv_obr: 0.0,
-                gps: 0.0,
+                gps: sub * 0.05,
                 patronal: sub * 0.8,
                 obrera: sub * 0.2,
                 subtotal: sub,
@@ -2120,7 +2592,7 @@ mod tests {
                 rt_orig: 0.0,
                 iv_pat_orig: 0.0,
                 iv_obr_orig: 0.0,
-                gps_orig: 0.0,
+                gps_orig: sub * 0.05,
                 patronal_orig: sub * 0.8,
                 obrera_orig: sub * 0.2,
                 subtotal_orig: sub,
@@ -2140,6 +2612,35 @@ mod tests {
             make_row(emp_3, "GONZALEZ HERNANDEZ PEDRO", None, "", false, "ENERO", 2024, 30, 700.0),
         ];
 
+        let obras_options = vec![
+            ObraOptionDb {
+                id: obra_user_1,
+                numero: "OBRA-USER-01".to_string(),
+                tipo_obra: "EDIFICACION".to_string(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "OBRA-USER-01 - EDIFICIO TORRE".to_string(),
+                creado_usuario: true,
+                monto: 1_000_000.0,
+            },
+            ObraOptionDb {
+                id: obra_user_2,
+                numero: "OBRA-USER-02".to_string(),
+                tipo_obra: "URBANIZACION".to_string(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "OBRA-USER-02 - CALLE PRINCIPAL".to_string(),
+                creado_usuario: true,
+                monto: 500_000.0,
+            },
+        ];
+
+        let guarderias_kpis = compute_guarderias_kpis(&rows, &obras_options, None);
+        assert_eq!(guarderias_kpis.len(), 2);
+        assert_eq!(guarderias_kpis[0].empleados_count, 2);
+        assert_eq!(guarderias_kpis[1].empleados_count, 1);
+        assert!(!guarderias_kpis[0].supera_18);
+
         let temp_dir = std::env::temp_dir();
         let test_file = temp_dir.join(format!("test_export_liq_{}.xlsx", Uuid::new_v4()));
 
@@ -2147,6 +2648,7 @@ mod tests {
             &rows,
             &rows,
             Some(&valid_obras),
+            &guarderias_kpis,
             &test_file,
             "EMPRESA PRUEBA S.A. DE C.V.",
             "Y54-10204-10-8",
@@ -2161,4 +2663,5 @@ mod tests {
         let _ = std::fs::remove_file(test_file);
     }
 }
+
 

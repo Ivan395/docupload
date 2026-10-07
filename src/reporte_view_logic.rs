@@ -12,6 +12,7 @@ use crate::db::reporte_liquidaciones::{
     fetch_reporte_liquidaciones, fetch_obras_for_revision,
     update_single_reporte_row, batch_save_reporte_row_updates,
     sync_reportes_liquidaciones_for_revision, export_reporte_liquidaciones_to_excel,
+    compute_guarderias_kpis,
 };
 
 #[derive(Clone)]
@@ -806,43 +807,24 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
         &state.all_rows
     };
 
-    let mut guarderias_vec = Vec::new();
-    for o in state.obras_options.iter().filter(|o| o.creado_usuario || o.monto > 0.0 || target_rows.iter().any(|r| r.id_registro_obra == Some(o.id))) {
-        if let Some(target_id) = filter_obra_id {
-            if o.id != target_id {
-                continue;
-            }
+    let kpis = compute_guarderias_kpis(target_rows, &state.obras_options, filter_obra_id);
+    let guarderias_vec: Vec<ReporteGuarderiaObraItem> = kpis.into_iter().map(|k| {
+        ReporteGuarderiaObraItem {
+            id_obra: k.id_obra.to_string().into(),
+            obra_numero: k.obra_numero.into(),
+            obra_label: k.obra_label.into(),
+            total_gps: k.total_gps as f32,
+            total_gps_str: format_curr(k.total_gps).into(),
+            valor_guarderias: k.valor_guarderias as f32,
+            valor_guarderias_str: format_curr(k.valor_guarderias).into(),
+            monto_obra: k.monto_obra as f32,
+            monto_obra_str: format_curr(k.monto_obra).into(),
+            limite_18_obra: k.limite_18_obra as f32,
+            limite_18_obra_str: format_curr(k.limite_18_obra).into(),
+            supera_18: k.supera_18,
+            empleados_count: k.empleados_count as i32,
         }
-        let mut total_gps_obra = 0.0;
-        let mut emps_count = 0;
-        for r in target_rows {
-            if r.id_registro_obra == Some(o.id) {
-                total_gps_obra += r.gps;
-                emps_count += 1;
-            }
-        }
-        let monto_obra = o.monto;
-        let limite_18 = monto_obra * 0.18;
-        // Para calcular el valor de las guarderias es el total de gps de todos los empleados que tienen vinculado los registros de obra que el usuario creo entre el 1%:
-        let valor_guarderias = total_gps_obra / 0.01;
-        let supera_18 = (monto_obra > 0.0 && valor_guarderias > limite_18) || (monto_obra == 0.0 && valor_guarderias > 0.0);
-
-        guarderias_vec.push(ReporteGuarderiaObraItem {
-            id_obra: o.id.to_string().into(),
-            obra_numero: o.numero.clone().into(),
-            obra_label: o.label.clone().into(),
-            total_gps: total_gps_obra as f32,
-            total_gps_str: format_curr(total_gps_obra).into(),
-            valor_guarderias: valor_guarderias as f32,
-            valor_guarderias_str: format_curr(valor_guarderias).into(),
-            monto_obra: monto_obra as f32,
-            monto_obra_str: format_curr(monto_obra).into(),
-            limite_18_obra: limite_18 as f32,
-            limite_18_obra_str: format_curr(limite_18).into(),
-            supera_18,
-            empleados_count: emps_count as i32,
-        });
-    }
+    }).collect();
     app_data.set_reporte_guarderias_obras(ModelRc::new(VecModel::from(guarderias_vec)));
 }
 
@@ -1154,8 +1136,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                     app_data.set_reporte_edit_dias_cedula_val(r.dias_cedula.to_string().into());
                     let default_dias_obra = if r.id_registro_obra.is_some() {
-                        if r.dias_obra > 0 && (r.dias_obra as i32) <= dias_max {
-                            r.dias_obra as i32
+                        if (r.dias_obra as i32) <= dias_max {
+                            (r.dias_obra as i32).max(0)
                         } else {
                             dias_max
                         }
@@ -1331,7 +1313,11 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 app_data.set_show_reporte_edit_modal(false);
 
                 let new_dias_obr = if obra_uuid_opt.is_some() {
-                    if raw_dias_obr > 0 { raw_dias_obr } else { max_efectivo }
+                    if dias_obr_str.trim().is_empty() {
+                        max_efectivo
+                    } else {
+                        raw_dias_obr
+                    }
                 } else {
                     0
                 };
@@ -1526,6 +1512,144 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
+    // Batch: Poner Días Obra en 0 para la selección
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_batch_poner_dias_cero(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut count_modified = 0;
+
+                let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
+                    let mut state = session_clone.lock().unwrap();
+                    let ids_to_change: HashSet<Uuid> = if state.selected_ids.is_empty() {
+                        state.filtered_rows.iter()
+                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                            .map(|r| r.id_reporte_liq)
+                            .collect()
+                    } else {
+                        state.selected_ids.clone()
+                    };
+
+                    for row in state.all_rows.iter_mut() {
+                        if ids_to_change.contains(&row.id_reporte_liq) {
+                            row.dias_obra = 0;
+                            recalculate_row_in_memory(row);
+                            count_modified += 1;
+                        }
+                    }
+
+                    let rows = state
+                        .all_rows
+                        .iter()
+                        .filter(|r| ids_to_change.contains(&r.id_reporte_liq))
+                        .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
+                        .collect();
+
+                    apply_reporte_filtering(&mut state);
+                    render_reporte_ui(&ui, &state);
+
+                    rows
+                };
+
+                // Persistir en PostgreSQL
+                if let Some(ref pool) = pool_clone {
+                    let pool_bg = pool.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(mut client) = pool_bg.get() {
+                            if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
+                                log::error!("Error persistiendo días obra 0 en BD: {}", e);
+                            }
+                        }
+                    });
+                }
+
+                crate::show_toast_message(
+                    &ui,
+                    &format!("Se asignaron 0 días de obra a {} registros.", count_modified),
+                );
+            }
+        });
+    }
+
+    // Batch: Asignar Días Obra arbitrarios (incluyendo 0) a la selección
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_batch_apply_dias_obra(move |dias_str| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let trimmed = dias_str.trim();
+                let target_dias = match trimmed.parse::<i16>() {
+                    Ok(d) if (0..=31).contains(&d) => d,
+                    _ => {
+                        crate::show_toast_message(&ui, "Por favor ingresa un número de días válido entre 0 y 31.");
+                        return;
+                    }
+                };
+
+                let mut count_modified = 0;
+
+                let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
+                    let mut state = session_clone.lock().unwrap();
+                    let ids_to_change: HashSet<Uuid> = if state.selected_ids.is_empty() {
+                        state.filtered_rows.iter()
+                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                            .map(|r| r.id_reporte_liq)
+                            .collect()
+                    } else {
+                        state.selected_ids.clone()
+                    };
+
+                    for row in state.all_rows.iter_mut() {
+                        if ids_to_change.contains(&row.id_reporte_liq) {
+                            let lic_val = row.lic;
+                            let inc_val = row.inc;
+                            let aus_val = row.aus;
+                            let max_efectivo = (row.dias_cedula as f64 - lic_val - inc_val - aus_val).round().max(0.0) as i16;
+                            row.dias_obra = target_dias.min(max_efectivo);
+                            recalculate_row_in_memory(row);
+                            count_modified += 1;
+                        }
+                    }
+
+                    let rows = state
+                        .all_rows
+                        .iter()
+                        .filter(|r| ids_to_change.contains(&r.id_reporte_liq))
+                        .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
+                        .collect();
+
+                    apply_reporte_filtering(&mut state);
+                    render_reporte_ui(&ui, &state);
+
+                    rows
+                };
+
+                // Limpiar input
+                ui.global::<AppData>().set_reporte_batch_dias_obra_input("".into());
+
+                // Persistir en PostgreSQL
+                if let Some(ref pool) = pool_clone {
+                    let pool_bg = pool.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(mut client) = pool_bg.get() {
+                            if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
+                                log::error!("Error persistiendo asignación de días obra en BD: {}", e);
+                            }
+                        }
+                    });
+                }
+
+                crate::show_toast_message(
+                    &ui,
+                    &format!("Se asignaron {} días de obra a {} registros.", target_dias, count_modified),
+                );
+            }
+        });
+    }
+
     // 18. Batch: Aplicar Registro de Obra, Días Cédula y/o Días Obra a la selección
     {
         let ui_weak = main_window.as_weak();
@@ -1675,10 +1799,23 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     .map(|o| o.id)
                     .collect();
 
+                let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
+                    Some(state.obras_options[state.filter_obra_idx - 1].id)
+                } else {
+                    None
+                };
+
+                let guarderias_kpis = compute_guarderias_kpis(
+                    &state.filtered_rows,
+                    &state.obras_options,
+                    filter_obra_id,
+                );
+
                 match export_reporte_liquidaciones_to_excel(
                     &state.filtered_rows,
                     &state.all_rows,
                     Some(&valid_user_obra_ids),
+                    &guarderias_kpis,
                     &out_file,
                     &state.cliente_nombre,
                     &state.rp_registro,

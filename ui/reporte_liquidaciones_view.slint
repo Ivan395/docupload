@@ -642,6 +642,112 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             }
                         }
                     }
+
+                    // Botón Días Obra en 0
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 5px;
+                        background: btn_batch_cero.has-hover ? #fef3c7 : #ffffff;
+                        border-width: 1px;
+                        border-color: #fcd34d;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 10px;
+                            spacing: 5px;
+                            alignment: center;
+                            cross-axis-alignment: center;
+
+                            Text { text: "0️⃣"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Días Obra en 0";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #b45309;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_batch_cero := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_batch_poner_dias_cero();
+                            }
+                        }
+                    }
+
+                    // Input rápido para asignar días de obra específicos (incluyendo 0)
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 5px;
+                        background: #ffffff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 4px;
+                            alignment: center;
+                            cross-axis-alignment: center;
+
+                            Text {
+                                text: "Días:";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #1e40af;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                width: 42px;
+                                height: 24px;
+                                border-radius: 4px;
+                                background: #f8fafc;
+                                border-width: 1px;
+                                border-color: #cbd5e1;
+
+                                TextInput {
+                                    text <=> AppData.reporte_batch_dias_obra_input;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: #1e293b;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                    accepted => {
+                                        AppLogic.reporte_batch_apply_dias_obra(AppData.reporte_batch_dias_obra_input);
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 24px;
+                                border-radius: 4px;
+                                background: btn_apply_dias.has-hover ? #1d4ed8 : #2563eb;
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    alignment: center;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "Asignar";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                btn_apply_dias := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        AppLogic.reporte_batch_apply_dias_obra(AppData.reporte_batch_dias_obra_input);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Separador visual
