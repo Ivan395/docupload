@@ -591,7 +591,7 @@ pub fn save_single_cedula_employee_tx(
     let mes_norm = normalize_mes_periodo(emp.mes_periodo.as_deref());
     let anio_norm = normalize_anio_periodo(emp.anio_periodo.as_deref());
 
-    let nombre_arch = format!("Cédula SUA {} - {}", ctx.reg_11, mes_norm);
+    let nombre_arch = format!("Cédula SUA {} - {}.pdf", ctx.reg_11, mes_norm);
 
     // Evitar duplicados: verificar si ya existe liquidación para este empleado en esta revisión y período
     let existing_liq = tx.query_opt(

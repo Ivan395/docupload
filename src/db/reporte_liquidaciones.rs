@@ -38,7 +38,7 @@ pub fn compute_guarderias_kpis(
     filter_obra_id: Option<Uuid>,
 ) -> Vec<ReporteGuarderiaKpiDb> {
     let mut result = Vec::new();
-    for o in obras_options.iter().filter(|o| o.creado_usuario || o.monto > 0.0 || rows.iter().any(|r| r.id_registro_obra == Some(o.id))) {
+    for o in obras_options.iter().filter(|o| o.creado_usuario) {
         if let Some(target_id) = filter_obra_id {
             if o.id != target_id {
                 continue;
@@ -186,7 +186,7 @@ pub fn fetch_obras_for_revision(client: &mut Client, id_revision: Uuid) -> Resul
     let rows = client.query(
         r#"
         SELECT ro.id, ro.numero, ro.tipo_obra, ro.fecha_inicio, ro.fecha_fin,
-               (COALESCE(ro.creado_usuario, false) = true OR COALESCE(ro.monto, 0.0) > 0.0) AS creado_usuario,
+               COALESCE(ro.creado_usuario, false) AS creado_usuario,
                COALESCE(ro.monto, 0.0) AS monto
         FROM public.registros_obras ro
         WHERE ro.id_revision = $1
@@ -1183,6 +1183,62 @@ fn clean_obra_text<'a>(obra_num: &'a str, obra_label: &'a str, has_obra: bool) -
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ReporteFinalHeaderMeta {
+    pub delegacion: String,
+    pub subdelegacion: String,
+    pub cliente_nombre: String,
+    pub rp_registro: String,
+    pub rfc: String,
+    pub periodo_obra: String,
+    pub representante_legal: String,
+    pub revision_folio: String,
+}
+
+fn format_nss_styled(nss: &str) -> String {
+    let digits: String = nss.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 11 {
+        format!("{}-{}-{}-{}-{}", &digits[0..2], &digits[2..4], &digits[4..6], &digits[6..10], &digits[10..11])
+    } else {
+        nss.to_string()
+    }
+}
+
+fn format_mes_col(mes_str: &str, anio: i16, periodo_str: &str) -> String {
+    if let Some((m, y)) = parse_month_and_year(mes_str, anio, periodo_str) {
+        let short_m = match m {
+            1 => "ene", 2 => "feb", 3 => "mar", 4 => "abr",
+            5 => "may", 6 => "jun", 7 => "jul", 8 => "ago",
+            9 => "sep", 10 => "oct", 11 => "nov", 12 => "dic",
+            _ => "mes",
+        };
+        format!("{}-{:02}", short_m, y % 100)
+    } else {
+        mes_str.to_string()
+    }
+}
+
+fn format_month_total_label(periodo_key: &str, sample_row: Option<&ReporteLiquidacionRowDb>) -> (String, String) {
+    if let Some(r) = sample_row {
+        if let Some((m, y)) = parse_month_and_year(&r.mes_periodo, r.anio_periodo, &r.periodo_str) {
+            let full_m = match m {
+                1 => "ENERO", 2 => "FEBRERO", 3 => "MARZO", 4 => "ABRIL",
+                5 => "MAYO", 6 => "JUNIO", 7 => "JULIO", 8 => "AGOSTO",
+                9 => "SEPTIEMBRE", 10 => "OCTUBRE", 11 => "NOVIEMBRE", 12 => "DICIEMBRE",
+                _ => "PERIODO",
+            };
+            let short_m = match m {
+                1 => "ene", 2 => "feb", 3 => "mar", 4 => "abr",
+                5 => "may", 6 => "jun", 7 => "jul", 8 => "ago",
+                9 => "sep", 10 => "oct", 11 => "nov", 12 => "dic",
+                _ => "mes",
+            };
+            return (format!("TOTAL {} {} zzz", full_m, y), format!("{}-{:02}", short_m, y % 100));
+        }
+    }
+    (format!("TOTAL {} zzz", periodo_key), periodo_key.to_string())
+}
+
 /// Genera la exportación en Excel (.xlsx) con el formato profesional de la vista
 pub fn export_reporte_liquidaciones_to_excel(
     rows: &[ReporteLiquidacionRowDb],
@@ -1193,10 +1249,449 @@ pub fn export_reporte_liquidaciones_to_excel(
     cliente_nombre: &str,
     rp_registro: &str,
     revision_folio: &str,
+    header_meta: Option<&ReporteFinalHeaderMeta>,
 ) -> Result<(), String> {
-    use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook};
+    use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook};
 
     let mut workbook = Workbook::new();
+
+    // =========================================================================
+    // SHEET 0: Reporte Final (Estilos oficiales aplicados a datos exportados)
+    // =========================================================================
+    {
+        let ws_final = workbook.add_worksheet();
+        ws_final.set_name("Reporte Final").map_err(|e| e.to_string())?;
+
+        let meta = header_meta.cloned().unwrap_or_else(|| {
+            ReporteFinalHeaderMeta {
+                delegacion: "COAHUILA".to_string(),
+                subdelegacion: "SALTILLO".to_string(),
+                cliente_nombre: cliente_nombre.to_string(),
+                rp_registro: rp_registro.to_string(),
+                rfc: "GON2110075C9".to_string(),
+                periodo_obra: "15/04/2026 AL 30/06/2026".to_string(),
+                representante_legal: "ARTURO CARRILLO DOMINGUEZ".to_string(),
+                revision_folio: revision_folio.to_string(),
+            }
+        });
+
+        let delegacion = if meta.delegacion.trim().is_empty() { "COAHUILA" } else { meta.delegacion.trim() };
+        let subdelegacion = if meta.subdelegacion.trim().is_empty() { "SALTILLO" } else { meta.subdelegacion.trim() };
+        let emp_nombre = if meta.cliente_nombre.trim().is_empty() { cliente_nombre } else { meta.cliente_nombre.trim() };
+        let rp_reg = if meta.rp_registro.trim().is_empty() { rp_registro } else { meta.rp_registro.trim() };
+        let rfc_val = if meta.rfc.trim().is_empty() { "GON2110075C9" } else { meta.rfc.trim() };
+        let per_obra = if meta.periodo_obra.trim().is_empty() { "15/04/2026 AL 30/06/2026" } else { meta.periodo_obra.trim() };
+        let rep_legal = if meta.representante_legal.trim().is_empty() { "ARTURO CARRILLO DOMINGUEZ" } else { meta.representante_legal.trim() };
+        let fol_rev = if meta.revision_folio.trim().is_empty() { revision_folio } else { meta.revision_folio.trim() };
+
+        // Anchos de columna exactos para los 19 campos
+        let col_widths: [u16; 19] = [
+            18, // 0: nss
+            32, // 1: nombre
+            10, // 2: mes
+             8, // 3: dias
+            13, // 4: sdi
+            13, // 5: cf
+            11, // 6: exc pat
+            11, // 7: exc obr
+            12, // 8: pd pat
+            12, // 9: pd obr
+            12, // 10: gmp pat
+            12, // 11: gmp obr
+            13, // 12: rt
+            12, // 13: iv pat
+            12, // 14: iv obr
+            12, // 15: gps
+            14, // 16: patronal
+            13, // 17: obrera
+            15, // 18: subtotal
+        ];
+
+        for (col_idx, width) in col_widths.iter().enumerate() {
+            ws_final.set_column_width(col_idx as u16, *width).map_err(|e| e.to_string())?;
+        }
+
+        // Formatos de "Reporte Final"
+        let top_title_fmt = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_align(FormatAlign::Center)
+            .set_font_color(Color::RGB(0x000000));
+
+        let meta_lbl_fmt = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_align(FormatAlign::Right)
+            .set_font_color(Color::RGB(0x000000));
+
+        let meta_val_fmt = Format::new()
+            .set_font_size(10)
+            .set_align(FormatAlign::Left)
+            .set_font_color(Color::RGB(0x000000));
+
+        let table_hdr_fmt = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_background_color(Color::RGB(0x000000))
+            .set_font_color(Color::RGB(0xFFFFFF))
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x404040));
+
+        let row_txt_center = Format::new()
+            .set_font_size(10)
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xD1D5DB));
+
+        let row_txt_left = Format::new()
+            .set_font_size(10)
+            .set_align(FormatAlign::Left)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xD1D5DB));
+
+        let row_int_center = Format::new()
+            .set_font_size(10)
+            .set_num_format("#,##0")
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xD1D5DB));
+
+        let row_curr_right = Format::new()
+            .set_font_size(10)
+            .set_num_format("$#,##0.00;($#,##0.00);\"$ -\"")
+            .set_align(FormatAlign::Right)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xD1D5DB));
+
+        let month_tot_lbl = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_align(FormatAlign::Left)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border_top(FormatBorder::Thin)
+            .set_border_bottom(FormatBorder::Thin);
+
+        let month_tot_center = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border_top(FormatBorder::Thin)
+            .set_border_bottom(FormatBorder::Thin);
+
+        let month_tot_int = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_num_format("#,##0")
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border_top(FormatBorder::Thin)
+            .set_border_bottom(FormatBorder::Thin);
+
+        let month_tot_curr = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_num_format("$#,##0.00;($#,##0.00);\"$ -\"")
+            .set_align(FormatAlign::Right)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border_top(FormatBorder::Thin)
+            .set_border_bottom(FormatBorder::Thin);
+
+        let grand_tot_lbl = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_background_color(Color::RGB(0x000000))
+            .set_font_color(Color::RGB(0xFFFFFF))
+            .set_align(FormatAlign::Left)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x404040));
+
+        let grand_tot_int = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_background_color(Color::RGB(0x000000))
+            .set_font_color(Color::RGB(0xFFFFFF))
+            .set_num_format("#,##0")
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x404040));
+
+        let grand_tot_curr = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_background_color(Color::RGB(0x000000))
+            .set_font_color(Color::RGB(0xFFFFFF))
+            .set_num_format("$#,##0.00;($#,##0.00);\"$ -\"")
+            .set_align(FormatAlign::Right)
+            .set_align(FormatAlign::VerticalCenter)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x404040));
+
+        let sig_top_border = Format::new()
+            .set_border_top(FormatBorder::Thin)
+            .set_border_top_color(Color::RGB(0x000000));
+
+        let sig_text_fmt = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter);
+
+        let kpi_pct_fmt = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter);
+
+        let kpi_yellow_box = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_background_color(Color::RGB(0xFFFF00))
+            .set_font_color(Color::RGB(0x000000))
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x000000))
+            .set_num_format("$#,##0.00;($#,##0.00);\"$ -\"")
+            .set_align(FormatAlign::Center)
+            .set_align(FormatAlign::VerticalCenter);
+
+        // Encabezado Superior (Filas 0 a 3)
+        ws_final.merge_range(0, 0, 0, 18, "INSTITUTO MEXICANO DEL SEGURO SOCIAL", &top_title_fmt).map_err(|e| e.to_string())?;
+        ws_final.merge_range(1, 0, 1, 18, &format!("ÓRGANO DE OPERACIÓN ADMINISTRATIVA DESCONCENTRADA: {}", delegacion.to_uppercase()), &top_title_fmt).map_err(|e| e.to_string())?;
+        ws_final.merge_range(2, 0, 2, 18, &format!("SUBDELEGACIÓN: {}", subdelegacion.to_uppercase()), &top_title_fmt).map_err(|e| e.to_string())?;
+        ws_final.merge_range(3, 0, 3, 18, "LIQUIDACIONES", &top_title_fmt).map_err(|e| e.to_string())?;
+
+        // Metadatos (Filas 4 a 9)
+        let meta_rows = [
+            ("NOMBRE DE LA EMPRESA", emp_nombre),
+            ("REGISTRO PATRONAL", rp_reg),
+            ("RFC", rfc_val),
+            ("PERIODO DE OBRA", per_obra),
+            ("NOMBRE DEL PATRON O REPRESENTANTE LEGAL", rep_legal),
+            ("FOLIO CORRECCION", fol_rev),
+        ];
+
+        for (idx, (label, val)) in meta_rows.iter().enumerate() {
+            let r = 4 + idx as u32;
+            ws_final.merge_range(r, 2, r, 8, *label, &meta_lbl_fmt).map_err(|e| e.to_string())?;
+            ws_final.merge_range(r, 9, r, 16, *val, &meta_val_fmt).map_err(|e| e.to_string())?;
+        }
+
+        // Fila 11 (Índice 11 = fila 12 en Excel): Encabezados de Tabla
+        let table_header_row = 11;
+        let final_headers = [
+            "nss", "nombre", "mes", "dias", "sdi",
+            "cf", "exc pat", "exc obr", "pd pat", "pd obr",
+            "gmp pat", "gmp obr", "rt", "iv pat", "iv obr",
+            "gps", "patronal", "obrera", "subtotal"
+        ];
+
+        for (c, h) in final_headers.iter().enumerate() {
+            ws_final.write_string_with_format(table_header_row, c as u16, *h, &table_hdr_fmt).map_err(|e| e.to_string())?;
+        }
+
+        // Agrupar filas cronológicamente
+        let mut sorted_groups: Vec<((i32, u32), String, Vec<&ReporteLiquidacionRowDb>)> = Vec::new();
+        for row in rows {
+            let (m, y) = parse_month_and_year(&row.mes_periodo, row.anio_periodo, &row.periodo_str)
+                .unwrap_or((0, 0));
+            let p_key = if !row.periodo_str.is_empty() {
+                row.periodo_str.clone()
+            } else {
+                format!("{:02}/{}", m, y)
+            };
+
+            if let Some(g) = sorted_groups.iter_mut().find(|(my, pk, _)| *my == (y, m) || pk == &p_key) {
+                g.2.push(row);
+            } else {
+                sorted_groups.push(((y, m), p_key, vec![row]));
+            }
+        }
+        sorted_groups.sort_by_key(|(my, _, _)| *my);
+
+        let mut curr_rf = table_header_row + 1;
+        let mut grand_dias: f64 = 0.0;
+        let mut grand_sdi: f64 = 0.0;
+        let mut grand_cf: f64 = 0.0;
+        let mut grand_exc_pat: f64 = 0.0;
+        let mut grand_exc_obr: f64 = 0.0;
+        let mut grand_pd_pat: f64 = 0.0;
+        let mut grand_pd_obr: f64 = 0.0;
+        let mut grand_gmp_pat: f64 = 0.0;
+        let mut grand_gmp_obr: f64 = 0.0;
+        let mut grand_rt: f64 = 0.0;
+        let mut grand_iv_pat: f64 = 0.0;
+        let mut grand_iv_obr: f64 = 0.0;
+        let mut grand_gps: f64 = 0.0;
+        let mut grand_patronal: f64 = 0.0;
+        let mut grand_obrera: f64 = 0.0;
+        let mut grand_subtotal: f64 = 0.0;
+
+        for ((_y, _m), periodo_key, mut group_rows) in sorted_groups {
+            // Ordenar por nombre de trabajador ascendente
+            group_rows.sort_by(|a, b| {
+                a.nombre_trabajador.to_lowercase()
+                    .cmp(&b.nombre_trabajador.to_lowercase())
+                    .then_with(|| a.nss.cmp(&b.nss))
+            });
+
+            let mut m_dias: f64 = 0.0;
+            let mut m_sdi: f64 = 0.0;
+            let mut m_cf: f64 = 0.0;
+            let mut m_exc_pat: f64 = 0.0;
+            let mut m_exc_obr: f64 = 0.0;
+            let mut m_pd_pat: f64 = 0.0;
+            let mut m_pd_obr: f64 = 0.0;
+            let mut m_gmp_pat: f64 = 0.0;
+            let mut m_gmp_obr: f64 = 0.0;
+            let mut m_rt: f64 = 0.0;
+            let mut m_iv_pat: f64 = 0.0;
+            let mut m_iv_obr: f64 = 0.0;
+            let mut m_gps: f64 = 0.0;
+            let mut m_patronal: f64 = 0.0;
+            let mut m_obrera: f64 = 0.0;
+            let mut m_subtotal: f64 = 0.0;
+
+            let sample_first = group_rows.first().copied();
+
+            for row in group_rows {
+                let nss_formatted = format_nss_styled(&row.nss);
+                let nombre_lower = row.nombre_trabajador.to_lowercase();
+                let mes_col = format_mes_col(&row.mes_periodo, row.anio_periodo, &row.periodo_str);
+
+                ws_final.write_string_with_format(curr_rf, 0, &nss_formatted, &row_txt_center).map_err(|e| e.to_string())?;
+                ws_final.write_string_with_format(curr_rf, 1, &nombre_lower, &row_txt_left).map_err(|e| e.to_string())?;
+                ws_final.write_string_with_format(curr_rf, 2, &mes_col, &row_txt_center).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 3, row.dias_obra as f64, &row_int_center).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 4, row.sdi, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 5, row.cf, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 6, row.exc_pat, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 7, row.exc_obr, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 8, row.pd_pat, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 9, row.pd_obr, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 10, row.gmp_pat, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 11, row.gmp_obr, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 12, row.rt, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 13, row.iv_pat, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 14, row.iv_obr, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 15, row.gps, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 16, row.patronal, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 17, row.obrera, &row_curr_right).map_err(|e| e.to_string())?;
+                ws_final.write_number_with_format(curr_rf, 18, row.subtotal, &row_curr_right).map_err(|e| e.to_string())?;
+
+                m_dias += row.dias_obra as f64;
+                m_sdi += row.sdi;
+                m_cf += row.cf;
+                m_exc_pat += row.exc_pat;
+                m_exc_obr += row.exc_obr;
+                m_pd_pat += row.pd_pat;
+                m_pd_obr += row.pd_obr;
+                m_gmp_pat += row.gmp_pat;
+                m_gmp_obr += row.gmp_obr;
+                m_rt += row.rt;
+                m_iv_pat += row.iv_pat;
+                m_iv_obr += row.iv_obr;
+                m_gps += row.gps;
+                m_patronal += row.patronal;
+                m_obrera += row.obrera;
+                m_subtotal += row.subtotal;
+
+                curr_rf += 1;
+            }
+
+            // Fila Total por Mes
+            let (tot_label, tot_mes_col) = format_month_total_label(&periodo_key, sample_first);
+            ws_final.write_string_with_format(curr_rf, 0, &tot_label, &month_tot_lbl).map_err(|e| e.to_string())?;
+            ws_final.write_string_with_format(curr_rf, 1, "", &month_tot_lbl).map_err(|e| e.to_string())?;
+            ws_final.write_string_with_format(curr_rf, 2, &tot_mes_col, &month_tot_center).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 3, m_dias, &month_tot_int).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 4, m_sdi, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 5, m_cf, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 6, m_exc_pat, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 7, m_exc_obr, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 8, m_pd_pat, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 9, m_pd_obr, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 10, m_gmp_pat, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 11, m_gmp_obr, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 12, m_rt, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 13, m_iv_pat, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 14, m_iv_obr, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 15, m_gps, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 16, m_patronal, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 17, m_obrera, &month_tot_curr).map_err(|e| e.to_string())?;
+            ws_final.write_number_with_format(curr_rf, 18, m_subtotal, &month_tot_curr).map_err(|e| e.to_string())?;
+
+            grand_dias += m_dias;
+            grand_sdi += m_sdi;
+            grand_cf += m_cf;
+            grand_exc_pat += m_exc_pat;
+            grand_exc_obr += m_exc_obr;
+            grand_pd_pat += m_pd_pat;
+            grand_pd_obr += m_pd_obr;
+            grand_gmp_pat += m_gmp_pat;
+            grand_gmp_obr += m_gmp_obr;
+            grand_rt += m_rt;
+            grand_iv_pat += m_iv_pat;
+            grand_iv_obr += m_iv_obr;
+            grand_gps += m_gps;
+            grand_patronal += m_patronal;
+            grand_obrera += m_obrera;
+            grand_subtotal += m_subtotal;
+
+            curr_rf += 1;
+        }
+
+        // Fila RESUMEN / GRAND TOTAL
+        let grand_total_row = curr_rf;
+        ws_final.write_string_with_format(grand_total_row, 0, "RESUMEN / GRAND TOTAL", &grand_tot_lbl).map_err(|e| e.to_string())?;
+        ws_final.write_string_with_format(grand_total_row, 1, "", &grand_tot_lbl).map_err(|e| e.to_string())?;
+        ws_final.write_string_with_format(grand_total_row, 2, "", &grand_tot_lbl).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 3, grand_dias, &grand_tot_int).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 4, grand_sdi, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 5, grand_cf, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 6, grand_exc_pat, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 7, grand_exc_obr, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 8, grand_pd_pat, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 9, grand_pd_obr, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 10, grand_gmp_pat, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 11, grand_gmp_obr, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 12, grand_rt, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 13, grand_iv_pat, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 14, grand_iv_obr, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 15, grand_gps, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 16, grand_patronal, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 17, grand_obrera, &grand_tot_curr).map_err(|e| e.to_string())?;
+        ws_final.write_number_with_format(grand_total_row, 18, grand_subtotal, &grand_tot_curr).map_err(|e| e.to_string())?;
+
+        // Activar autofiltro en la tabla
+        let _ = ws_final.autofilter(table_header_row, 0, grand_total_row, 18);
+
+        // Bloque de Firma y Valor Guarderías (1%)
+        let sig_r = grand_total_row + 5;
+        // Línea de firma en columna 1 (nombre)
+        ws_final.write_string_with_format(sig_r - 1, 1, "", &sig_top_border).map_err(|e| e.to_string())?;
+
+        let rep_title = format!("L.C. {}", rep_legal.to_uppercase());
+        let apod_title = format!("APODERADO LEGAL DE LA EMPRESA {}", emp_nombre.to_uppercase());
+        ws_final.write_string_with_format(sig_r, 1, &rep_title, &sig_text_fmt).map_err(|e| e.to_string())?;
+        ws_final.write_string_with_format(sig_r + 1, 1, &apod_title, &sig_text_fmt).map_err(|e| e.to_string())?;
+
+        // Indicador 1% y Total Guarderías
+        ws_final.write_string_with_format(sig_r, 15, "1%", &kpi_pct_fmt).map_err(|e| e.to_string())?;
+        let valor_guarderias_1pct = grand_gps / 0.01;
+        ws_final.write_number_with_format(sig_r + 1, 15, valor_guarderias_1pct, &kpi_yellow_box).map_err(|e| e.to_string())?;
+    }
+
+    // =========================================================================
+    // SHEET 1: Prorrateo por Obra
+    // =========================================================================
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("Prorrateo por Obra").map_err(|e| e.to_string())?;
 
@@ -2621,10 +3116,357 @@ pub fn calculate_obra_days_in_month(
     }
 }
 
-/// Calcula el número máximo de días de obra que un empleado puede tener en un periodo específico:
-/// 1. Días efectivos del trabajador = Cédula - Lic - Inc - Aus.
-/// 2. Días activos de la obra en el mes (según fecha inicio y fecha fin de la obra).
-/// El máximo para ese empleado es `min(días efectivos, días activos de la obra en el mes)`.
+/// Extrae las fechas de movimiento de un empleado en un mes específico (Baja, Alta/Reingreso).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MovementKind {
+    Baja,
+    Alta,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmployeeMovement {
+    pub kind: MovementKind,
+    pub fecha: NaiveDate,
+}
+
+/// Extrae todos los movimientos cronológicos de un empleado en un mes específico (Alta, Baja, Reingreso, etc.).
+/// Detecta claves como "baja", "alta", "reing" en el registro actual y en registros hermanos en el mismo mes y año.
+pub fn extract_all_employee_movements(
+    id_empleado: Uuid,
+    mes_periodo: &str,
+    anio_periodo: i16,
+    row_clave: &str,
+    row_fecha: Option<NaiveDate>,
+    all_rows: &[ReporteLiquidacionRowDb],
+) -> Vec<EmployeeMovement> {
+    let mut movements = Vec::new();
+
+    let is_baja = |c: &str| c.trim().to_lowercase().contains("baja");
+    let is_alta_reing = |c: &str| {
+        let s = c.trim().to_lowercase();
+        s.contains("alta") || s.contains("reing")
+    };
+
+    if let Some(f) = row_fecha {
+        if is_baja(row_clave) {
+            movements.push(EmployeeMovement { kind: MovementKind::Baja, fecha: f });
+        } else if is_alta_reing(row_clave) {
+            movements.push(EmployeeMovement { kind: MovementKind::Alta, fecha: f });
+        }
+    }
+
+    for other in all_rows {
+        if other.id_empleado == id_empleado
+            && other.anio_periodo == anio_periodo
+            && other.mes_periodo.trim().eq_ignore_ascii_case(mes_periodo.trim())
+        {
+            if let Some(f) = other.fecha {
+                if is_baja(&other.clave) {
+                    movements.push(EmployeeMovement { kind: MovementKind::Baja, fecha: f });
+                } else if is_alta_reing(&other.clave) {
+                    movements.push(EmployeeMovement { kind: MovementKind::Alta, fecha: f });
+                }
+            }
+        }
+    }
+
+    movements.sort_by(|a, b| {
+        a.fecha.cmp(&b.fecha).then_with(|| a.kind.cmp(&b.kind))
+    });
+    movements.dedup();
+    movements
+}
+
+/// Extrae las fechas de movimiento de un empleado en un mes específico (Baja, Alta/Reingreso).
+/// Wrapper de compatibilidad que retorna (primera_baja, ultima_alta).
+pub fn extract_employee_movements(
+    id_empleado: Uuid,
+    mes_periodo: &str,
+    anio_periodo: i16,
+    row_clave: &str,
+    row_fecha: Option<NaiveDate>,
+    all_rows: &[ReporteLiquidacionRowDb],
+) -> (Option<NaiveDate>, Option<NaiveDate>) {
+    let movs = extract_all_employee_movements(id_empleado, mes_periodo, anio_periodo, row_clave, row_fecha, all_rows);
+    let mut baja_fecha: Option<NaiveDate> = None;
+    let mut alta_fecha: Option<NaiveDate> = None;
+    for m in movs {
+        match m.kind {
+            MovementKind::Baja => {
+                baja_fecha = match baja_fecha {
+                    Some(cur) => Some(cur.min(m.fecha)),
+                    None => Some(m.fecha),
+                };
+            }
+            MovementKind::Alta => {
+                alta_fecha = match alta_fecha {
+                    Some(cur) => Some(cur.max(m.fecha)),
+                    None => Some(m.fecha),
+                };
+            }
+        }
+    }
+    (baja_fecha, alta_fecha)
+}
+
+/// Construye un mapa eficiente con todos los movimientos ordenados por (id_empleado, mes_periodo_normalizado, anio_periodo).
+pub fn build_all_employee_movements_map(
+    all_rows: &[ReporteLiquidacionRowDb],
+) -> HashMap<(Uuid, String, i16), Vec<EmployeeMovement>> {
+    let mut map: HashMap<(Uuid, String, i16), Vec<EmployeeMovement>> = HashMap::new();
+    let is_baja = |c: &str| c.trim().to_lowercase().contains("baja");
+    let is_alta_reing = |c: &str| {
+        let s = c.trim().to_lowercase();
+        s.contains("alta") || s.contains("reing")
+    };
+
+    for r in all_rows {
+        if let Some(f) = r.fecha {
+            let key = (r.id_empleado, r.mes_periodo.trim().to_uppercase(), r.anio_periodo);
+            let entry = map.entry(key).or_default();
+            if is_baja(&r.clave) {
+                entry.push(EmployeeMovement { kind: MovementKind::Baja, fecha: f });
+            } else if is_alta_reing(&r.clave) {
+                entry.push(EmployeeMovement { kind: MovementKind::Alta, fecha: f });
+            }
+        }
+    }
+
+    for entry in map.values_mut() {
+        entry.sort_by(|a, b| {
+            a.fecha.cmp(&b.fecha).then_with(|| a.kind.cmp(&b.kind))
+        });
+        entry.dedup();
+    }
+
+    map
+}
+
+/// Construye un mapa con los movimientos (Baja, Alta/Reingreso)
+/// indexado por (id_empleado, mes_periodo_normalizado, anio_periodo).
+pub fn build_employee_movements_map(
+    all_rows: &[ReporteLiquidacionRowDb],
+) -> HashMap<(Uuid, String, i16), (Option<NaiveDate>, Option<NaiveDate>)> {
+    let full_map = build_all_employee_movements_map(all_rows);
+    let mut map = HashMap::new();
+    for (k, movs) in full_map {
+        let mut baja: Option<NaiveDate> = None;
+        let mut alta: Option<NaiveDate> = None;
+        for m in movs {
+            match m.kind {
+                MovementKind::Baja => {
+                    baja = match baja {
+                        Some(cur) => Some(cur.min(m.fecha)),
+                        None => Some(m.fecha),
+                    };
+                }
+                MovementKind::Alta => {
+                    alta = match alta {
+                        Some(cur) => Some(cur.max(m.fecha)),
+                        None => Some(m.fecha),
+                    };
+                }
+            }
+        }
+        map.insert(k, (baja, alta));
+    }
+    map
+}
+
+/// Calcula los intervalos activos [inicio, fin] de un empleado en un mes según todos sus movimientos.
+/// Maneja 1 o múltiples movimientos continuos o alternados (Alta -> Baja -> Reing -> Baja...).
+pub fn calculate_employee_active_intervals(
+    month_start: NaiveDate,
+    month_end: NaiveDate,
+    movements: &[EmployeeMovement],
+) -> Vec<(NaiveDate, NaiveDate)> {
+    if movements.is_empty() {
+        return vec![(month_start, month_end)];
+    }
+
+    let mut intervals = Vec::new();
+    // Si el primer movimiento registrado en el mes es Baja, el trabajador ya estaba activo desde el inicio del mes.
+    // Si es Alta o Reingreso, el trabajador ingresó en esa fecha.
+    let mut current_start = if movements[0].kind == MovementKind::Baja {
+        Some(month_start)
+    } else {
+        None
+    };
+
+    for m in movements {
+        match m.kind {
+            MovementKind::Baja => {
+                if let Some(start) = current_start {
+                    let end = m.fecha.min(month_end);
+                    if end >= start {
+                        intervals.push((start, end));
+                    }
+                    current_start = None;
+                }
+            }
+            MovementKind::Alta => {
+                if current_start.is_none() {
+                    let start = m.fecha.max(month_start);
+                    if start <= month_end {
+                        current_start = Some(start);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(start) = current_start {
+        if month_end >= start {
+            intervals.push((start, month_end));
+        }
+    }
+
+    intervals
+}
+
+/// Valida si una obra puede asignarse a un empleado en un mes específico considerando todos sus movimientos.
+pub fn validate_obra_assignment_for_employee_movements(
+    obra_fecha_inicio: Option<NaiveDate>,
+    obra_fecha_fin: Option<NaiveDate>,
+    movements: &[EmployeeMovement],
+    mes_str: &str,
+    anio: i16,
+    periodo_str: &str,
+) -> Result<(), String> {
+    let (m, y) = match parse_month_and_year(mes_str, anio, periodo_str) {
+        Some((m, y)) => (m, y),
+        None => return Ok(()),
+    };
+
+    let (month_start, month_end, _) = match get_month_date_range(m, y as i32) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+
+    let active_intervals = calculate_employee_active_intervals(month_start, month_end, movements);
+    if active_intervals.is_empty() {
+        return Err("El trabajador no registra actividad en este mes.".to_string());
+    }
+
+    let has_obra_restriction = obra_fecha_inicio.is_some() || obra_fecha_fin.is_some();
+    if has_obra_restriction {
+        let obra_start = obra_fecha_inicio.unwrap_or(month_start).max(month_start);
+        let obra_end = obra_fecha_fin.unwrap_or(month_end).min(month_end);
+
+        if obra_start > month_end || obra_end < month_start || obra_start > obra_end {
+            return Err("Las fechas de la obra no tienen vigencia en este mes.".to_string());
+        }
+
+        let mut overlap_days = 0i16;
+        for (act_start, act_end) in &active_intervals {
+            let s = (*act_start).max(obra_start);
+            let e = (*act_end).min(obra_end);
+            if s <= e {
+                overlap_days += ((e - s).num_days() as i16 + 1).max(0);
+            }
+        }
+
+        if overlap_days == 0 {
+            return Err("Las fechas de la obra no coinciden con los periodos activos del trabajador en este mes.".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+/// Valida si una obra puede asignarse a un empleado en un mes específico (wrapper de compatibilidad).
+pub fn validate_obra_assignment_for_employee(
+    obra_fecha_inicio: Option<NaiveDate>,
+    obra_fecha_fin: Option<NaiveDate>,
+    baja_fecha: Option<NaiveDate>,
+    alta_fecha: Option<NaiveDate>,
+    mes_str: &str,
+    anio: i16,
+    periodo_str: &str,
+) -> Result<(), String> {
+    let mut movs = Vec::new();
+    if let Some(fb) = baja_fecha {
+        movs.push(EmployeeMovement { kind: MovementKind::Baja, fecha: fb });
+    }
+    if let Some(fa) = alta_fecha {
+        movs.push(EmployeeMovement { kind: MovementKind::Alta, fecha: fa });
+    }
+    movs.sort_by(|a, b| a.fecha.cmp(&b.fecha).then_with(|| a.kind.cmp(&b.kind)));
+    validate_obra_assignment_for_employee_movements(
+        obra_fecha_inicio,
+        obra_fecha_fin,
+        &movs,
+        mes_str,
+        anio,
+        periodo_str,
+    )
+}
+
+/// Calcula el número máximo de días de obra que un empleado puede tener en un periodo específico considerando todos sus movimientos.
+pub fn calculate_max_dias_obra_for_employee_movements(
+    dias_cedula: i16,
+    lic: f64,
+    inc: f64,
+    aus: f64,
+    mes_str: &str,
+    anio: i16,
+    periodo_str: &str,
+    obra_fecha_inicio: Option<NaiveDate>,
+    obra_fecha_fin: Option<NaiveDate>,
+    movements: &[EmployeeMovement],
+) -> (i16, Option<i16>) {
+    let dias_efectivos = (dias_cedula as f64 - lic - inc - aus).round().max(0.0) as i16;
+
+    let (month, year) = match parse_month_and_year(mes_str, anio, periodo_str) {
+        Some((m, y)) => (m, y),
+        None => return (dias_efectivos, None),
+    };
+
+    let (month_start, month_end, _) = match get_month_date_range(month, year as i32) {
+        Some(r) => r,
+        None => return (dias_efectivos, None),
+    };
+
+    let active_intervals = calculate_employee_active_intervals(month_start, month_end, movements);
+    if active_intervals.is_empty() {
+        return (0, Some(0));
+    }
+
+    let has_obra_restriction = obra_fecha_inicio.is_some() || obra_fecha_fin.is_some();
+    let has_emp_restriction = !movements.is_empty();
+
+    let obra_start = obra_fecha_inicio.unwrap_or(month_start).max(month_start);
+    let obra_end = obra_fecha_fin.unwrap_or(month_end).min(month_end);
+
+    if has_obra_restriction && (obra_start > month_end || obra_end < month_start || obra_start > obra_end) {
+        return (0, Some(0));
+    }
+
+    let mut overlap_days = 0i16;
+    for (act_start, act_end) in &active_intervals {
+        let s = (*act_start).max(obra_start);
+        let e = (*act_end).min(obra_end);
+        if s <= e {
+            overlap_days += ((e - s).num_days() as i16 + 1).max(0);
+        }
+    }
+
+    let dias_obra_en_mes = if has_obra_restriction || has_emp_restriction {
+        Some(overlap_days)
+    } else {
+        None
+    };
+
+    let max_dias = if let Some(d_obra) = dias_obra_en_mes {
+        dias_efectivos.min(d_obra)
+    } else {
+        dias_efectivos
+    };
+
+    (max_dias, dias_obra_en_mes)
+}
+
+/// Calcula el número máximo de días de obra que un empleado puede tener en un periodo específico (wrapper de compatibilidad):
 /// Retorna `(max_dias, dias_obra_activos_en_el_mes)`.
 pub fn calculate_max_dias_obra_for_employee(
     dias_cedula: i16,
@@ -2636,25 +3478,93 @@ pub fn calculate_max_dias_obra_for_employee(
     periodo_str: &str,
     obra_fecha_inicio: Option<NaiveDate>,
     obra_fecha_fin: Option<NaiveDate>,
+    baja_fecha: Option<NaiveDate>,
+    alta_fecha: Option<NaiveDate>,
 ) -> (i16, Option<i16>) {
-    let dias_efectivos = (dias_cedula as f64 - lic - inc - aus).round().max(0.0) as i16;
-
-    let dias_obra_en_mes = parse_month_and_year(mes_str, anio, periodo_str)
-        .and_then(|(m, y)| calculate_obra_days_in_month(m, y, obra_fecha_inicio, obra_fecha_fin));
-
-    let max_dias = if let Some(d_obra) = dias_obra_en_mes {
-        dias_efectivos.min(d_obra)
-    } else {
-        dias_efectivos
-    };
-
-    (max_dias, dias_obra_en_mes)
+    let mut movs = Vec::new();
+    if let Some(fb) = baja_fecha {
+        movs.push(EmployeeMovement { kind: MovementKind::Baja, fecha: fb });
+    }
+    if let Some(fa) = alta_fecha {
+        movs.push(EmployeeMovement { kind: MovementKind::Alta, fecha: fa });
+    }
+    movs.sort_by(|a, b| a.fecha.cmp(&b.fecha).then_with(|| a.kind.cmp(&b.kind)));
+    calculate_max_dias_obra_for_employee_movements(
+        dias_cedula,
+        lic,
+        inc,
+        aus,
+        mes_str,
+        anio,
+        periodo_str,
+        obra_fecha_inicio,
+        obra_fecha_fin,
+        &movs,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    fn create_mock_row(emp_id: Uuid, nombre: &str, oid: Option<Uuid>, obra_num: &str, is_user: bool, mes: &str, anio: i16, dias: i16, sub: f64) -> ReporteLiquidacionRowDb {
+        ReporteLiquidacionRowDb {
+            id_reporte_liq: Uuid::now_v7(),
+            id_parent_reporte_liq: Uuid::now_v7(),
+            id_liquidacion: Uuid::now_v7(),
+            id_empleado: emp_id,
+            nombre_trabajador: nombre.to_string(),
+            rfc: "XAXX010101000".to_string(),
+            curp: "XAXX010101HDF00".to_string(),
+            nss: "12345678901".to_string(),
+            registro_patronal: "Y5410204108".to_string(),
+            mes_periodo: mes.to_string(),
+            anio_periodo: anio,
+            periodo_str: format!("{}/{}", mes, anio),
+            dias_cedula: dias,
+            id_registro_obra: oid,
+            obra_numero: obra_num.to_string(),
+            obra_label: if oid.is_some() { obra_num.to_string() } else { "⚠️ Sin Asignar".to_string() },
+            dias_obra: dias,
+            obra_creado_usuario: is_user,
+            clave: "".to_string(),
+            fecha: None,
+            fecha_str: "-".to_string(),
+            sdi: 350.0,
+            lic: 0.0,
+            inc: 0.0,
+            aus: 0.0,
+            cf: sub * 0.4,
+            exc_pat: 0.0,
+            exc_obr: 0.0,
+            pd_pat: 0.0,
+            pd_obr: 0.0,
+            gmp_pat: 0.0,
+            gmp_obr: 0.0,
+            rt: 0.0,
+            iv_pat: 0.0,
+            iv_obr: 0.0,
+            gps: sub * 0.05,
+            patronal: sub * 0.8,
+            obrera: sub * 0.2,
+            subtotal: sub,
+            cf_orig: sub * 0.4,
+            exc_pat_orig: 0.0,
+            exc_obr_orig: 0.0,
+            pd_pat_orig: 0.0,
+            pd_obr_orig: 0.0,
+            gmp_pat_orig: 0.0,
+            gmp_obr_orig: 0.0,
+            rt_orig: 0.0,
+            iv_pat_orig: 0.0,
+            iv_obr_orig: 0.0,
+            gps_orig: sub * 0.05,
+            patronal_orig: sub * 0.8,
+            obrera_orig: sub * 0.2,
+            subtotal_orig: sub,
+        }
+    }
 
     #[test]
     fn test_export_reporte_liquidaciones_excel_multi_sheet() {
@@ -2670,75 +3580,17 @@ mod tests {
         valid_obras.insert(obra_user_1);
         valid_obras.insert(obra_user_2);
 
-        let make_row = |emp_id: Uuid, nombre: &str, oid: Option<Uuid>, obra_num: &str, is_user: bool, mes: &str, anio: i16, dias: i16, sub: f64| -> ReporteLiquidacionRowDb {
-            ReporteLiquidacionRowDb {
-                id_reporte_liq: Uuid::now_v7(),
-                id_parent_reporte_liq: Uuid::now_v7(),
-                id_liquidacion: Uuid::now_v7(),
-                id_empleado: emp_id,
-                nombre_trabajador: nombre.to_string(),
-                rfc: "XAXX010101000".to_string(),
-                curp: "XAXX010101HDF00".to_string(),
-                nss: "12345678901".to_string(),
-                registro_patronal: "Y5410204108".to_string(),
-                mes_periodo: mes.to_string(),
-                anio_periodo: anio,
-                periodo_str: format!("{}/{}", mes, anio),
-                dias_cedula: dias,
-                id_registro_obra: oid,
-                obra_numero: obra_num.to_string(),
-                obra_label: if oid.is_some() { obra_num.to_string() } else { "⚠️ Sin Asignar".to_string() },
-                dias_obra: dias,
-                obra_creado_usuario: is_user,
-                clave: "".to_string(),
-                fecha: None,
-                fecha_str: "-".to_string(),
-                sdi: 350.0,
-                lic: 0.0,
-                inc: 0.0,
-                aus: 0.0,
-                cf: sub * 0.4,
-                exc_pat: 0.0,
-                exc_obr: 0.0,
-                pd_pat: 0.0,
-                pd_obr: 0.0,
-                gmp_pat: 0.0,
-                gmp_obr: 0.0,
-                rt: 0.0,
-                iv_pat: 0.0,
-                iv_obr: 0.0,
-                gps: sub * 0.05,
-                patronal: sub * 0.8,
-                obrera: sub * 0.2,
-                subtotal: sub,
-                cf_orig: sub * 0.4,
-                exc_pat_orig: 0.0,
-                exc_obr_orig: 0.0,
-                pd_pat_orig: 0.0,
-                pd_obr_orig: 0.0,
-                gmp_pat_orig: 0.0,
-                gmp_obr_orig: 0.0,
-                rt_orig: 0.0,
-                iv_pat_orig: 0.0,
-                iv_obr_orig: 0.0,
-                gps_orig: sub * 0.05,
-                patronal_orig: sub * 0.8,
-                obrera_orig: sub * 0.2,
-                subtotal_orig: sub,
-            }
-        };
-
         let rows = vec![
             // Emp 1 en Obra 1 (Usuario) - Mes 1
-            make_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_1), "OBRA-USER-01", true, "ENERO", 2024, 30, 1000.0),
+            create_mock_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_1), "OBRA-USER-01", true, "ENERO", 2024, 30, 1000.0),
             // Emp 1 en Obra 1 (Usuario) - Mes 2
-            make_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_1), "OBRA-USER-01", true, "FEBRERO", 2024, 28, 900.0),
+            create_mock_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_1), "OBRA-USER-01", true, "FEBRERO", 2024, 28, 900.0),
             // Emp 1 en Obra 2 (Usuario) - Mes 2
-            make_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_2), "OBRA-USER-02", true, "FEBRERO", 2024, 15, 500.0),
+            create_mock_row(emp_1, "PUGA LOPEZ JOSE MARIA", Some(obra_user_2), "OBRA-USER-02", true, "FEBRERO", 2024, 15, 500.0),
             // Emp 2 en Obra Cédula (NO Usuario) - debe ser omitido en Sheets 2 y 3
-            make_row(emp_2, "LOPEZ PEREZ JUAN", Some(obra_cedula), "OBRA-CEDULA-AUTO", false, "ENERO", 2024, 30, 800.0),
+            create_mock_row(emp_2, "LOPEZ PEREZ JUAN", Some(obra_cedula), "OBRA-CEDULA-AUTO", false, "ENERO", 2024, 30, 800.0),
             // Emp 3 Sin Obra - debe ser omitido en Sheets 2 y 3
-            make_row(emp_3, "GONZALEZ HERNANDEZ PEDRO", None, "", false, "ENERO", 2024, 30, 700.0),
+            create_mock_row(emp_3, "GONZALEZ HERNANDEZ PEDRO", None, "", false, "ENERO", 2024, 30, 700.0),
         ];
 
         let obras_options = vec![
@@ -2782,6 +3634,7 @@ mod tests {
             "EMPRESA PRUEBA S.A. DE C.V.",
             "Y54-10204-10-8",
             "REVISION 2024-01",
+            None,
         );
 
         assert!(res.is_ok(), "El reporte en Excel debe generarse correctamente: {:?}", res.err());
@@ -2790,6 +3643,269 @@ mod tests {
         assert!(metadata.len() > 1000, "El archivo Excel generado debe contener datos");
 
         let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn test_compute_guarderias_kpis_solo_obras_creado_usuario() {
+        let obra_user = Uuid::now_v7();
+        let obra_cedula_con_monto = Uuid::now_v7();
+        let obra_cedula_sin_monto = Uuid::now_v7();
+
+        let emp_1 = Uuid::now_v7();
+        let emp_2 = Uuid::now_v7();
+
+        let rows = vec![
+            create_mock_row(emp_1, "EMPLEADO 1", Some(obra_user), "OBRA-USER", true, "ENERO", 2024, 30, 500.0),
+            create_mock_row(emp_2, "EMPLEADO 2", Some(obra_cedula_con_monto), "OBRA-CEDULA-MONTO", false, "ENERO", 2024, 30, 400.0),
+            create_mock_row(emp_2, "EMPLEADO 2", Some(obra_cedula_sin_monto), "OBRA-CEDULA-CERO", false, "ENERO", 2024, 30, 300.0),
+        ];
+
+        let obras_options = vec![
+            ObraOptionDb {
+                id: obra_user,
+                numero: "OBRA-USER".to_string(),
+                tipo_obra: "EDIFICACION".to_string(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "OBRA-USER".to_string(),
+                creado_usuario: true,
+                monto: 1_000_000.0,
+            },
+            ObraOptionDb {
+                id: obra_cedula_con_monto,
+                numero: "OBRA-CEDULA-MONTO".to_string(),
+                tipo_obra: "CÉDULA".to_string(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "OBRA-CEDULA-MONTO".to_string(),
+                creado_usuario: false,
+                monto: 500_000.0, // Tiene monto > 0 pero NO fue creada por el usuario
+            },
+            ObraOptionDb {
+                id: obra_cedula_sin_monto,
+                numero: "OBRA-CEDULA-CERO".to_string(),
+                tipo_obra: "CÉDULA".to_string(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "OBRA-CEDULA-CERO".to_string(),
+                creado_usuario: false,
+                monto: 0.0,
+            },
+        ];
+
+        // 1. Sin filtro de obra: solo debe incluir obra_user
+        let kpis = compute_guarderias_kpis(&rows, &obras_options, None);
+        assert_eq!(kpis.len(), 1, "Solo la obra creada por el usuario debe tener KPIs");
+        assert_eq!(kpis[0].id_obra, obra_user);
+        assert_eq!(kpis[0].empleados_count, 1);
+
+        // 2. Con filtro de obra apuntando a una obra no creada por el usuario: debe retornar vacío
+        let kpis_cedula = compute_guarderias_kpis(&rows, &obras_options, Some(obra_cedula_con_monto));
+        assert!(kpis_cedula.is_empty(), "Obras no creadas por el usuario no deben generar KPIs");
+
+        // 3. Con filtro de obra apuntando a la obra creada por el usuario: debe retornar 1
+        let kpis_filtrado_user = compute_guarderias_kpis(&rows, &obras_options, Some(obra_user));
+        assert_eq!(kpis_filtrado_user.len(), 1);
+        assert_eq!(kpis_filtrado_user[0].id_obra, obra_user);
+    }
+
+    #[test]
+    fn test_calculate_max_dias_obra_con_baja_ejemplo_usuario() {
+        // Ejemplo del usuario:
+        // Obra: C1234567
+        // Fecha Inicio: 18/03/2026
+        // Fecha Fin:    30/05/2026
+        // Dias Cedula: 12
+        // Lic: 0, Inc: 0, Aus: 0
+        // Clave: Baja, Fecha: 12/03/2026
+        let f_ini_obra = NaiveDate::from_ymd_opt(2026, 3, 18);
+        let f_fin_obra = NaiveDate::from_ymd_opt(2026, 5, 30);
+        let f_baja = NaiveDate::from_ymd_opt(2026, 3, 12);
+
+        let (max_dias, dias_obra) = calculate_max_dias_obra_for_employee(
+            12,
+            0.0,
+            0.0,
+            0.0,
+            "MARZO",
+            2026,
+            "03/2026",
+            f_ini_obra,
+            f_fin_obra,
+            f_baja,
+            None,
+        );
+
+        // La obra inició después de la baja, tope debe ser 0 días
+        assert_eq!(max_dias, 0);
+        assert_eq!(dias_obra, Some(0));
+
+        // La validación debe rechazar asignar esta obra
+        let validation = validate_obra_assignment_for_employee(
+            f_ini_obra,
+            f_fin_obra,
+            f_baja,
+            None,
+            "MARZO",
+            2026,
+            "03/2026",
+        );
+        assert!(validation.is_err());
+    }
+
+    #[test]
+    fn test_calculate_max_dias_otra_obra_que_si_cubre_dias_trabajados() {
+        // Si le asigna otra obra donde la obra cubra los días que pudo haber trabajado (01/03/2026 a 30/05/2026)
+        let f_ini_obra = NaiveDate::from_ymd_opt(2026, 3, 1);
+        let f_fin_obra = NaiveDate::from_ymd_opt(2026, 5, 30);
+        let f_baja = NaiveDate::from_ymd_opt(2026, 3, 12);
+
+        let (max_dias, dias_obra) = calculate_max_dias_obra_for_employee(
+            12,
+            0.0,
+            0.0,
+            0.0,
+            "MARZO",
+            2026,
+            "03/2026",
+            f_ini_obra,
+            f_fin_obra,
+            f_baja,
+            None,
+        );
+
+        assert_eq!(max_dias, 12);
+        assert_eq!(dias_obra, Some(12));
+
+        let validation = validate_obra_assignment_for_employee(
+            f_ini_obra,
+            f_fin_obra,
+            f_baja,
+            None,
+            "MARZO",
+            2026,
+            "03/2026",
+        );
+        assert!(validation.is_ok());
+    }
+
+    #[test]
+    fn test_extract_employee_movements_registros_multiples_mismo_mes() {
+        let emp_id = Uuid::now_v7();
+        let f_baja = NaiveDate::from_ymd_opt(2024, 3, 12);
+
+        // Registro 1: Fila de movimiento en SUA (Clave: Baja, Fecha: 12/03/2024, Días: 0)
+        let mut row1 = create_mock_row(emp_id, "RUIZ OYERVIDES RIGOBERTO", None, "", false, "MARZO", 2024, 0, 0.0);
+        row1.clave = "BAJA".to_string();
+        row1.fecha = f_baja;
+
+        // Registro 2: Fila de liquidación regular (Clave vacía, Fecha None, Días: 12)
+        let row2 = create_mock_row(emp_id, "RUIZ OYERVIDES RIGOBERTO", None, "", false, "MARZO", 2024, 12, 500.0);
+
+        let all_rows = vec![row1.clone(), row2.clone()];
+
+        // Al evaluar row2, debe detectar la baja ocurrida en el mismo mes a partir de row1
+        let (baja_det, alta_det) = extract_employee_movements(
+            row2.id_empleado,
+            &row2.mes_periodo,
+            row2.anio_periodo,
+            &row2.clave,
+            row2.fecha,
+            &all_rows,
+        );
+
+        assert_eq!(baja_det, f_baja);
+        assert_eq!(alta_det, None);
+
+        // Mapa de movimientos
+        let map = build_employee_movements_map(&all_rows);
+        let key = (emp_id, "MARZO".to_string(), 2024);
+        assert_eq!(map.get(&key), Some(&(f_baja, None)));
+    }
+
+    #[test]
+    fn test_multiples_movimientos_alternados_en_mismo_mes() {
+        let f_baja = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let f_reing = NaiveDate::from_ymd_opt(2026, 3, 20).unwrap();
+
+        let movs = vec![
+            EmployeeMovement { kind: MovementKind::Baja, fecha: f_baja },
+            EmployeeMovement { kind: MovementKind::Alta, fecha: f_reing },
+        ];
+
+        let month_start = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        let month_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+
+        let intervals = calculate_employee_active_intervals(month_start, month_end, &movs);
+        assert_eq!(intervals.len(), 2);
+        assert_eq!(intervals[0], (month_start, f_baja)); // 01/03 al 10/03 (10 días)
+        assert_eq!(intervals[1], (f_reing, month_end));  // 20/03 al 31/03 (12 días)
+
+        // Obra A: 18/03 al 31/03
+        let obra_a_ini = NaiveDate::from_ymd_opt(2026, 3, 18);
+        let obra_a_fin = NaiveDate::from_ymd_opt(2026, 3, 31);
+        let (max_a, dias_a) = calculate_max_dias_obra_for_employee_movements(
+            30, 0.0, 0.0, 0.0, "MARZO", 2026, "03/2026", obra_a_ini, obra_a_fin, &movs
+        );
+        // Coincide únicamente con el segundo intervalo (20/03 a 31/03) = 12 días
+        assert_eq!(max_a, 12);
+        assert_eq!(dias_a, Some(12));
+
+        // Obra B: 12/03 al 18/03 (cae justo en el periodo inactivo del trabajador)
+        let obra_b_ini = NaiveDate::from_ymd_opt(2026, 3, 12);
+        let obra_b_fin = NaiveDate::from_ymd_opt(2026, 3, 18);
+        let (max_b, dias_b) = calculate_max_dias_obra_for_employee_movements(
+            30, 0.0, 0.0, 0.0, "MARZO", 2026, "03/2026", obra_b_ini, obra_b_fin, &movs
+        );
+        assert_eq!(max_b, 0);
+        assert_eq!(dias_b, Some(0));
+        let val_b = validate_obra_assignment_for_employee_movements(
+            obra_b_ini, obra_b_fin, &movs, "MARZO", 2026, "03/2026"
+        );
+        assert!(val_b.is_err());
+
+        // Obra C: Todo el mes (01/03 al 31/03)
+        let (max_c, dias_c) = calculate_max_dias_obra_for_employee_movements(
+            30, 0.0, 0.0, 0.0, "MARZO", 2026, "03/2026", Some(month_start), Some(month_end), &movs
+        );
+        // Total activo: 10 + 12 = 22 días
+        assert_eq!(max_c, 22);
+        assert_eq!(dias_c, Some(22));
+    }
+
+    #[test]
+    fn test_alta_baja_reing_baja_secuencia_completa() {
+        let f_alta1 = NaiveDate::from_ymd_opt(2026, 3, 5).unwrap();
+        let f_baja1 = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let f_alta2 = NaiveDate::from_ymd_opt(2026, 3, 15).unwrap();
+        let f_baja2 = NaiveDate::from_ymd_opt(2026, 3, 25).unwrap();
+
+        let movs = vec![
+            EmployeeMovement { kind: MovementKind::Alta, fecha: f_alta1 },
+            EmployeeMovement { kind: MovementKind::Baja, fecha: f_baja1 },
+            EmployeeMovement { kind: MovementKind::Alta, fecha: f_alta2 },
+            EmployeeMovement { kind: MovementKind::Baja, fecha: f_baja2 },
+        ];
+
+        let month_start = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        let month_end = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+
+        let intervals = calculate_employee_active_intervals(month_start, month_end, &movs);
+        assert_eq!(intervals.len(), 2);
+        assert_eq!(intervals[0], (f_alta1, f_baja1)); // 05/03 al 10/03 (6 días)
+        assert_eq!(intervals[1], (f_alta2, f_baja2)); // 15/03 al 25/03 (11 días)
+
+        // Obra del 08/03 al 20/03:
+        // En primer intervalo (05/03-10/03): solapa 08/03 al 10/03 = 3 días
+        // En segundo intervalo (15/03-25/03): solapa 15/03 al 20/03 = 6 días
+        // Total solapamiento = 3 + 6 = 9 días
+        let obra_ini = NaiveDate::from_ymd_opt(2026, 3, 8);
+        let obra_fin = NaiveDate::from_ymd_opt(2026, 3, 20);
+        let (max_dias, dias_obra) = calculate_max_dias_obra_for_employee_movements(
+            20, 0.0, 0.0, 0.0, "MARZO", 2026, "03/2026", obra_ini, obra_fin, &movs
+        );
+        assert_eq!(max_dias, 9);
+        assert_eq!(dias_obra, Some(9));
     }
 }
 

@@ -866,6 +866,178 @@ WHERE NOT EXISTS (
                 END IF;
             END IF;
         END $$;
+
+        -- Restricción de verificación y disparador para validar tope de días de obra y compatibilidad de movimientos
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'chk_reportes_detalles_dias_obra'
+            ) THEN
+                ALTER TABLE public.reportes_detalles_liquidaciones
+                ADD CONSTRAINT chk_reportes_detalles_dias_obra
+                CHECK (dias_registro_obra IS NULL OR (dias_registro_obra >= 0 AND dias_registro_obra <= 31));
+            END IF;
+        END $$;
+
+        CREATE OR REPLACE FUNCTION public.check_reportes_detalles_liquidaciones_tope_dias()
+        RETURNS TRIGGER AS $$
+        DECLARE
+            v_obra_ini DATE;
+            v_obra_fin DATE;
+            v_id_empleado UUID;
+            v_mes VARCHAR(15);
+            v_anio SMALLINT;
+            v_mes_num INT;
+            v_month_start DATE;
+            v_month_end DATE;
+            v_obra_start DATE;
+            v_obra_end DATE;
+            v_current_start DATE;
+            v_overlap_days INT := 0;
+            r_mov RECORD;
+            v_first_kind TEXT := NULL;
+            v_has_movements BOOLEAN := FALSE;
+            v_inter_start DATE;
+            v_inter_end DATE;
+            v_ov_s DATE;
+            v_ov_e DATE;
+        BEGIN
+            -- Validar límites básicos de días
+            IF NEW.dias_registro_obra IS NOT NULL THEN
+                IF NEW.dias_registro_obra < 0 THEN
+                    RAISE EXCEPTION 'Los días de obra no pueden ser negativos (%).', NEW.dias_registro_obra;
+                END IF;
+                IF NEW.dias_registro_obra > 31 THEN
+                    RAISE EXCEPTION 'Los días de obra no pueden exceder 31 (%).', NEW.dias_registro_obra;
+                END IF;
+            END IF;
+
+            -- Validar compatibilidad de obra y movimientos si hay obra asignada con días > 0
+            IF NEW.id_registro_obra IS NOT NULL AND NEW.dias_registro_obra IS NOT NULL AND NEW.dias_registro_obra > 0 THEN
+                -- Obtener fechas de la obra
+                SELECT fecha_inicio, fecha_fin INTO v_obra_ini, v_obra_fin
+                FROM public.registros_obras
+                WHERE id = NEW.id_registro_obra;
+
+                -- Obtener datos del empleado y periodo
+                SELECT rl.id_empleado, UPPER(TRIM(rl.mes_periodo)), rl.anio_periodo
+                INTO v_id_empleado, v_mes, v_anio
+                FROM public.reportes_liquidaciones rl
+                WHERE rl.id = NEW.id_reporte_liquidacion;
+
+                IF v_id_empleado IS NOT NULL AND v_mes IS NOT NULL AND v_anio IS NOT NULL THEN
+                    v_mes_num := CASE v_mes
+                        WHEN 'ENERO' THEN 1 WHEN 'FEBRERO' THEN 2 WHEN 'MARZO' THEN 3
+                        WHEN 'ABRIL' THEN 4 WHEN 'MAYO' THEN 5 WHEN 'JUNIO' THEN 6
+                        WHEN 'JULIO' THEN 7 WHEN 'AGOSTO' THEN 8 WHEN 'SEPTIEMBRE' THEN 9
+                        WHEN 'OCTUBRE' THEN 10 WHEN 'NOVIEMBRE' THEN 11 WHEN 'DICIEMBRE' THEN 12
+                        ELSE NULL
+                    END;
+
+                    IF v_mes_num IS NOT NULL THEN
+                        v_month_start := make_date(v_anio::int, v_mes_num, 1);
+                        v_month_end := (v_month_start + interval '1 month' - interval '1 day')::date;
+                        v_obra_start := GREATEST(v_month_start, COALESCE(v_obra_ini, v_month_start));
+                        v_obra_end := LEAST(v_month_end, COALESCE(v_obra_fin, v_month_end));
+
+                        IF v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL THEN
+                            IF v_obra_start > v_month_end OR v_obra_end < v_month_start OR v_obra_start > v_obra_end THEN
+                                RAISE EXCEPTION 'La obra no tiene vigencia en el periodo %/%.', v_mes, v_anio;
+                            END IF;
+                        END IF;
+
+                        -- Determinar primer movimiento del empleado en este mes
+                        SELECT CASE WHEN LOWER(TRIM(rdl2.clave)) LIKE '%baja%' THEN 'BAJA' ELSE 'ALTA' END
+                        INTO v_first_kind
+                        FROM public.reportes_detalles_liquidaciones rdl2
+                        JOIN public.reportes_liquidaciones rl2 ON rdl2.id_reporte_liquidacion = rl2.id
+                        WHERE rl2.id_empleado = v_id_empleado
+                          AND UPPER(TRIM(rl2.mes_periodo)) = v_mes
+                          AND rl2.anio_periodo = v_anio
+                          AND rdl2.fecha IS NOT NULL
+                          AND (LOWER(TRIM(rdl2.clave)) LIKE '%baja%' OR LOWER(TRIM(rdl2.clave)) LIKE '%alta%' OR LOWER(TRIM(rdl2.clave)) LIKE '%reing%')
+                        ORDER BY rdl2.fecha ASC, (CASE WHEN LOWER(TRIM(rdl2.clave)) LIKE '%baja%' THEN 0 ELSE 1 END) ASC
+                        LIMIT 1;
+
+                        IF v_first_kind IS NOT NULL THEN
+                            v_has_movements := TRUE;
+                            IF v_first_kind = 'BAJA' THEN
+                                v_current_start := v_month_start;
+                            ELSE
+                                v_current_start := NULL;
+                            END IF;
+
+                            FOR r_mov IN
+                                SELECT
+                                    CASE WHEN LOWER(TRIM(rdl2.clave)) LIKE '%baja%' THEN 'BAJA' ELSE 'ALTA' END AS mov_tipo,
+                                    rdl2.fecha AS mov_fecha
+                                FROM public.reportes_detalles_liquidaciones rdl2
+                                JOIN public.reportes_liquidaciones rl2 ON rdl2.id_reporte_liquidacion = rl2.id
+                                WHERE rl2.id_empleado = v_id_empleado
+                                  AND UPPER(TRIM(rl2.mes_periodo)) = v_mes
+                                  AND rl2.anio_periodo = v_anio
+                                  AND rdl2.fecha IS NOT NULL
+                                  AND (LOWER(TRIM(rdl2.clave)) LIKE '%baja%' OR LOWER(TRIM(rdl2.clave)) LIKE '%alta%' OR LOWER(TRIM(rdl2.clave)) LIKE '%reing%')
+                                ORDER BY rdl2.fecha ASC, (CASE WHEN LOWER(TRIM(rdl2.clave)) LIKE '%baja%' THEN 0 ELSE 1 END) ASC
+                            LOOP
+                                IF r_mov.mov_tipo = 'BAJA' THEN
+                                    IF v_current_start IS NOT NULL THEN
+                                        v_inter_start := v_current_start;
+                                        v_inter_end := LEAST(r_mov.mov_fecha, v_month_end);
+                                        IF v_inter_end >= v_inter_start THEN
+                                            v_ov_s := GREATEST(v_inter_start, v_obra_start);
+                                            v_ov_e := LEAST(v_inter_end, v_obra_end);
+                                            IF v_ov_s <= v_ov_e THEN
+                                                v_overlap_days := v_overlap_days + (v_ov_e - v_ov_s + 1);
+                                            END IF;
+                                        END IF;
+                                        v_current_start := NULL;
+                                    END IF;
+                                ELSE -- ALTA / REING
+                                    IF v_current_start IS NULL THEN
+                                        v_current_start := GREATEST(r_mov.mov_fecha, v_month_start);
+                                    END IF;
+                                END IF;
+                            END LOOP;
+
+                            IF v_current_start IS NOT NULL AND v_month_end >= v_current_start THEN
+                                v_inter_start := v_current_start;
+                                v_inter_end := v_month_end;
+                                v_ov_s := GREATEST(v_inter_start, v_obra_start);
+                                v_ov_e := LEAST(v_inter_end, v_obra_end);
+                                IF v_ov_s <= v_ov_e THEN
+                                    v_overlap_days := v_overlap_days + (v_ov_e - v_ov_s + 1);
+                                END IF;
+                            END IF;
+                        ELSE
+                            v_ov_s := GREATEST(v_month_start, v_obra_start);
+                            v_ov_e := LEAST(v_month_end, v_obra_end);
+                            IF v_ov_s <= v_ov_e THEN
+                                v_overlap_days := (v_ov_e - v_ov_s + 1);
+                            ELSE
+                                v_overlap_days := 0;
+                            END IF;
+                        END IF;
+
+                        IF (v_has_movements OR v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL) AND v_overlap_days = 0 THEN
+                            RAISE EXCEPTION 'No se puede asignar la obra: las fechas de la obra no coinciden con los periodos activos del trabajador en %/%.', v_mes, v_anio;
+                        END IF;
+
+                        IF (v_has_movements OR v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL) AND NEW.dias_registro_obra > v_overlap_days THEN
+                            RAISE EXCEPTION 'Los días de obra (%) exceden los días máximos permitidos para este periodo según sus movimientos y vigencia de obra (%).', NEW.dias_registro_obra, v_overlap_days;
+                        END IF;
+                    END IF;
+                END IF;
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS trg_check_reportes_detalles_liquidaciones_tope ON public.reportes_detalles_liquidaciones;
+        CREATE TRIGGER trg_check_reportes_detalles_liquidaciones_tope
+        BEFORE INSERT OR UPDATE ON public.reportes_detalles_liquidaciones
+        FOR EACH ROW EXECUTE FUNCTION public.check_reportes_detalles_liquidaciones_tope_dias();
         "#,
     )?;
 

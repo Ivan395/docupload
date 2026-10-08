@@ -301,7 +301,7 @@ mod tests {
         };
 
         // Crear registro_patronal y revisión de prueba para las nóminas
-        let (rp_id, revision_id) = {
+        let (_rp_id, revision_id) = {
             let mut client = pool.get().expect("Failed to get connection from pool");
             let mut tx = client.transaction().expect("Failed to start transaction");
             

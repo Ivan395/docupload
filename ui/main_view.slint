@@ -54,26 +54,6 @@ export component MainWindow inherits Window {
             // Barra Superior de Contexto y Breadcrumbs
             TopBar {}
 
-            // Toast flotante para notificaciones
-            if AppData.show_toast : Rectangle {
-                height: 38px;
-                background: #0f172a;
-
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 8px;
-
-                    Text { text: "✓"; font-size: 13px; color: #10b981; font-weight: 800; vertical-alignment: center; }
-                    Text {
-                        text: AppData.toast_message;
-                        font-size: 12px;
-                        font-weight: 600;
-                        color: #ffffff;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
             // VISTA 0: Carga y Procesamiento de Nóminas y Cédulas (Auditoría General)
             if AppData.current_view == 0 : ScrollView {
                 vertical-stretch: 1;
@@ -277,6 +257,74 @@ export component MainWindow inherits Window {
 
             // 3. Barra Inferior de Estado Global (BottomBar)
             BottomBar {}
+        }
+    }
+
+    // TOAST FLOTANTE GLOBAL PARA NOTIFICACIONES Y ALERTAS (Visible por encima de todas las vistas y modales)
+    if AppData.show_toast : Rectangle {
+        y: 20px;
+        x: (parent.width - self.width) / 2;
+        width: Math.min(parent.width - 60px, Math.max(420px, toast_text.preferred-width + 90px));
+        height: Math.max(48px, toast_text.preferred-height + 22px);
+        border-radius: 10px;
+        background: AppData.toast_type == "error" ? #991b1b : (AppData.toast_type == "warning" ? #b45309 : (AppData.toast_type == "success" ? #065f46 : #0f172a));
+        border-width: 1.5px;
+        border-color: AppData.toast_type == "error" ? #f87171 : (AppData.toast_type == "warning" ? #fbbf24 : (AppData.toast_type == "success" ? #34d399 : #38bdf8));
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000070;
+        drop-shadow-offset-y: 6px;
+
+        HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 12px;
+            spacing: 12px;
+            alignment: space-between;
+
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                spacing: 10px;
+                alignment: start;
+
+                Text {
+                    text: AppData.toast_icon != "" ? AppData.toast_icon : (AppData.toast_type == "error" ? "⛔" : (AppData.toast_type == "warning" ? "⚠️" : (AppData.toast_type == "success" ? "✓" : "ℹ")));
+                    font-size: 16px;
+                    font-weight: 800;
+                    color: AppData.toast_type == "error" ? #fecaca : (AppData.toast_type == "warning" ? #fef08a : (AppData.toast_type == "success" ? #a7f3d0 : #bae6fd));
+                    vertical-alignment: center;
+                }
+
+                toast_text := Text {
+                    horizontal-stretch: 1;
+                    text: AppData.toast_message;
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: #ffffff;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle {
+                width: 24px;
+                height: 24px;
+                border-radius: 12px;
+                background: btn_toast_close.has-hover ? #ffffff33 : transparent;
+                y: (parent.height - self.height) / 2;
+
+                Text {
+                    text: "✕";
+                    font-size: 13px;
+                    font-weight: 800;
+                    color: #ffffffcc;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                btn_toast_close := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { AppData.show_toast = false; }
+                }
+            }
         }
     }
 }

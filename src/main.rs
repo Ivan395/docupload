@@ -134,13 +134,88 @@ fn update_cedulas_ui(ui: &MainWindow, entries: &[SelectedFileEntry]) {
 
 pub fn show_toast_message(ui: &MainWindow, message: &str) {
     let app_data = ui.global::<AppData>();
+
+    // Determinar el tipo de alerta según el contenido del mensaje
+    let msg_lower = message.to_lowercase();
+    let is_error = msg_lower.contains("no se puede")
+        || msg_lower.contains("error")
+        || msg_lower.contains("bloqueado")
+        || msg_lower.contains("inválid")
+        || msg_lower.contains("invalid")
+        || msg_lower.contains("falló")
+        || msg_lower.contains("fallo")
+        || msg_lower.contains("denegad")
+        || msg_lower.contains("rechazad");
+
+    let is_warning = !is_error && (
+        msg_lower.contains("⚠️")
+        || msg_lower.contains("cuidado")
+        || msg_lower.contains("advertencia")
+        || msg_lower.contains("selecciona")
+        || msg_lower.contains("seleccione")
+        || msg_lower.contains("por favor")
+        || msg_lower.contains("debe ")
+        || msg_lower.contains("deben ")
+        || msg_lower.contains("no hay")
+        || msg_lower.contains("sin registros")
+    );
+
+    let is_success = !is_error && !is_warning && (
+        msg_lower.contains("✓")
+        || msg_lower.contains("correctamente")
+        || msg_lower.contains("éxito")
+        || msg_lower.contains("exito")
+        || msg_lower.contains("guardad")
+        || msg_lower.contains("actualizad")
+        || msg_lower.contains("descargad")
+        || msg_lower.contains("completad")
+        || msg_lower.contains("recargad")
+        || msg_lower.contains("restablecid")
+        || msg_lower.contains("limpiad")
+    );
+
+    let (toast_type, toast_icon) = if is_error {
+        ("error", "⛔")
+    } else if is_warning {
+        ("warning", "⚠️")
+    } else if is_success {
+        ("success", "✓")
+    } else {
+        ("info", "ℹ")
+    };
+
     app_data.set_toast_message(message.into());
+    app_data.set_toast_type(toast_type.into());
+    app_data.set_toast_icon(toast_icon.into());
     app_data.set_show_toast(true);
 
+    // Si el modal individual de edición de reporte está abierto, sincronizar alerta en el modal
+    if app_data.get_show_reporte_edit_modal() {
+        app_data.set_reporte_edit_alert_text(message.into());
+        app_data.set_reporte_edit_alert_type(toast_type.into());
+        app_data.set_reporte_edit_alert_show(true);
+    }
+
+    // Si el modal masivo de edición de reporte está abierto, sincronizar alerta en el modal
+    if app_data.get_show_reporte_batch_edit_modal() {
+        app_data.set_reporte_batch_edit_alert_text(message.into());
+        app_data.set_reporte_batch_edit_alert_type(toast_type.into());
+        app_data.set_reporte_batch_edit_alert_show(true);
+    }
+
+    let duration = if is_error || is_warning {
+        std::time::Duration::from_millis(4500)
+    } else {
+        std::time::Duration::from_millis(3000)
+    };
+
     let ui_weak = ui.as_weak();
-    slint::Timer::single_shot(std::time::Duration::from_secs(3), move || {
+    slint::Timer::single_shot(duration, move || {
         if let Some(ui) = ui_weak.upgrade() {
-            ui.global::<AppData>().set_show_toast(false);
+            let ad = ui.global::<AppData>();
+            ad.set_show_toast(false);
+            ad.set_reporte_edit_alert_show(false);
+            ad.set_reporte_batch_edit_alert_show(false);
         }
     });
 }
@@ -1659,13 +1734,19 @@ fn handle_cedulas_upload_and_inspect(
             Err(_) => std::env::temp_dir(),
         };
 
-        let items = match crate::archives::collect_prepared_upload_items(&paths, "pdf", &temp_dir) {
+        let mut items = match crate::archives::collect_prepared_upload_items(&paths, "pdf", &temp_dir) {
             Ok(it) => it,
             Err(e) => {
                 log::error!("Error preparando archivos para subida: {}", e);
                 return;
             }
         };
+
+        // Asignar a cada archivo el nombre generado en PostgreSQL (Cédula SUA <rp> - <mes>.pdf)
+        for item in &mut items {
+            let gen_name = crate::cedulas::view_logic::extract_cedula_pdf_postgres_filename(&item.local_path, &r_reg);
+            item.rel_path = gen_name;
+        }
 
         if items.is_empty() {
             let _ = slint::invoke_from_event_loop(move || {
@@ -5781,6 +5862,16 @@ mod tests_ui {
                 creado_usuario: true,
                 monto: 2_000_000.0,
             },
+            crate::db::reporte_liquidaciones::ObraOptionDb {
+                id: Uuid::now_v7(),
+                numero: "C9999999".into(),
+                tipo_obra: "Obra de Cédula".into(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "C9999999 - Obra de Cédula".into(),
+                creado_usuario: false,
+                monto: 800_000.0,
+            },
         ];
 
         let mut rows = Vec::new();
@@ -5887,9 +5978,10 @@ mod tests_ui {
         apply_reporte_filtering(&mut state);
         render_reporte_ui(&win, &state);
 
-        // 3. Validar KPIs
+        // 3. Validar KPIs (Solo deben contarse y mostrarse las obras creadas por el usuario: 2 de 3)
         assert_eq!(app_data.get_reporte_kpi_total_registros(), 250);
         assert_eq!(app_data.get_reporte_kpi_obras_count(), 2);
+        assert_eq!(app_data.get_reporte_guarderias_obras().row_count(), 2);
         assert_eq!(app_data.get_reporte_total_filtered(), 250);
 
         // 4. Validar Paginación (250 filas -> 3 páginas de 100 en 100)

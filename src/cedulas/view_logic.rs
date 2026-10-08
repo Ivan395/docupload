@@ -278,6 +278,57 @@ pub fn inspect_cedula_file(path: &Path) -> CedulaFileCardInfo {
     }
 }
 
+/// Extrae el nombre estandarizado de Cédula tal como se genera en PostgreSQL public.liquidaciones.nombre_archivo:
+/// "Cédula SUA <registro_patronal> - <mes>.pdf".
+pub fn extract_cedula_pdf_postgres_filename(path: &Path, default_rp: &str) -> String {
+    let patterns = crate::cedulas::regex_expressions::initialize_patterns().ok();
+    let default_reg = if default_rp.is_empty() || default_rp == "GENERAL" {
+        "00000000000"
+    } else {
+        default_rp
+    };
+
+    if let (Some(ref patterns), Ok(raw_text)) = (patterns.as_ref(), extract_with_layout(path)) {
+        let cleaned = clean_text(&raw_text.to_lowercase(), patterns);
+        let mut rp_found = None;
+        let mut mes_found = None;
+
+        // Buscar registro patronal en el texto
+        if let Ok(Some(mat)) = patterns.business_registro_patronal.find(&cleaned) {
+            let chunk = &cleaned[mat.start()..cleaned.len().min(mat.start() + 200)];
+            if let Ok(Some(caps)) = patterns.business_registro_patronal.captures(chunk) {
+                if let Some(m) = caps.name("registro_patronal") {
+                    let filtered: String = m.as_str().chars().filter(|c| c.is_alphanumeric()).collect();
+                    if !filtered.is_empty() {
+                        rp_found = Some(filtered.to_uppercase());
+                    }
+                }
+            }
+        }
+
+        // Buscar periodo de proceso / mes
+        if let Ok(Some(caps)) = patterns.employee_periodo_proceso.captures(&cleaned) {
+            if let Some(m) = caps.name("mes_periodo") {
+                let m_str = m.as_str().trim();
+                let num = month_to_num(m_str);
+                let valid_num = if (1..=12).contains(&num) { num } else { 1 };
+                mes_found = Some(month_num_to_name(valid_num).to_string());
+            }
+        }
+
+        let final_rp = rp_found.as_deref().unwrap_or(default_reg);
+        let final_mes = mes_found.as_deref().unwrap_or("ENERO");
+        return format!("Cédula SUA {} - {}.pdf", final_rp, final_mes);
+    }
+
+    let fname = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "cedula.pdf".to_string());
+    if fname.to_lowercase().ends_with(".pdf") {
+        fname
+    } else {
+        format!("{}.pdf", fname)
+    }
+}
+
 pub struct AuditAssignment {
     pub worker_id: String,
     pub obra_num: String,

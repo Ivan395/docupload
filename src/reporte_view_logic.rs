@@ -8,7 +8,7 @@ use slint::{ModelRc, VecModel, ComponentHandle, SharedString};
 use crate::{
     MainWindow, AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem,
     ReporteFilterOptionItem, ReporteMesTotalItem, ReporteGuarderiaObraItem,
-    ReporteObraUsuarioItem, ReporteSuaObraItem,
+    ReporteObraUsuarioItem, ReporteSuaObraItem, ReporteBatchWorkerItem,
 };
 use crate::cedulas::business::month_to_num;
 use crate::db::DbPool;
@@ -17,8 +17,10 @@ use crate::db::reporte_liquidaciones::{
     fetch_reporte_liquidaciones, fetch_obras_for_revision,
     update_single_reporte_row, batch_save_reporte_row_updates,
     sync_reportes_liquidaciones_for_revision, export_reporte_liquidaciones_to_excel,
-    compute_guarderias_kpis, calculate_max_dias_obra_for_employee,
-    calculate_obra_days_in_month, parse_month_and_year,
+    compute_guarderias_kpis,
+    extract_all_employee_movements, build_all_employee_movements_map,
+    calculate_max_dias_obra_for_employee_movements, validate_obra_assignment_for_employee_movements,
+    calculate_obra_days_in_month, parse_month_and_year, ReporteFinalHeaderMeta,
 };
 use crate::sua_export;
 
@@ -267,6 +269,17 @@ pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
 }
 
 pub fn apply_reporte_filtering(state: &mut ReporteSessionState) {
+    // Filtrar obras_options: Solo conservar obras creadas por el usuario (creado_usuario = true)
+    // o aquellas que se encuentran en la tabla de liquidaciones del reporte.
+    state.obras_options.retain(|o| {
+        o.creado_usuario
+            || state.all_rows.iter().any(|r| {
+                r.id_registro_obra == Some(o.id)
+                    || (!r.obra_numero.trim().is_empty()
+                        && r.obra_numero.trim().eq_ignore_ascii_case(o.numero.trim()))
+            })
+    });
+
     let q = state.search_query.trim().to_lowercase();
     let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
         Some(state.obras_options[state.filter_obra_idx - 1].id)
@@ -505,7 +518,7 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
     app_data.set_reporte_subtitle(subtitle.into());
 
     // 4. KPIs globales
-    let obras_count = state.obras_options.len();
+    let obras_count = state.obras_options.iter().filter(|o| o.creado_usuario).count();
 
     let mut total_cuotas_orig = 0.0;
     let mut total_prorrateado = 0.0;
@@ -908,6 +921,20 @@ pub fn sync_and_load_reporte_data(
         }
     };
 
+    // Conservar solamente registros de obras creados por el usuario (creado_usuario = true)
+    // o aquellos presentes en la tabla (que generan datos)
+    let obras: Vec<crate::db::reporte_liquidaciones::ObraOptionDb> = obras
+        .into_iter()
+        .filter(|o| {
+            o.creado_usuario
+                || rows.iter().any(|r| {
+                    r.id_registro_obra == Some(o.id)
+                        || (!r.obra_numero.trim().is_empty()
+                            && r.obra_numero.trim().eq_ignore_ascii_case(o.numero.trim()))
+                })
+        })
+        .collect();
+
     // 3. Obtener periodos únicos ordenados cronológicamente
     let mut periodos_map: std::collections::BTreeMap<(i16, u32), (String, usize)> = std::collections::BTreeMap::new();
     for r in &rows {
@@ -1210,7 +1237,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                     app_data.set_reporte_edit_selected_obra_id(obra_id_str.into());
                     app_data.set_reporte_edit_selected_obra_label(obra_label_str.clone().into());
-                    app_data.set_reporte_edit_search_query(if r.id_registro_obra.is_some() { obra_label_str.into() } else { "".into() });
+                    app_data.set_reporte_edit_search_query(obra_label_str.into());
 
                     let lic_val = r.lic;
                     let inc_val = r.inc;
@@ -1232,7 +1259,16 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         (None, None, String::new())
                     };
 
-                    let (dias_max, dias_obra_en_mes) = calculate_max_dias_obra_for_employee(
+                    let movs = extract_all_employee_movements(
+                        r.id_empleado,
+                        &r.mes_periodo,
+                        r.anio_periodo,
+                        &r.clave,
+                        r.fecha,
+                        &state.all_rows,
+                    );
+
+                    let (dias_max, dias_obra_en_mes) = calculate_max_dias_obra_for_employee_movements(
                         r.dias_cedula,
                         lic_val,
                         inc_val,
@@ -1242,6 +1278,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         &r.periodo_str,
                         obra_ini,
                         obra_fin,
+                        &movs,
                     );
 
                     app_data.set_reporte_edit_lic_info(if lic_val > 0.001 { format!("{:.0}", lic_val) } else { "0".to_string() }.into());
@@ -1250,9 +1287,18 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     app_data.set_reporte_edit_dias_max(dias_max as i32);
 
                     let info_msg = if r.id_registro_obra.is_some() {
-                        if let Some(d_obra) = dias_obra_en_mes {
+                        if let Err(e) = validate_obra_assignment_for_employee_movements(
+                            obra_ini,
+                            obra_fin,
+                            &movs,
+                            &r.mes_periodo,
+                            r.anio_periodo,
+                            &r.periodo_str,
+                        ) {
+                            format!("⚠️ {}. Límite asignable: 0 días", e)
+                        } else if let Some(d_obra) = dias_obra_en_mes {
                             format!(
-                                "📅 Días activos de la obra en este mes: {} días ({}) • Límite asignable: {} días",
+                                "📅 Días activos en este mes: {} días ({}) • Límite asignable: {} días",
                                 d_obra, vigencia_str, dias_max
                             )
                         } else {
@@ -1286,6 +1332,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     }
                     app_data.set_reporte_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
                     app_data.set_reporte_edit_dropdown_open(true);
+                    app_data.set_reporte_edit_alert_show(false);
+                    app_data.set_reporte_edit_alert_text("".into());
                     app_data.set_show_reporte_edit_modal(true);
                 }
             }
@@ -1359,9 +1407,18 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 let cur_id_str = app_data.get_reporte_edit_row_id().to_string();
                 if let Ok(cur_uuid) = Uuid::parse_str(&cur_id_str) {
                     if let Some(row) = state.all_rows.iter().find(|r| r.id_reporte_liq == cur_uuid) {
+                        let movs = extract_all_employee_movements(
+                            row.id_empleado,
+                            &row.mes_periodo,
+                            row.anio_periodo,
+                            &row.clave,
+                            row.fecha,
+                            &state.all_rows,
+                        );
+
                         if obra_id.is_empty() {
                             app_data.set_reporte_edit_dias_obra_val("0".into());
-                            let (dias_max, _) = calculate_max_dias_obra_for_employee(
+                            let (dias_max, _) = calculate_max_dias_obra_for_employee_movements(
                                 row.dias_cedula,
                                 row.lic,
                                 row.inc,
@@ -1371,6 +1428,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 &row.periodo_str,
                                 None,
                                 None,
+                                &movs,
                             );
                             app_data.set_reporte_edit_dias_max(dias_max as i32);
                             app_data.set_reporte_edit_obra_vigencia_info("⚠️ Sin obra seleccionada".into());
@@ -1390,8 +1448,28 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 Err(_) => (None, None, String::new()),
                             };
 
+                            // Validación de compatibilidad: obra iniciada después de baja o fuera de fechas según movimientos
+                            if let Err(e) = validate_obra_assignment_for_employee_movements(
+                                obra_ini,
+                                obra_fin,
+                                &movs,
+                                &row.mes_periodo,
+                                row.anio_periodo,
+                                &row.periodo_str,
+                            ) {
+                                crate::show_toast_message(&ui, &format!("No se puede asignar esta obra: {}", e));
+                                app_data.set_reporte_edit_selected_obra_id("".into());
+                                app_data.set_reporte_edit_selected_obra_label("⚠️ Sin Asignar (Pendiente)".into());
+                                app_data.set_reporte_edit_search_query("".into());
+                                app_data.set_reporte_edit_dias_obra_val("0".into());
+                                app_data.set_reporte_edit_dias_max(0);
+                                app_data.set_reporte_edit_obra_vigencia_info(format!("⚠️ {}", e).into());
+                                app_data.set_reporte_edit_dropdown_open(false);
+                                return;
+                            }
+
                             let cur_cedula: i16 = app_data.get_reporte_edit_dias_cedula_val().trim().parse().unwrap_or(row.dias_cedula);
-                            let (max_dias, dias_obra_en_mes) = calculate_max_dias_obra_for_employee(
+                            let (max_dias, dias_obra_en_mes) = calculate_max_dias_obra_for_employee_movements(
                                 cur_cedula,
                                 row.lic,
                                 row.inc,
@@ -1401,6 +1479,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 &row.periodo_str,
                                 obra_ini,
                                 obra_fin,
+                                &movs,
                             );
 
                             app_data.set_reporte_edit_dias_max(max_dias as i32);
@@ -1408,7 +1487,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                             let info_msg = if let Some(d_obra) = dias_obra_en_mes {
                                 format!(
-                                    "📅 Días activos de la obra en este mes: {} días ({}) • Límite asignable: {} días",
+                                    "📅 Días activos en este mes: {} días ({}) • Límite asignable: {} días",
                                     d_obra, vigencia_str, max_dias
                                 )
                             } else {
@@ -1418,6 +1497,16 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         }
                     }
                 }
+
+                let mut obras_vec = Vec::with_capacity(state.obras_options.len());
+                for o in &state.obras_options {
+                    obras_vec.push(ReporteObraItem {
+                        id: o.id.to_string().into(),
+                        numero: o.numero.clone().into(),
+                        label: o.label.clone().into(),
+                    });
+                }
+                app_data.set_reporte_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
                 app_data.set_reporte_edit_dropdown_open(false);
             }
         });
@@ -1434,6 +1523,15 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 let cur_id_str = app_data.get_reporte_edit_row_id().to_string();
                 if let Ok(cur_uuid) = Uuid::parse_str(&cur_id_str) {
                     if let Some(row) = state.all_rows.iter().find(|r| r.id_reporte_liq == cur_uuid) {
+                        let movs = extract_all_employee_movements(
+                            row.id_empleado,
+                            &row.mes_periodo,
+                            row.anio_periodo,
+                            &row.clave,
+                            row.fecha,
+                            &state.all_rows,
+                        );
+
                         let selected_oid_str = app_data.get_reporte_edit_selected_obra_id().to_string();
                         let (obra_ini, obra_fin, vigencia_str) = if !selected_oid_str.is_empty() {
                             match Uuid::parse_str(&selected_oid_str) {
@@ -1455,7 +1553,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         };
 
                         let new_cedula: i16 = new_dias_str.trim().parse().unwrap_or(row.dias_cedula);
-                        let (max_dias, dias_obra_en_mes) = calculate_max_dias_obra_for_employee(
+                        let (max_dias, dias_obra_en_mes) = calculate_max_dias_obra_for_employee_movements(
                             new_cedula,
                             row.lic,
                             row.inc,
@@ -1465,6 +1563,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             &row.periodo_str,
                             obra_ini,
                             obra_fin,
+                            &movs,
                         );
 
                         app_data.set_reporte_edit_dias_max(max_dias as i32);
@@ -1513,17 +1612,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     Err(_) => return,
                 };
 
-                // Validación: No permitir editar registros con clave "Baja"
-                {
-                    let state = session_clone.lock().unwrap();
-                    if let Some(r) = state.all_rows.iter().find(|row| row.id_reporte_liq == row_uuid) {
-                        if r.clave.trim().to_uppercase() == "BAJA" {
-                            crate::show_toast_message(&ui, "No se puede editar un registro con clave 'Baja'.");
-                            return;
-                        }
-                    }
-                }
-
                 let new_dias_ced = dias_ced_str.trim().parse::<i16>().unwrap_or(30).max(1);
                 let raw_dias_obr = dias_obr_str.trim().parse::<i16>().unwrap_or(0).max(0);
 
@@ -1542,13 +1630,21 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     return;
                 }
 
-                // Validación: si tiene obra asignada, Días Obra <= máximo permitido según fechas de la obra e incidencias
-                let (lic_val, inc_val, aus_val, mes_periodo, anio_periodo, periodo_str) = {
+                // Obtener datos del empleado y sus movimientos en el mes
+                let (lic_val, inc_val, aus_val, mes_periodo, anio_periodo, periodo_str, movs) = {
                     let state = session_clone.lock().unwrap();
                     if let Some(r) = state.all_rows.iter().find(|row| row.id_reporte_liq == row_uuid) {
-                        (r.lic, r.inc, r.aus, r.mes_periodo.clone(), r.anio_periodo, r.periodo_str.clone())
+                        let m = extract_all_employee_movements(
+                            r.id_empleado,
+                            &r.mes_periodo,
+                            r.anio_periodo,
+                            &r.clave,
+                            r.fecha,
+                            &state.all_rows,
+                        );
+                        (r.lic, r.inc, r.aus, r.mes_periodo.clone(), r.anio_periodo, r.periodo_str.clone(), m)
                     } else {
-                        (0.0, 0.0, 0.0, String::new(), 0, String::new())
+                        (0.0, 0.0, 0.0, String::new(), 0, String::new(), Vec::new())
                     }
                 };
 
@@ -1571,7 +1667,22 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     (None, None, None, String::new())
                 };
 
-                let (max_permitido, _) = calculate_max_dias_obra_for_employee(
+                // Validación: si tiene obra seleccionada, verificar compatibilidad con movimientos
+                if obra_uuid_opt.is_some() {
+                    if let Err(e) = validate_obra_assignment_for_employee_movements(
+                        obra_ini,
+                        obra_fin,
+                        &movs,
+                        &mes_periodo,
+                        anio_periodo,
+                        &periodo_str,
+                    ) {
+                        crate::show_toast_message(&ui, &format!("No se puede asignar esta obra: {}", e));
+                        return;
+                    }
+                }
+
+                let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
                     new_dias_ced,
                     lic_val,
                     inc_val,
@@ -1581,11 +1692,21 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     &periodo_str,
                     obra_ini,
                     obra_fin,
+                    &movs,
                 );
 
                 if obra_uuid_opt.is_some() && raw_dias_obr > max_permitido {
                     let total_inc = lic_val + inc_val + aus_val;
-                    let razon = if let Some(d_obra) = dias_obra_en_mes {
+                    let razon = if let Err(e) = validate_obra_assignment_for_employee_movements(
+                        obra_ini,
+                        obra_fin,
+                        &movs,
+                        &mes_periodo,
+                        anio_periodo,
+                        &periodo_str,
+                    ) {
+                        e
+                    } else if let Some(d_obra) = dias_obra_en_mes {
                         format!(
                             "Días activos de la obra en el mes: {} ({}), Días efectivos trabajador: {:.0} (Cédula {} - Incidencias {:.0})",
                             d_obra, vigencia_str, (new_dias_ced as f64 - total_inc).max(0.0), new_dias_ced, total_inc
@@ -1675,7 +1796,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
         let ui_weak = main_window.as_weak();
         app_logic.on_reporte_close_edit_modal(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                ui.global::<AppData>().set_show_reporte_edit_modal(false);
+                let app_data = ui.global::<AppData>();
+                app_data.set_reporte_edit_alert_show(false);
+                app_data.set_show_reporte_edit_modal(false);
             }
         });
     }
@@ -1717,9 +1840,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 }
 
                 let msg = if !state.selected_ids.is_empty() {
-                    format!("¿Estás seguro de establecer Días Obra = Días Cédula para los {} trabajadores seleccionados en la base de datos?", count)
+                    format!("¿Estás seguro de asignar los Días Obra máximos permitidos a los {} trabajadores seleccionados en la base de datos?", count)
                 } else {
-                    format!("¿Estás seguro de establecer Días Obra = Días Cédula para los {} trabajadores del filtro actual en la base de datos?", count)
+                    format!("¿Estás seguro de asignar los Días Obra máximos permitidos a los {} trabajadores del filtro actual en la base de datos?", count)
                 };
 
                 app_data.set_reporte_confirm_batch_msg(msg.into());
@@ -1761,7 +1884,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     let mut state = session_clone.lock().unwrap();
                     let ids_to_change: HashSet<Uuid> = if state.selected_ids.is_empty() {
                         state.filtered_rows.iter()
-                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
                             .map(|r| r.id_reporte_liq)
                             .collect()
                     } else {
@@ -1774,12 +1896,33 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         .map(|o| (o.id, (o.fecha_inicio, o.fecha_fin)))
                         .collect();
 
+                    let movements_map = build_all_employee_movements_map(&state.all_rows);
+                    let mut modified_ids = HashSet::new();
+
                     for row in state.all_rows.iter_mut() {
                         if ids_to_change.contains(&row.id_reporte_liq) {
                             let (obra_ini, obra_fin) = row.id_registro_obra
                                 .and_then(|oid| obras_map.get(&oid).copied())
                                 .unwrap_or((None, None));
-                            let (max_permitido, _) = calculate_max_dias_obra_for_employee(
+
+                            let key = (row.id_empleado, row.mes_periodo.trim().to_uppercase(), row.anio_periodo);
+                            let movs = movements_map.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+
+                            // Validación de compatibilidad: si la obra no coincide con los periodos activos, no modificar nada
+                            if row.id_registro_obra.is_some() {
+                                if validate_obra_assignment_for_employee_movements(
+                                    obra_ini,
+                                    obra_fin,
+                                    movs,
+                                    &row.mes_periodo,
+                                    row.anio_periodo,
+                                    &row.periodo_str,
+                                ).is_err() {
+                                    continue;
+                                }
+                            }
+
+                            let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
                                 row.dias_cedula,
                                 row.lic,
                                 row.inc,
@@ -1789,17 +1932,25 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 &row.periodo_str,
                                 obra_ini,
                                 obra_fin,
+                                movs,
                             );
+
+                            // Si tiene movimientos y el tope es 0, no modificar nada
+                            if max_permitido == 0 && !movs.is_empty() {
+                                continue;
+                            }
+
                             row.dias_obra = max_permitido;
                             recalculate_row_in_memory(row);
                             count_modified += 1;
+                            modified_ids.insert(row.id_reporte_liq);
                         }
                     }
 
                     let rows = state
                         .all_rows
                         .iter()
-                        .filter(|r| ids_to_change.contains(&r.id_reporte_liq))
+                        .filter(|r| modified_ids.contains(&r.id_reporte_liq))
                         .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
                         .collect();
 
@@ -1823,7 +1974,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                 crate::show_toast_message(
                     &ui,
-                    &format!("Se igualaron los días de obra a días cédula en {} registros.", count_modified),
+                    &format!("Se asignaron los días de obra máximos a {} registros.", count_modified),
                 );
             }
         });
@@ -1912,7 +2063,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     let mut state = session_clone.lock().unwrap();
                     let ids_to_change: HashSet<Uuid> = if state.selected_ids.is_empty() {
                         state.filtered_rows.iter()
-                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
                             .map(|r| r.id_reporte_liq)
                             .collect()
                     } else {
@@ -1925,12 +2075,32 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         .map(|o| (o.id, (o.fecha_inicio, o.fecha_fin)))
                         .collect();
 
+                    let movements_map = build_all_employee_movements_map(&state.all_rows);
+                    let mut modified_ids = HashSet::new();
+
                     for row in state.all_rows.iter_mut() {
                         if ids_to_change.contains(&row.id_reporte_liq) {
                             let (obra_ini, obra_fin) = row.id_registro_obra
                                 .and_then(|oid| obras_map.get(&oid).copied())
                                 .unwrap_or((None, None));
-                            let (max_permitido, _) = calculate_max_dias_obra_for_employee(
+
+                            let key = (row.id_empleado, row.mes_periodo.trim().to_uppercase(), row.anio_periodo);
+                            let movs = movements_map.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+
+                            if row.id_registro_obra.is_some() {
+                                if validate_obra_assignment_for_employee_movements(
+                                    obra_ini,
+                                    obra_fin,
+                                    movs,
+                                    &row.mes_periodo,
+                                    row.anio_periodo,
+                                    &row.periodo_str,
+                                ).is_err() {
+                                    continue;
+                                }
+                            }
+
+                            let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
                                 row.dias_cedula,
                                 row.lic,
                                 row.inc,
@@ -1940,17 +2110,24 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 &row.periodo_str,
                                 obra_ini,
                                 obra_fin,
+                                movs,
                             );
+
+                            if max_permitido == 0 && !movs.is_empty() {
+                                continue;
+                            }
+
                             row.dias_obra = target_dias.min(max_permitido);
                             recalculate_row_in_memory(row);
                             count_modified += 1;
+                            modified_ids.insert(row.id_reporte_liq);
                         }
                     }
 
                     let rows = state
                         .all_rows
                         .iter()
-                        .filter(|r| ids_to_change.contains(&r.id_reporte_liq))
+                        .filter(|r| modified_ids.contains(&r.id_reporte_liq))
                         .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
                         .collect();
 
@@ -1983,6 +2160,490 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
+    // Helper: Calcula la lista de trabajadores para el modal masivo con su respectivo Tope Máx
+    fn compute_batch_workers_list(
+        state: &ReporteSessionState,
+        selected_obra_id_str: &str,
+        forced_cedula: Option<i16>,
+    ) -> Vec<ReporteBatchWorkerItem> {
+        let movs_map = build_all_employee_movements_map(&state.all_rows);
+
+        let chosen_obra_opt: Option<Option<&ObraOptionDb>> = if selected_obra_id_str == "__KEEP__" {
+            None
+        } else if selected_obra_id_str == "__NONE__" || selected_obra_id_str.is_empty() {
+            Some(None)
+        } else {
+            let oid_opt = Uuid::parse_str(selected_obra_id_str).ok();
+            Some(oid_opt.and_then(|oid| state.obras_options.iter().find(|o| o.id == oid)))
+        };
+
+        let mut batch_workers = Vec::new();
+        for r in state.all_rows.iter() {
+            if state.selected_ids.contains(&r.id_reporte_liq) {
+                let cur_obra = state.obras_options.iter().find(|o| Some(o.id) == r.id_registro_obra);
+
+                let target_obra = match chosen_obra_opt {
+                    None => cur_obra,
+                    Some(maybe_o) => maybe_o,
+                };
+
+                let movs = movs_map
+                    .get(&(r.id_empleado, r.mes_periodo.trim().to_uppercase(), r.anio_periodo))
+                    .cloned()
+                    .unwrap_or_default();
+
+                let cedula_val = forced_cedula.unwrap_or(r.dias_cedula);
+
+                let tope_max: i32 = match target_obra {
+                    Some(o) => {
+                        if validate_obra_assignment_for_employee_movements(
+                            o.fecha_inicio,
+                            o.fecha_fin,
+                            &movs,
+                            &r.mes_periodo,
+                            r.anio_periodo,
+                            &r.periodo_str,
+                        ).is_err() {
+                            0
+                        } else {
+                            let (max_dias, _) = calculate_max_dias_obra_for_employee_movements(
+                                cedula_val,
+                                r.lic,
+                                r.inc,
+                                r.aus,
+                                &r.mes_periodo,
+                                r.anio_periodo,
+                                &r.periodo_str,
+                                o.fecha_inicio,
+                                o.fecha_fin,
+                                &movs,
+                            );
+                            max_dias as i32
+                        }
+                    }
+                    None => 0,
+                };
+
+                batch_workers.push(ReporteBatchWorkerItem {
+                    id: r.id_reporte_liq.to_string().into(),
+                    nss: r.nss.clone().into(),
+                    nombre: r.nombre_trabajador.clone().into(),
+                    periodo: r.periodo_str.clone().into(),
+                    obra_label: r.obra_label.clone().into(),
+                    dias_cedula: cedula_val as i32,
+                    dias_obra: r.dias_obra as i32,
+                    tope_max,
+                });
+            }
+        }
+        batch_workers
+    }
+
+    // Batch Modal: Abrir modal de modificación masiva de obra y días
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_open_batch_edit_modal(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let state = session_clone.lock().unwrap();
+                if state.selected_ids.is_empty() {
+                    crate::show_toast_message(&ui, "No hay empleados seleccionados para modificar.");
+                    return;
+                }
+
+                let batch_workers = compute_batch_workers_list(&state, "__KEEP__", None);
+                let count = batch_workers.len() as i32;
+                let mut obras_vec = Vec::with_capacity(state.obras_options.len());
+                for o in &state.obras_options {
+                    obras_vec.push(ReporteObraItem {
+                        id: o.id.to_string().into(),
+                        numero: o.numero.clone().into(),
+                        label: o.label.clone().into(),
+                    });
+                }
+
+                let app_data = ui.global::<AppData>();
+                app_data.set_reporte_batch_edit_worker_count(count);
+                app_data.set_reporte_batch_edit_workers(ModelRc::new(VecModel::from(batch_workers)));
+                app_data.set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
+                app_data.set_reporte_batch_edit_selected_obra_id("__KEEP__".into());
+                app_data.set_reporte_batch_edit_selected_obra_label("🔄 Mantener Obras Actuales (Sin Cambios)".into());
+                app_data.set_reporte_batch_edit_search_query("🔄 Mantener Obras Actuales (Sin Cambios)".into());
+                app_data.set_reporte_batch_edit_dias_cedula_val("".into());
+                app_data.set_reporte_batch_edit_dias_obra_val("".into());
+                app_data.set_reporte_batch_edit_change_obra(false);
+                app_data.set_reporte_batch_edit_change_dias_cedula(false);
+                app_data.set_reporte_batch_edit_change_dias_obra(false);
+                app_data.set_reporte_batch_edit_dropdown_open(false);
+                app_data.set_reporte_batch_edit_alert_show(false);
+                app_data.set_reporte_batch_edit_alert_text("".into());
+                app_data.set_show_reporte_batch_edit_modal(true);
+            }
+        });
+    }
+
+    // Batch Modal: Cerrar modal de modificación masiva
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_reporte_close_batch_edit_modal(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_reporte_batch_edit_alert_show(false);
+                app_data.set_show_reporte_batch_edit_modal(false);
+                app_data.set_reporte_batch_edit_dropdown_open(false);
+            }
+        });
+    }
+
+    // Batch Modal: Filtrar obras en modal masivo
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_filter_batch_edit_obras(move |q| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let q_lower = q.trim().to_lowercase();
+                let state = session_clone.lock().unwrap();
+                let mut obras_vec = Vec::new();
+                for o in &state.obras_options {
+                    if q_lower.is_empty() || o.numero.to_lowercase().contains(&q_lower) || o.label.to_lowercase().contains(&q_lower) {
+                        obras_vec.push(ReporteObraItem {
+                            id: o.id.to_string().into(),
+                            numero: o.numero.clone().into(),
+                            label: o.label.clone().into(),
+                        });
+                    }
+                }
+                ui.global::<AppData>().set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
+            }
+        });
+    }
+
+    // Batch Modal: Seleccionar obra en modal masivo
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_select_batch_edit_obra(move |obra_id, obra_label| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let is_keep = obra_id.as_str() == "__KEEP__";
+                app_data.set_reporte_batch_edit_selected_obra_id(obra_id.clone());
+                app_data.set_reporte_batch_edit_selected_obra_label(obra_label.clone());
+                app_data.set_reporte_batch_edit_search_query(obra_label);
+                app_data.set_reporte_batch_edit_change_obra(!is_keep);
+                app_data.set_reporte_batch_edit_dropdown_open(false);
+
+                let state = session_clone.lock().unwrap();
+                let cedula_text = app_data.get_reporte_batch_edit_dias_cedula_val().trim().to_string();
+                let forced_cedula = if app_data.get_reporte_batch_edit_change_dias_cedula() && !cedula_text.is_empty() {
+                    cedula_text.parse::<i16>().ok()
+                } else {
+                    None
+                };
+
+                let batch_workers = compute_batch_workers_list(&state, obra_id.as_str(), forced_cedula);
+                app_data.set_reporte_batch_edit_workers(ModelRc::new(VecModel::from(batch_workers.clone())));
+
+                // Si hay trabajadores para los cuales esta obra da tope 0 por incompatibilidad de fechas, informar en la alerta del modal:
+                let zero_count = batch_workers.iter().filter(|w| w.tope_max == 0).count();
+                if !is_keep && obra_id.as_str() != "__NONE__" && zero_count > 0 {
+                    let msg = if zero_count == 1 {
+                        "⚠️ Atención: 1 trabajador seleccionado no tiene días activos compatibles con esta obra (Tope Máx: 0 días).".to_string()
+                    } else {
+                        format!("⚠️ Atención: {} trabajadores seleccionados no tienen días activos compatibles con esta obra (Tope Máx: 0 días).", zero_count)
+                    };
+                    app_data.set_reporte_batch_edit_alert_text(msg.into());
+                    app_data.set_reporte_batch_edit_alert_type("warning".into());
+                    app_data.set_reporte_batch_edit_alert_show(true);
+                } else {
+                    app_data.set_reporte_batch_edit_alert_show(false);
+                }
+
+                let mut obras_vec = Vec::with_capacity(state.obras_options.len());
+                for o in &state.obras_options {
+                    obras_vec.push(ReporteObraItem {
+                        id: o.id.to_string().into(),
+                        numero: o.numero.clone().into(),
+                        label: o.label.clone().into(),
+                    });
+                }
+                app_data.set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
+            }
+        });
+    }
+
+    // Batch Modal: Cambio en Días Cédula para recalcular tope máx en tiempo real
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_batch_edit_dias_cedula_changed(move |ced_str| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let cur_obra = app_data.get_reporte_batch_edit_selected_obra_id().to_string();
+                let forced_cedula = ced_str.trim().parse::<i16>().ok();
+                let state = session_clone.lock().unwrap();
+                let batch_workers = compute_batch_workers_list(&state, &cur_obra, forced_cedula);
+                app_data.set_reporte_batch_edit_workers(ModelRc::new(VecModel::from(batch_workers)));
+            }
+        });
+    }
+
+    // Batch Modal: Alternar desplegable en modal masivo
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_toggle_batch_edit_dropdown(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let new_state = !app_data.get_reporte_batch_edit_dropdown_open();
+                app_data.set_reporte_batch_edit_dropdown_open(new_state);
+                if new_state {
+                    let state = session_clone.lock().unwrap();
+                    let mut obras_vec = Vec::with_capacity(state.obras_options.len());
+                    for o in &state.obras_options {
+                        obras_vec.push(ReporteObraItem {
+                            id: o.id.to_string().into(),
+                            numero: o.numero.clone().into(),
+                            label: o.label.clone().into(),
+                        });
+                    }
+                    app_data.set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
+                }
+            }
+        });
+    }
+
+    // Batch Modal: Aplicar modificación masiva a todos los seleccionados
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_submit_batch_edit(move |obra_id_str, change_obra, dias_ced_str, change_ced, dias_obr_str, change_obr| {
+            if let Some(ui) = ui_weak.upgrade() {
+                if !change_obra && !change_ced && !change_obr {
+                    crate::show_toast_message(
+                        &ui,
+                        "Por favor activa al menos un campo a modificar (Obra, Días Cédula o Días Obra).",
+                    );
+                    return;
+                }
+
+                let target_ced_opt = if change_ced {
+                    match dias_ced_str.trim().parse::<i16>() {
+                        Ok(d) if (1..=31).contains(&d) => Some(d),
+                        _ => {
+                            crate::show_toast_message(&ui, "Los Días Cédula deben ser un número entre 1 y 31.");
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let target_obr_opt = if change_obr {
+                    match dias_obr_str.trim().parse::<i16>() {
+                        Ok(d) if (0..=31).contains(&d) => Some(d),
+                        _ => {
+                            crate::show_toast_message(&ui, "Los Días Obra deben ser un número entre 0 y 31.");
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let mut count = 0;
+                let mut modified_fields = Vec::new();
+
+                let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
+                    let mut state = session_clone.lock().unwrap();
+                    let ids_to_modify: HashSet<Uuid> = state.selected_ids.clone();
+                    if ids_to_modify.is_empty() {
+                        crate::show_toast_message(&ui, "No hay filas seleccionadas.");
+                        return;
+                    }
+
+                    let obra_target: Option<Option<ObraOptionDb>> = if change_obra {
+                        let trimmed = obra_id_str.trim();
+                        if trimmed == "__NONE__" || trimmed.is_empty() {
+                            Some(None) // Desvincular obra
+                        } else if trimmed == "__KEEP__" {
+                            None // No modificar obra
+                        } else {
+                            match Uuid::parse_str(trimmed) {
+                                Ok(oid) => {
+                                    let found = state.obras_options.iter().find(|o| o.id == oid).cloned();
+                                    Some(found)
+                                }
+                                Err(_) => None,
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    if change_obra {
+                        if let Some(ref opt) = obra_target {
+                            if opt.is_some() {
+                                modified_fields.push("Obra");
+                            } else {
+                                modified_fields.push("Desvincular Obra");
+                            }
+                        }
+                    }
+                    if target_ced_opt.is_some() {
+                        modified_fields.push("Días Cédula");
+                    }
+                    if target_obr_opt.is_some() {
+                        modified_fields.push("Días Obra");
+                    }
+
+                    let obras_map: HashMap<Uuid, (Option<NaiveDate>, Option<NaiveDate>)> = state
+                        .obras_options
+                        .iter()
+                        .map(|o| (o.id, (o.fecha_inicio, o.fecha_fin)))
+                        .collect();
+
+                    let movements_map = build_all_employee_movements_map(&state.all_rows);
+                    let mut modified_ids = HashSet::new();
+                    let mut clamped_count = 0;
+
+                    for row in state.all_rows.iter_mut() {
+                        if ids_to_modify.contains(&row.id_reporte_liq) {
+                            let key = (row.id_empleado, row.mes_periodo.trim().to_uppercase(), row.anio_periodo);
+                            let movs = movements_map.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+
+                            if change_obra {
+                                if let Some(ref o_opt) = obra_target {
+                                    match o_opt {
+                                        Some(o) => {
+                                            if validate_obra_assignment_for_employee_movements(
+                                                o.fecha_inicio,
+                                                o.fecha_fin,
+                                                movs,
+                                                &row.mes_periodo,
+                                                row.anio_periodo,
+                                                &row.periodo_str,
+                                            ).is_err() {
+                                                // La obra no es compatible con el trabajador (ej. inició después de su baja)
+                                                continue;
+                                            }
+                                            row.id_registro_obra = Some(o.id);
+                                            row.obra_numero = o.numero.clone();
+                                            row.obra_label = o.label.clone();
+                                            row.obra_creado_usuario = o.creado_usuario;
+                                        }
+                                        None => {
+                                            row.id_registro_obra = None;
+                                            row.obra_numero = String::new();
+                                            row.obra_label = "⚠️ Sin Asignar (Pendiente)".to_string();
+                                            row.obra_creado_usuario = false;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let (obra_ini, obra_fin) = row.id_registro_obra
+                                .and_then(|oid| obras_map.get(&oid).copied())
+                                .unwrap_or((None, None));
+
+                            // Si tiene obra vinculada pero es incompatible con sus movimientos, omitir modificaciones para esta obra
+                            if row.id_registro_obra.is_some() {
+                                if validate_obra_assignment_for_employee_movements(
+                                    obra_ini,
+                                    obra_fin,
+                                    movs,
+                                    &row.mes_periodo,
+                                    row.anio_periodo,
+                                    &row.periodo_str,
+                                ).is_err() {
+                                    continue;
+                                }
+                            }
+
+                            if let Some(dias_ced) = target_ced_opt {
+                                row.dias_cedula = dias_ced;
+                            }
+
+                            let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
+                                row.dias_cedula,
+                                row.lic,
+                                row.inc,
+                                row.aus,
+                                &row.mes_periodo,
+                                row.anio_periodo,
+                                &row.periodo_str,
+                                obra_ini,
+                                obra_fin,
+                                movs,
+                            );
+
+                            if let Some(dias_obr) = target_obr_opt {
+                                let valid_obr = dias_obr.min(max_permitido);
+                                if valid_obr < dias_obr {
+                                    clamped_count += 1;
+                                }
+                                row.dias_obra = valid_obr;
+                            } else if change_obra {
+                                if let Some(ref o_opt) = obra_target {
+                                    if o_opt.is_some() {
+                                        row.dias_obra = max_permitido;
+                                    } else {
+                                        row.dias_obra = 0;
+                                    }
+                                }
+                            } else if row.dias_obra > max_permitido {
+                                row.dias_obra = max_permitido;
+                                clamped_count += 1;
+                            }
+
+                            recalculate_row_in_memory(row);
+                            count += 1;
+                            modified_ids.insert(row.id_reporte_liq);
+                        }
+                    }
+
+                    let rows = state
+                        .all_rows
+                        .iter()
+                        .filter(|r| modified_ids.contains(&r.id_reporte_liq))
+                        .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
+                        .collect();
+
+                    apply_reporte_filtering(&mut state);
+                    render_reporte_ui(&ui, &state);
+
+                    if clamped_count > 0 {
+                        modified_fields.push("Días Obra ajustados al límite");
+                    }
+
+                    rows
+                };
+
+                // Cerrar modal
+                ui.global::<AppData>().set_show_reporte_batch_edit_modal(false);
+                ui.global::<AppData>().set_reporte_batch_edit_dropdown_open(false);
+
+                // Persistir en segundo plano
+                if let Some(ref pool) = pool_clone {
+                    let pool_bg = pool.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(mut client) = pool_bg.get() {
+                            if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
+                                log::error!("Error persistiendo modificación masiva de modal en BD: {}", e);
+                            }
+                        }
+                    });
+                }
+
+                let desc = modified_fields.join(", ");
+                crate::show_toast_message(
+                    &ui,
+                    &format!("Modificación masiva aplicada a {} empleados ({}).", count, desc),
+                );
+            }
+        });
+    }
+
     // 18. Batch: Aplicar Registro de Obra, Días Cédula y/o Días Obra a la selección
     {
         let ui_weak = main_window.as_weak();
@@ -2009,7 +2670,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     let mut state = session_clone.lock().unwrap();
                     let ids_to_modify: HashSet<Uuid> = if state.selected_ids.is_empty() {
                         state.filtered_rows.iter()
-                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
                             .map(|r| r.id_reporte_liq)
                             .collect()
                     } else {
@@ -2038,23 +2698,54 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         .map(|o| (o.id, (o.fecha_inicio, o.fecha_fin)))
                         .collect();
 
+                    let movements_map = build_all_employee_movements_map(&state.all_rows);
+                    let mut modified_ids = HashSet::new();
                     let mut clamped_count = 0;
+
                     for row in state.all_rows.iter_mut() {
                         if ids_to_modify.contains(&row.id_reporte_liq) {
+                            let key = (row.id_empleado, row.mes_periodo.trim().to_uppercase(), row.anio_periodo);
+                            let movs = movements_map.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+
                             if let Some(ref o) = obra_info {
+                                if validate_obra_assignment_for_employee_movements(
+                                    o.fecha_inicio,
+                                    o.fecha_fin,
+                                    movs,
+                                    &row.mes_periodo,
+                                    row.anio_periodo,
+                                    &row.periodo_str,
+                                ).is_err() {
+                                    continue;
+                                }
                                 row.id_registro_obra = Some(o.id);
                                 row.obra_numero = o.numero.clone();
                                 row.obra_label = o.label.clone();
                                 row.obra_creado_usuario = o.creado_usuario;
                             }
-                            if let Some(dias_ced) = custom_dias_ced_opt {
-                                row.dias_cedula = dias_ced.max(1);
-                            }
 
                             let (obra_ini, obra_fin) = row.id_registro_obra
                                 .and_then(|oid| obras_map.get(&oid).copied())
                                 .unwrap_or((None, None));
-                            let (max_permitido, _) = calculate_max_dias_obra_for_employee(
+
+                            if row.id_registro_obra.is_some() {
+                                if validate_obra_assignment_for_employee_movements(
+                                    obra_ini,
+                                    obra_fin,
+                                    movs,
+                                    &row.mes_periodo,
+                                    row.anio_periodo,
+                                    &row.periodo_str,
+                                ).is_err() {
+                                    continue;
+                                }
+                            }
+
+                            if let Some(dias_ced) = custom_dias_ced_opt {
+                                row.dias_cedula = dias_ced.max(1);
+                            }
+
+                            let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
                                 row.dias_cedula,
                                 row.lic,
                                 row.inc,
@@ -2064,6 +2755,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 &row.periodo_str,
                                 obra_ini,
                                 obra_fin,
+                                movs,
                             );
 
                             if let Some(dias_obr) = custom_dias_obr_opt {
@@ -2073,7 +2765,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 }
                                 row.dias_obra = valid_obr;
                             } else if obra_info.is_some() {
-                                // Si se vincula la obra en lote sin especificar días, asignar el tope máximo de la obra en el mes
                                 row.dias_obra = max_permitido;
                             } else if row.dias_obra > max_permitido {
                                 row.dias_obra = max_permitido;
@@ -2081,13 +2772,14 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             }
                             recalculate_row_in_memory(row);
                             count += 1;
+                            modified_ids.insert(row.id_reporte_liq);
                         }
                     }
 
                     let rows = state
                         .all_rows
                         .iter()
-                        .filter(|r| ids_to_modify.contains(&r.id_reporte_liq))
+                        .filter(|r| modified_ids.contains(&r.id_reporte_liq))
                         .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
                         .collect();
 
@@ -2130,6 +2822,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
+        let pool_clone = db_pool.clone();
         app_logic.on_exportar_reporte_liquidaciones_excel(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let state = session_clone.lock().unwrap();
@@ -2167,6 +2860,78 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     filter_obra_id,
                 );
 
+                let mut delegacion = "COAHUILA".to_string();
+                let mut subdelegacion = "SALTILLO".to_string();
+                let mut rfc = "GON2110075C9".to_string();
+                let representante_legal = "ARTURO CARRILLO DOMINGUEZ".to_string();
+
+                if let Some(ref pool) = pool_clone {
+                    if let Ok(mut client) = pool.get() {
+                        if let Some(ref rev_id_str) = state.current_revision_id {
+                            if let Ok(rev_uuid) = Uuid::parse_str(rev_id_str) {
+                                if let Ok(Some(row)) = client.query_opt(
+                                    r#"
+                                    SELECT c.rfc, rp.delegacion, rp.subdelegacion
+                                    FROM public.revisiones r
+                                    JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal
+                                    JOIN public.clientes c ON c.id = rp.id_cliente
+                                    WHERE r.id = $1
+                                    "#,
+                                    &[&rev_uuid],
+                                ) {
+                                    if let Some(r) = row.get::<_, Option<String>>(0) {
+                                        if !r.trim().is_empty() { rfc = r.trim().to_string(); }
+                                    }
+                                    if let Some(d) = row.get::<_, Option<String>>(1) {
+                                        if !d.trim().is_empty() { delegacion = d.trim().to_string(); }
+                                    }
+                                    if let Some(sd) = row.get::<_, Option<String>>(2) {
+                                        if !sd.trim().is_empty() { subdelegacion = sd.trim().to_string(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let periodo_obra = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
+                    let o = &state.obras_options[state.filter_obra_idx - 1];
+                    match (o.fecha_inicio, o.fecha_fin) {
+                        (Some(fi), Some(ff)) => format!("{} AL {}", fi.format("%d/%m/%Y"), ff.format("%d/%m/%Y")),
+                        (Some(fi), None) => format!("DESDE {}", fi.format("%d/%m/%Y")),
+                        (None, Some(ff)) => format!("HASTA {}", ff.format("%d/%m/%Y")),
+                        (None, None) => "15/04/2026 AL 30/06/2026".to_string(),
+                    }
+                } else {
+                    let mut min_fi: Option<chrono::NaiveDate> = None;
+                    let mut max_ff: Option<chrono::NaiveDate> = None;
+                    for o in &state.obras_options {
+                        if let Some(fi) = o.fecha_inicio {
+                            min_fi = Some(min_fi.map(|m| m.min(fi)).unwrap_or(fi));
+                        }
+                        if let Some(ff) = o.fecha_fin {
+                            max_ff = Some(max_ff.map(|m| m.max(ff)).unwrap_or(ff));
+                        }
+                    }
+                    match (min_fi, max_ff) {
+                        (Some(fi), Some(ff)) => format!("{} AL {}", fi.format("%d/%m/%Y"), ff.format("%d/%m/%Y")),
+                        (Some(fi), None) => format!("DESDE {}", fi.format("%d/%m/%Y")),
+                        (None, Some(ff)) => format!("HASTA {}", ff.format("%d/%m/%Y")),
+                        (None, None) => "15/04/2026 AL 30/06/2026".to_string(),
+                    }
+                };
+
+                let header_meta = ReporteFinalHeaderMeta {
+                    delegacion,
+                    subdelegacion,
+                    cliente_nombre: state.cliente_nombre.clone(),
+                    rp_registro: state.rp_registro.clone(),
+                    rfc,
+                    periodo_obra,
+                    representante_legal,
+                    revision_folio: state.revision_folio.clone(),
+                };
+
                 match export_reporte_liquidaciones_to_excel(
                     &state.filtered_rows,
                     &state.all_rows,
@@ -2176,6 +2941,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     &state.cliente_nombre,
                     &state.rp_registro,
                     &state.revision_folio,
+                    Some(&header_meta),
                 ) {
                     Ok(_) => {
                         crate::show_toast_message(
@@ -2580,12 +3346,52 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 state.emp_filter_all_obras = true;
                 state.emp_filter_selected_months.clear();
                 state.emp_filter_selected_obras.clear();
+                state.emp_filter_worker_ids.clear();
+                state.emp_filter_worker_rfcs.clear();
+                state.selected_ids.clear();
                 ui.global::<AppData>().set_show_reporte_emp_modal(false);
 
                 apply_reporte_filtering(&mut state);
                 render_reporte_ui(&ui, &state);
 
-                crate::show_toast_message(&ui, "Filtro de empleados removido.");
+                crate::show_toast_message(&ui, "Filtro de empleados removido y selección limpiada.");
+            }
+        });
+    }
+
+    // 35b. Limpiar todos los filtros (búsqueda, obra, periodo, estado, empleados) y deseleccionar
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_limpiar_todos_filtros(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                state.search_query.clear();
+                state.filter_obra_idx = 0;
+                state.filter_periodo_idx = 0;
+                state.filter_estado_idx = 0;
+                state.emp_filter_active = false;
+                state.emp_filter_all_months = true;
+                state.emp_filter_all_obras = true;
+                state.emp_filter_selected_months.clear();
+                state.emp_filter_selected_obras.clear();
+                state.emp_filter_worker_ids.clear();
+                state.emp_filter_worker_rfcs.clear();
+                state.selected_ids.clear();
+                state.current_page = 1;
+
+                let app_data = ui.global::<AppData>();
+                app_data.set_reporte_search_query("".into());
+                app_data.set_reporte_filter_obra_idx(0);
+                app_data.set_reporte_filter_periodo_idx(0);
+                app_data.set_reporte_filter_estado_idx(0);
+                app_data.set_reporte_emp_filter_active(false);
+                app_data.set_show_reporte_emp_modal(false);
+
+                apply_reporte_filtering(&mut state);
+                render_reporte_ui(&ui, &state);
+
+                crate::show_toast_message(&ui, "Filtros removidos y selección limpiada.");
             }
         });
     }
@@ -2998,6 +3804,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::build_rfc_curp_label;
 
     #[test]
@@ -3100,6 +3907,8 @@ mod tests {
             "09/2024",
             f_ini,
             f_fin,
+            None,
+            None,
         );
         // Debe ser 29 días por defecto y como máximo
         assert_eq!(dias_obra_mes, Some(29));
@@ -3128,6 +3937,8 @@ mod tests {
             "03/2024",
             f_ini,
             f_fin,
+            None,
+            None,
         );
         assert_eq!(dias_obra_mes_f1, Some(14));
         assert_eq!(max_f1, 14, "Fulanito 1 debe tener 14 días máximo en marzo");
@@ -3143,6 +3954,8 @@ mod tests {
             "03/2024",
             f_ini,
             f_fin,
+            None,
+            None,
         );
         assert_eq!(dias_obra_mes_f2, Some(14));
         assert_eq!(max_f2, 10, "Fulanito 2 debe tener 10 días máximo en marzo");
@@ -3173,6 +3986,8 @@ mod tests {
             "03/2024",
             f_ini,
             f_fin,
+            None,
+            None,
         );
         assert_eq!(max_dias, 14);
 
@@ -3190,7 +4005,362 @@ mod tests {
             "03/2024",
             f_ini,
             f_fin,
+            None,
+            None,
         );
         assert_eq!(max_dias_bajo, 7);
     }
+
+    #[test]
+    fn test_calculo_dias_obra_con_clave_baja_ejemplo_usuario_view() {
+        use chrono::NaiveDate;
+        use crate::db::reporte_liquidaciones::{calculate_max_dias_obra_for_employee, validate_obra_assignment_for_employee};
+
+        // Obra C1234567: Inicio 18/03/2026, Fin 30/05/2026
+        // Empleado con Baja 12/03/2026, Dias Cedula 12
+        let f_ini = NaiveDate::from_ymd_opt(2026, 3, 18);
+        let f_fin = NaiveDate::from_ymd_opt(2026, 5, 30);
+        let f_baja = NaiveDate::from_ymd_opt(2026, 3, 12);
+
+        let (max_dias, _) = calculate_max_dias_obra_for_employee(
+            12,
+            0.0,
+            0.0,
+            0.0,
+            "MARZO",
+            2026,
+            "03/2026",
+            f_ini,
+            f_fin,
+            f_baja,
+            None,
+        );
+        assert_eq!(max_dias, 0, "Obra iniciada después de baja debe dar tope 0");
+
+        let val = validate_obra_assignment_for_employee(
+            f_ini,
+            f_fin,
+            f_baja,
+            None,
+            "MARZO",
+            2026,
+            "03/2026",
+        );
+        assert!(val.is_err(), "No debe permitirse asignar una obra iniciada después de baja");
+    }
+
+    #[test]
+    fn test_filtro_obras_solo_creadas_por_usuario_o_con_datos() {
+        use uuid::Uuid;
+        use crate::db::reporte_liquidaciones::{ObraOptionDb, ReporteLiquidacionRowDb};
+
+        let id_c0896231 = Uuid::now_v7();
+        let id_c0896232 = Uuid::now_v7();
+        let id_c0909820 = Uuid::now_v7();
+        let id_c0944829 = Uuid::now_v7();
+        let id_c0971944 = Uuid::now_v7();
+
+        let obras = vec![
+            ObraOptionDb {
+                id: id_c0896231,
+                numero: "C0896231".into(),
+                tipo_obra: "".into(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "C0896231".into(),
+                creado_usuario: true, // Creado por usuario, 0 filas -> debe conservarse
+                monto: 0.0,
+            },
+            ObraOptionDb {
+                id: id_c0896232,
+                numero: "C0896232".into(),
+                tipo_obra: "".into(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "C0896232".into(),
+                creado_usuario: false, // Creado por cédula, tiene filas -> debe conservarse
+                monto: 0.0,
+            },
+            ObraOptionDb {
+                id: id_c0909820,
+                numero: "C0909820".into(),
+                tipo_obra: "".into(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "C0909820".into(),
+                creado_usuario: false, // Creado por cédula, 0 filas -> DEBE ELIMINARSE DE FILTROS
+                monto: 0.0,
+            },
+            ObraOptionDb {
+                id: id_c0944829,
+                numero: "C0944829".into(),
+                tipo_obra: "".into(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "C0944829".into(),
+                creado_usuario: false, // Creado por cédula, tiene filas -> debe conservarse
+                monto: 0.0,
+            },
+            ObraOptionDb {
+                id: id_c0971944,
+                numero: "C0971944".into(),
+                tipo_obra: "".into(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "C0971944".into(),
+                creado_usuario: true, // Creado por usuario, 0 filas -> debe conservarse
+                monto: 0.0,
+            },
+        ];
+
+        let make_dummy_row = |oid: Uuid, num: &str| -> ReporteLiquidacionRowDb {
+            ReporteLiquidacionRowDb {
+                id_reporte_liq: Uuid::now_v7(),
+                id_parent_reporte_liq: Uuid::now_v7(),
+                id_liquidacion: Uuid::now_v7(),
+                id_empleado: Uuid::now_v7(),
+                nombre_trabajador: "TRABAJADOR".into(),
+                rfc: "XAXX010101000".into(),
+                curp: "XAXX010101HDF00".into(),
+                nss: "12345678901".into(),
+                registro_patronal: "Y5410204108".into(),
+                mes_periodo: "ENERO".into(),
+                anio_periodo: 2024,
+                periodo_str: "01/2024".into(),
+                dias_cedula: 30,
+                id_registro_obra: Some(oid),
+                obra_numero: num.into(),
+                obra_label: num.into(),
+                dias_obra: 30,
+                obra_creado_usuario: false,
+                clave: "".into(),
+                fecha: None,
+                fecha_str: "-".into(),
+                sdi: 350.0,
+                lic: 0.0,
+                inc: 0.0,
+                aus: 0.0,
+                cf: 100.0,
+                exc_pat: 0.0,
+                exc_obr: 0.0,
+                pd_pat: 0.0,
+                pd_obr: 0.0,
+                gmp_pat: 0.0,
+                gmp_obr: 0.0,
+                rt: 0.0,
+                iv_pat: 0.0,
+                iv_obr: 0.0,
+                gps: 10.0,
+                patronal: 80.0,
+                obrera: 20.0,
+                subtotal: 100.0,
+                cf_orig: 100.0,
+                exc_pat_orig: 0.0,
+                exc_obr_orig: 0.0,
+                pd_pat_orig: 0.0,
+                pd_obr_orig: 0.0,
+                gmp_pat_orig: 0.0,
+                gmp_obr_orig: 0.0,
+                rt_orig: 0.0,
+                iv_pat_orig: 0.0,
+                iv_obr_orig: 0.0,
+                gps_orig: 10.0,
+                patronal_orig: 80.0,
+                obrera_orig: 20.0,
+                subtotal_orig: 100.0,
+            }
+        };
+
+        // Filas asociadas solo a C0896232 y C0944829
+        let rows = vec![
+            make_dummy_row(id_c0896232, "C0896232"),
+            make_dummy_row(id_c0944829, "C0944829"),
+        ];
+
+        let mut state = ReporteSessionState {
+            all_rows: rows,
+            obras_options: obras,
+            ..Default::default()
+        };
+
+        apply_reporte_filtering(&mut state);
+
+        // Se deben conservar 4 obras: C0896231 (user), C0896232 (en tabla), C0944829 (en tabla), C0971944 (user)
+        assert_eq!(state.obras_options.len(), 4);
+        assert!(state.obras_options.iter().any(|o| o.numero == "C0896231"));
+        assert!(state.obras_options.iter().any(|o| o.numero == "C0896232"));
+        assert!(state.obras_options.iter().any(|o| o.numero == "C0944829"));
+        assert!(state.obras_options.iter().any(|o| o.numero == "C0971944"));
+
+        // C0909820 no fue creada por usuario y no tiene filas, debe haber sido eliminada
+        assert!(!state.obras_options.iter().any(|o| o.numero == "C0909820"));
+    }
+
+    #[test]
+    fn test_modificacion_masiva_asignacion_obra_y_dias() {
+        let obra_id_nueva = Uuid::now_v7();
+        let obra_nueva = ObraOptionDb {
+            id: obra_id_nueva,
+            numero: "OBRA-MASIVA-01".to_string(),
+            label: "OBRA-MASIVA-01 - PROYECTO ALPHA".to_string(),
+            tipo_obra: "Construcción".to_string(),
+            fecha_inicio: Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+            fecha_fin: Some(NaiveDate::from_ymd_opt(2026, 1, 31).unwrap()),
+            creado_usuario: true,
+            monto: 0.0,
+        };
+
+        let row1_id = Uuid::now_v7();
+        let row2_id = Uuid::now_v7();
+        let row3_id = Uuid::now_v7();
+
+        // 3 empleados:
+        // Emp 1: Sin incidencias, mes 31 días (enero 2026)
+        // Emp 2: Con 5 días de incapacidad (inc: 5.0), tope 26 días
+        // Emp 3: Clave "baja", no debe modificarse
+        let make_row = |id: Uuid, nombre: &str, clave: &str, inc: f64| -> ReporteLiquidacionRowDb {
+            ReporteLiquidacionRowDb {
+                id_reporte_liq: id,
+                id_parent_reporte_liq: Uuid::now_v7(),
+                id_liquidacion: Uuid::now_v7(),
+                id_empleado: Uuid::now_v7(),
+                periodo_str: "01/2026".to_string(),
+                mes_periodo: "Enero".to_string(),
+                anio_periodo: 2026,
+                nss: "12345678901".to_string(),
+                rfc: "TEST010101XX1".to_string(),
+                curp: "TEST010101HDF00".to_string(),
+                nombre_trabajador: nombre.to_string(),
+                registro_patronal: "Y123456710".to_string(),
+                id_registro_obra: None,
+                obra_numero: String::new(),
+                obra_label: "⚠️ Sin Asignar (Pendiente)".to_string(),
+                obra_creado_usuario: false,
+                dias_cedula: 31,
+                dias_obra: 0,
+                clave: clave.to_string(),
+                fecha: None,
+                fecha_str: "-".to_string(),
+                sdi: 500.0,
+                lic: 0.0,
+                inc,
+                aus: 0.0,
+                cf: 0.0,
+                exc_pat: 0.0,
+                exc_obr: 0.0,
+                pd_pat: 0.0,
+                pd_obr: 0.0,
+                gmp_pat: 0.0,
+                gmp_obr: 0.0,
+                rt: 0.0,
+                iv_pat: 0.0,
+                iv_obr: 0.0,
+                gps: 0.0,
+                patronal: 0.0,
+                obrera: 0.0,
+                subtotal: 0.0,
+                cf_orig: 100.0,
+                exc_pat_orig: 0.0,
+                exc_obr_orig: 0.0,
+                pd_pat_orig: 0.0,
+                pd_obr_orig: 0.0,
+                gmp_pat_orig: 0.0,
+                gmp_obr_orig: 0.0,
+                rt_orig: 0.0,
+                iv_pat_orig: 0.0,
+                iv_obr_orig: 0.0,
+                gps_orig: 10.0,
+                patronal_orig: 80.0,
+                obrera_orig: 20.0,
+                subtotal_orig: 100.0,
+            }
+        };
+
+        let mut rows = vec![
+            make_row(row1_id, "TRABAJADOR UNO", "01", 0.0),
+            make_row(row2_id, "TRABAJADOR DOS", "01", 5.0),
+            make_row(row3_id, "TRABAJADOR BAJA", "BAJA", 0.0),
+        ];
+
+        let selected: HashSet<Uuid> = [row1_id, row2_id, row3_id].into_iter().collect();
+
+        // Simular aplicación masiva:
+        // Obra: obra_nueva
+        // Días Cédula: 30
+        // Días Obra: 30 (Emp 1 aceptará 30, Emp 2 se topará a 25 porque 30 - 5 inc = 25)
+        let obras_map: HashMap<Uuid, (Option<NaiveDate>, Option<NaiveDate>)> = [(
+            obra_id_nueva,
+            (obra_nueva.fecha_inicio, obra_nueva.fecha_fin),
+        )]
+        .into_iter()
+        .collect();
+
+        let movs_map = build_all_employee_movements_map(&rows);
+
+        for row in rows.iter_mut() {
+            if selected.contains(&row.id_reporte_liq) {
+                if row.clave.trim().eq_ignore_ascii_case("baja") {
+                    continue;
+                }
+
+                // Asignar obra
+                row.id_registro_obra = Some(obra_nueva.id);
+                row.obra_numero = obra_nueva.numero.clone();
+                row.obra_label = obra_nueva.label.clone();
+                row.obra_creado_usuario = obra_nueva.creado_usuario;
+
+                // Asignar días cédula
+                row.dias_cedula = 30;
+
+                // Calcular max permitido
+                let (obra_ini, obra_fin) = row
+                    .id_registro_obra
+                    .and_then(|oid| obras_map.get(&oid).copied())
+                    .unwrap_or((None, None));
+
+                let movs = movs_map
+                    .get(&(row.id_empleado, row.mes_periodo.trim().to_uppercase(), row.anio_periodo))
+                    .cloned()
+                    .unwrap_or_default();
+
+                let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
+                    row.dias_cedula,
+                    row.lic,
+                    row.inc,
+                    row.aus,
+                    &row.mes_periodo,
+                    row.anio_periodo,
+                    &row.periodo_str,
+                    obra_ini,
+                    obra_fin,
+                    &movs,
+                );
+
+                // Asignar 30 días obra con tope
+                row.dias_obra = 30.min(max_permitido);
+                recalculate_row_in_memory(row);
+            }
+        }
+
+        // Validaciones:
+        let r1 = rows.iter().find(|r| r.id_reporte_liq == row1_id).unwrap();
+        assert_eq!(r1.id_registro_obra, Some(obra_id_nueva));
+        assert_eq!(r1.obra_numero, "OBRA-MASIVA-01");
+        assert_eq!(r1.dias_cedula, 30);
+        assert_eq!(r1.dias_obra, 30);
+        assert!(r1.subtotal > 0.0);
+
+        let r2 = rows.iter().find(|r| r.id_reporte_liq == row2_id).unwrap();
+        assert_eq!(r2.id_registro_obra, Some(obra_id_nueva));
+        assert_eq!(r2.dias_cedula, 30);
+        // Emp 2 tenía 5 de incapacidad: 30 - 5 = 25 máx
+        assert_eq!(r2.dias_obra, 25);
+        assert!(r2.subtotal > 0.0);
+
+        // Emp 3 tenía clave baja: no fue modificado
+        let r3 = rows.iter().find(|r| r.id_reporte_liq == row3_id).unwrap();
+        assert_eq!(r3.id_registro_obra, None);
+        assert_eq!(r3.dias_obra, 0);
+    }
 }
+

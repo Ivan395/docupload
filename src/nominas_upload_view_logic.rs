@@ -133,26 +133,19 @@ fn upload_nominas_to_rustfs(
         return (0, 0);
     }
 
-    let base = common_ancestor(paths);
+    let _base = common_ancestor(paths);
     let mut ok = 0;
     let mut err = 0;
 
     for p in paths {
-        // Ruta relativa al ancestro común; si no hay ancestro
-        // (archivos sueltos de distintas unidades), se usa el
-        // nombre del archivo.
-        let rel = base
-            .as_ref()
-            .and_then(|b| p.strip_prefix(b).ok())
-            .map(|r| r.to_string_lossy().into_owned())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                p.file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-            })
+        // En PostgreSQL public.nominas.nombre_archivo se almacena el nombre del archivo XML.
+        // El nombre en RustFS debe coincidir exactamente con este nombre.
+        let file_name = p
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        if rel.is_empty() {
+        if file_name.is_empty() {
             err += 1;
             continue;
         }
@@ -160,11 +153,11 @@ fn upload_nominas_to_rustfs(
         match std::fs::read(p) {
             Ok(data) => {
                 match crate::rustfs::upload_file_to_rustfs(
-                    cliente, rp, revision, "Nominas", &rel, &data,
+                    cliente, rp, revision, "Nominas", &file_name, &data,
                 ) {
                     Ok(_) => ok += 1,
                     Err(e) => {
-                        log::warn!("Error subiendo {} a RustFS: {}", rel, e);
+                        log::warn!("Error subiendo {} a RustFS: {}", file_name, e);
                         err += 1;
                     }
                 }
