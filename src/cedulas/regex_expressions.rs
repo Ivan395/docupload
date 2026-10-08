@@ -8,6 +8,7 @@ pub struct OCRPatterns {
     // Individual business header patterns
     pub business_registro_patronal: Regex,
     pub business_rfc: Regex,
+    pub business_curp: Regex,
     pub business_area_geografica: Regex,
     pub business_razon_social: Regex,
     pub business_delegacion: Regex,
@@ -79,6 +80,7 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
         r"(?i)reg(?:istro)?[\.\t ]*patronal[\.\t ]*:?[\.\t ]*(?P<registro_patronal>[a-z0-9][a-z0-9\-_]{7,15}[a-z0-9]|[a-z0-9\-]+)",
     )?;
     let business_rfc = Regex::new(r"(?i)rfc\s*:\s*(?P<rfc>[a-z0-9\-]+)")?;
+    let business_curp = Regex::new(r"(?i)\bcurp\b\s*[:\t ]*\s*(?P<curp>[a-z0-9\-]{18,22})\b")?;
     let business_area_geografica =
         Regex::new(r"(?is)area\s+geogr[áa]fica\s*:\s*\n?\s*(?P<area>[a-z])\b")?;
     let business_razon_social = Regex::new(
@@ -136,6 +138,7 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
         columns_in_file,
         business_registro_patronal,
         business_rfc,
+        business_curp,
         business_area_geografica,
         business_razon_social,
         business_delegacion,

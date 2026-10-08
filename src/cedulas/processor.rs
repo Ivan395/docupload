@@ -641,5 +641,23 @@ mod tests {
         assert_eq!(valid_emps.len(), 2);
         assert_eq!(duplicate_count, 1);
     }
+
+    #[test]
+    fn test_business_curp_extraction() {
+        let patterns = crate::cedulas::regex_expressions::initialize_patterns().unwrap();
+        let mut b = Business::new();
+        let page_text = "NOMBRE O RAZÓN SOCIAL: JUAN PEREZ GARCIA\nRFC: PEGJ800101XYZ\nCURP: PEGJ800101HDFRRN01\nDOMICILIO: AV INSURGENTES 123\nCÓDIGO POSTAL: 06700\nACTIVIDAD: CONSTRUCCION\nENTIDAD: CIUDAD DE MEXICO\n";
+        b.extract_from_page(page_text, &patterns);
+
+        assert_eq!(b.curp.as_deref(), Some("PEGJ800101HDFRRN01"));
+        assert_eq!(b.razon_social.as_deref(), Some("JUAN PEREZ GARCIA"));
+        assert_eq!(b.rfc.as_deref(), Some("PEGJ800101XYZ"));
+        assert_eq!(b.codigo_postal.as_deref(), Some("06700"));
+
+        let mut b_no_curp = Business::new();
+        let page_moral = "NOMBRE O RAZÓN SOCIAL: EMPRESA SA DE CV\nRFC: EMP900101XYZ\nDOMICILIO: AV JUAREZ 456\n";
+        b_no_curp.extract_from_page(page_moral, &patterns);
+        assert_eq!(b_no_curp.curp, None);
+    }
 }
 

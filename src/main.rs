@@ -10,6 +10,7 @@ pub mod nominas_view_logic;
 pub mod rustfs;
 pub mod reporte_view_logic;
 pub mod sat;
+pub mod sua_export;
 pub mod validation;
 
 use crate::calendario_view_logic::*;
@@ -2059,6 +2060,24 @@ fn spawn_cedulas_view_worker(
 
                         if let Some(ref pool) = pool_stats {
                             update_global_stats(&ui, pool);
+                            load_clientes_ui(&ui, pool);
+                            let selected_cid = app_data.get_selected_cliente_id().to_string();
+                            if !selected_cid.is_empty() {
+                                load_registros_patronales_ui(&ui, pool, &selected_cid);
+                                if let Ok(mut client) = pool.get() {
+                                    if let Ok(uuid_val) = Uuid::parse_str(&selected_cid) {
+                                        if let Ok(Some(row)) = client.query_opt(
+                                            "SELECT nombre, rfc FROM public.clientes WHERE id = $1",
+                                            &[&uuid_val],
+                                        ) {
+                                            let c_nom: String = row.get(0);
+                                            let c_rfc: Option<String> = row.get(1);
+                                            app_data.set_selected_cliente_nombre(c_nom.into());
+                                            app_data.set_selected_cliente_rfc(c_rfc.unwrap_or_default().trim().into());
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         if let Some(stats) = saved_stats_opt {
@@ -2209,9 +2228,7 @@ fn sync_and_load_cedulas_view_data(
     // 4. Actualizar sesión y componentes Slint UI
     let mut sess = session_arc.lock().unwrap();
     sess.current_revision_id = Some(rev_id.to_string());
-    if !rustfs_files.is_empty() {
-        sess.files = rustfs_files;
-    }
+    sess.files = rustfs_files;
 
     match db_res {
         Ok(Some((audit, businesses))) => {
@@ -2221,19 +2238,16 @@ fn sync_and_load_cedulas_view_data(
             update_cedulas_audit_view_ui(ui, &mut sess);
             ui.global::<AppData>().set_cedulas_view_state(2);
         }
-        Ok(None) => {
+        Ok(None) | Err(_) => {
             sess.audit_res = None;
             sess.businesses.clear();
-            update_cedulas_view_file_list_ui(ui, &sess);
+            sess.filtered_details.clear();
             if !sess.files.is_empty() {
+                update_cedulas_view_file_list_ui(ui, &sess);
                 ui.global::<AppData>().set_cedulas_view_state(1);
             } else {
                 reset_cedulas_ui_to_state_zero(ui, &mut sess);
             }
-        }
-        Err(e) => {
-            log::error!("Error cargando cédulas desde DB: {}", e);
-            update_cedulas_view_file_list_ui(ui, &sess);
         }
     }
 }
@@ -3179,9 +3193,15 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
+        let cedulas_session_clone = cedulas_session.clone();
         app_logic.on_select_revision_for_obras(move |rev_id, rev_nombre, rev_folio| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
+                let prev_rev_id = app_data.get_selected_revision_id().to_string();
+                if prev_rev_id != rev_id.as_str() {
+                    let mut sess = cedulas_session_clone.lock().unwrap();
+                    reset_cedulas_ui_to_state_zero(&ui, &mut sess);
+                }
                 app_data.set_selected_revision_id(rev_id.clone());
                 app_data.set_selected_revision_nombre(rev_nombre);
                 app_data.set_selected_revision_folio(rev_folio);
@@ -3557,7 +3577,30 @@ fn main() -> Result<(), slint::PlatformError> {
                 thread::spawn(move || {
                     if let Some(ref pool) = pool_opt {
                         let res = match pool.get() {
-                            Ok(mut client) => delete_revision(&mut client, rev_id_str.as_str()),
+                            Ok(mut client) => {
+                                let mut cliente_nom = String::new();
+                                let mut rp_reg = String::new();
+                                let mut rev_nom = String::new();
+                                if let Ok(rev_uuid) = Uuid::parse_str(&rev_id_str) {
+                                    if let Ok(Some(row)) = client.query_opt(
+                                        "SELECT c.nombre, rp.registro, r.nombre
+                                         FROM public.revisiones r
+                                         JOIN public.registros_patronales rp ON r.id_registro_patronal = rp.id
+                                         JOIN public.clientes c ON rp.id_cliente = c.id
+                                         WHERE r.id = $1",
+                                        &[&rev_uuid],
+                                    ) {
+                                        cliente_nom = row.get(0);
+                                        rp_reg = row.get(1);
+                                        rev_nom = row.get(2);
+                                    }
+                                }
+                                let del_res = delete_revision(&mut client, rev_id_str.as_str());
+                                if del_res.is_ok() && !cliente_nom.is_empty() && !rp_reg.is_empty() && !rev_nom.is_empty() {
+                                    let _ = crate::rustfs::move_revision_to_trash(&cliente_nom, &rp_reg, &rev_nom);
+                                }
+                                del_res
+                            }
                             Err(e) => Err(format!("Error obteniendo conexión a la BD: {}", e)),
                         };
 
@@ -3707,7 +3750,22 @@ fn main() -> Result<(), slint::PlatformError> {
                 thread::spawn(move || {
                     if let Some(ref pool) = pool_opt {
                         let res = match pool.get() {
-                            Ok(mut client) => delete_cliente(&mut client, cliente_id_str.as_str()),
+                            Ok(mut client) => {
+                                let mut cliente_nom = String::new();
+                                if let Ok(c_uuid) = Uuid::parse_str(&cliente_id_str) {
+                                    if let Ok(Some(row)) = client.query_opt(
+                                        "SELECT nombre FROM public.clientes WHERE id = $1",
+                                        &[&c_uuid],
+                                    ) {
+                                        cliente_nom = row.get(0);
+                                    }
+                                }
+                                let del_res = delete_cliente(&mut client, cliente_id_str.as_str());
+                                if del_res.is_ok() && !cliente_nom.is_empty() {
+                                    let _ = crate::rustfs::move_client_to_trash(&cliente_nom);
+                                }
+                                del_res
+                            }
                             Err(e) => Err(format!("Error obteniendo conexión a la BD: {}", e)),
                         };
 
@@ -3780,7 +3838,27 @@ fn main() -> Result<(), slint::PlatformError> {
                 thread::spawn(move || {
                     if let Some(ref pool) = pool_opt {
                         let res = match pool.get() {
-                            Ok(mut client) => delete_registro_patronal(&mut client, rp_id_str.as_str()),
+                            Ok(mut client) => {
+                                let mut cliente_nom = String::new();
+                                let mut rp_reg = String::new();
+                                if let Ok(rp_uuid) = Uuid::parse_str(&rp_id_str) {
+                                    if let Ok(Some(row)) = client.query_opt(
+                                        "SELECT c.nombre, rp.registro
+                                         FROM public.registros_patronales rp
+                                         JOIN public.clientes c ON rp.id_cliente = c.id
+                                         WHERE rp.id = $1",
+                                        &[&rp_uuid],
+                                    ) {
+                                        cliente_nom = row.get(0);
+                                        rp_reg = row.get(1);
+                                    }
+                                }
+                                let del_res = delete_registro_patronal(&mut client, rp_id_str.as_str());
+                                if del_res.is_ok() && !cliente_nom.is_empty() && !rp_reg.is_empty() {
+                                    let _ = crate::rustfs::move_rp_to_trash(&cliente_nom, &rp_reg);
+                                }
+                                del_res
+                            }
                             Err(e) => Err(format!("Error obteniendo conexión a la BD: {}", e)),
                         };
 
@@ -3966,9 +4044,24 @@ fn main() -> Result<(), slint::PlatformError> {
                     show_toast_message(&ui, &format!("Estructura de registro de obra inválida: {}", e));
                     return;
                 }
-                if tipo_obra.trim().is_empty() {
-                    show_toast_message(&ui, "El tipo de obra es obligatorio.");
+
+                let fecha_inicio_opt = parse_date_opt(f_ini.as_str());
+                if fecha_inicio_opt.is_none() {
+                    show_toast_message(&ui, "La fecha de inicio de la obra es obligatoria (DD/MM/AAAA).");
                     return;
+                }
+
+                let fecha_fin_opt = parse_date_opt(f_fin.as_str());
+                if fecha_fin_opt.is_none() {
+                    show_toast_message(&ui, "La fecha final de la obra es obligatoria (DD/MM/AAAA).");
+                    return;
+                }
+
+                if let (Some(ini), Some(fin)) = (fecha_inicio_opt, fecha_fin_opt) {
+                    if ini > fin {
+                        show_toast_message(&ui, "La fecha de inicio no puede ser posterior a la fecha final.");
+                        return;
+                    }
                 }
 
                 let sup: f64 = sup_str.trim().parse().unwrap_or(0.0);
@@ -3990,8 +4083,8 @@ fn main() -> Result<(), slint::PlatformError> {
                         numero: numero.to_string(),
                         clase: if clase.starts_with("--") { "PRIVADA".to_string() } else { clase.to_string() },
                         tipo_obra: tipo_obra.to_string(),
-                        fecha_inicio: parse_date_opt(f_ini.as_str()),
-                        fecha_fin: parse_date_opt(f_fin.as_str()),
+                        fecha_inicio: fecha_inicio_opt,
+                        fecha_fin: fecha_fin_opt,
                         ubicacion: ubicacion.to_string(),
                         superficie_construido: sup,
                         monto,
@@ -4014,7 +4107,15 @@ fn main() -> Result<(), slint::PlatformError> {
                             app_data.set_obra_form_numero_msg("".into());
                             load_obras_ui(&ui, pool, &rev_id);
                             update_global_stats(&ui, pool);
-                            let msg = if is_edit { "Obra actualizada exitosamente." } else { "Registro de obra creado exitosamente." };
+                            let msg = if monto > 0.0 {
+                                if is_edit { "Obra actualizada exitosamente." } else { "Registro de obra creado exitosamente." }
+                            } else {
+                                if is_edit {
+                                    "Obra actualizada. Aviso: Monto Total en 0; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
+                                } else {
+                                    "Registro de obra creado. Aviso: Monto Total en 0; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
+                                }
+                            };
                             show_toast_message(&ui, msg);
                         }
                         Err(e) => {
@@ -5656,8 +5757,8 @@ mod tests_ui {
         // 8. Test de Reporte de Liquidaciones: KPIs, Paginación, Filtrado y Prorrateo en tiempo real
         use uuid::Uuid;
 
-        let obra_id_1 = Uuid::new_v4();
-        let obra_id_2 = Uuid::new_v4();
+        let obra_id_1 = Uuid::now_v7();
+        let obra_id_2 = Uuid::now_v7();
 
         let obras = vec![
             crate::db::reporte_liquidaciones::ObraOptionDb {
@@ -5693,10 +5794,10 @@ mod tests_ui {
             let dias_obr = if is_assigned { 20 } else { 0 };
 
             let mut r = crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb {
-                id_reporte_liq: Uuid::new_v4(),
-                id_parent_reporte_liq: Uuid::new_v4(),
-                id_liquidacion: Uuid::new_v4(),
-                id_empleado: Uuid::new_v4(),
+                id_reporte_liq: Uuid::now_v7(),
+                id_parent_reporte_liq: Uuid::now_v7(),
+                id_liquidacion: Uuid::now_v7(),
+                id_empleado: Uuid::now_v7(),
                 nombre_trabajador: format!("EMPLEADO TEST {:03}", i),
                 rfc: format!("TEST{:04}0101", i),
                 curp: format!("TEST{:04}0101HDF00", i),

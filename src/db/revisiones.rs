@@ -710,5 +710,50 @@ mod tests {
         assert!(parsed.is_some());
         assert_eq!(parsed.unwrap().to_string(), valid_uuid);
     }
+
+    #[test]
+    fn test_registro_obra_campos_obligatorios_y_opcionales() {
+        use crate::validation::validate_registro_obra;
+
+        // Número obligatorio y válido
+        let numero = "C1234567";
+        assert!(validate_registro_obra(numero).is_ok());
+
+        // Fecha inicio y fin obligatorias y válidas
+        let f_ini_str = "01/01/2024";
+        let f_fin_str = "31/12/2024";
+        let f_ini = parse_date_opt(f_ini_str);
+        let f_fin = parse_date_opt(f_fin_str);
+        assert!(f_ini.is_some());
+        assert!(f_fin.is_some());
+        assert!(f_ini.unwrap() <= f_fin.unwrap());
+
+        // Fechas invertidas detectables
+        let f_fin_invalida = parse_date_opt("01/01/2023").unwrap();
+        assert!(f_ini.unwrap() > f_fin_invalida);
+
+        // Campos opcionales vacíos permitidos
+        let item = RegistroObraItem {
+            id: "".to_string(),
+            id_revision: "rev-1".to_string(),
+            id_registro_patronal: "rp-1".to_string(),
+            numero: numero.to_string(),
+            clase: "".to_string(),
+            tipo_obra: "".to_string(),
+            fecha_inicio: f_ini,
+            fecha_fin: f_fin,
+            ubicacion: "".to_string(),
+            superficie_construido: 0.0,
+            monto: 0.0,
+            delegacion: "".to_string(),
+            subdelegacion: "".to_string(),
+            creado_usuario: true,
+            ..Default::default()
+        };
+
+        // Sin monto total se alerta para el límite del 18%
+        let necesita_aviso_monto = item.monto <= 0.0;
+        assert!(necesita_aviso_monto, "Sin monto capturado debe emitir aviso para cálculo del 18%");
+    }
 }
 

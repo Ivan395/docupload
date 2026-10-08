@@ -168,6 +168,32 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
+                // Exportar SUA
+                Rectangle {
+                    height: 38px;
+                    width: 145px;
+                    border-radius: 6px;
+                    background: btn_export_sua.has-hover ? #b45309 : #d97706;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Text { text: "📄"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Exportar SUA";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_export_sua := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.reporte_abrir_modal_exportar_sua(); }
+                    }
+                }
+
                 // Modificación Masiva Toggle
                 Rectangle {
                     height: 38px;
@@ -832,6 +858,92 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 }
 
 
+            }
+        }
+
+        // 4.1. Panel Informativo: Registros de Obra Creados por el Usuario (Vigencias)
+        if AppData.reporte_has_obras_usuario : Rectangle {
+            border-radius: 8px;
+            background: #f8fafc;
+            border-width: 1px;
+            border-color: #cbd5e1;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    cross-axis-alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+                        Text { text: "🏗️"; font-size: 14px; vertical-alignment: center; }
+                        Text {
+                            text: "Registros de Obra Creados por el Usuario (Vigencias de Análisis):";
+                            font-size: 12.5px;
+                            font-weight: 800;
+                            color: #1e3a8a;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Fechas clave para determinar los días máximos asignables a cada trabajador";
+                        font-size: 11px;
+                        font-weight: 500;
+                        color: #64748b;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+
+                    for obra in AppData.reporte_obras_usuario : Rectangle {
+                        border-radius: 6px;
+                        background: #ffffff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+                        height: 50px;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 12px;
+                            cross-axis-alignment: center;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: obra.numero;
+                                        font-size: 13px;
+                                        font-weight: 800;
+                                        color: #1d4ed8;
+                                    }
+                                    if obra.tipo_obra != "" : Text {
+                                        text: "(" + obra.tipo_obra + ")";
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: #475569;
+                                    }
+                                }
+                                Text {
+                                    text: "📅 " + obra.vigencia_str;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #047857;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1899,7 +2011,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
         Rectangle {
             width: 580px;
-            height: AppData.reporte_edit_dropdown_open ? 550px : 440px;
+            height: AppData.reporte_edit_dropdown_open ? 590px : 480px;
             border-radius: 12px;
             background: #ffffff;
             x: (parent.width - self.width) / 2;
@@ -2123,7 +2235,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                 color: #92400e;
                             }
                             Text {
-                                text: "Días permitidos (Cédula - Incidencias): " + AppData.reporte_edit_dias_max;
+                                text: "Límite máx. asignable: " + AppData.reporte_edit_dias_max + " días";
                                 font-size: 12px;
                                 font-weight: 800;
                                 color: #b45309;
@@ -2176,6 +2288,26 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                 }
                             }
                         }
+
+                        if AppData.reporte_edit_obra_vigencia_info != "" : Rectangle {
+                            border-radius: 4px;
+                            background: #eff6ff;
+                            border-width: 1px;
+                            border-color: #bfdbfe;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                Text {
+                                    text: AppData.reporte_edit_obra_vigencia_info;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #1e40af;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2196,6 +2328,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                             LineEdit {
                                 text <=> AppData.reporte_edit_dias_cedula_val;
+                                edited(text) => {
+                                    AppLogic.reporte_edit_dias_cedula_changed(text);
+                                }
                             }
                         }
                     }
@@ -3460,6 +3595,350 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         btn_apply_sel_obras := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { AppLogic.reporte_apply_quick_select_obras(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal de Exportación a SUA
+    if AppData.show_reporte_export_sua_modal : Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        background: #00000066;
+
+        TouchArea { }
+
+        Rectangle {
+            width: 530px;
+            border-radius: 10px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                // Cabecera
+                HorizontalLayout {
+                    alignment: space-between;
+                    cross-axis-alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+                        Text { text: "📄"; font-size: 18px; vertical-alignment: center; }
+                        VerticalLayout {
+                            spacing: 1px;
+                            Text {
+                                text: "Exportar Archivos para SUA (IMSS)";
+                                font-size: 15px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+                            Text {
+                                text: "Generación de archivos .TXT compatibles con el Sistema Único de Autodeterminación";
+                                font-size: 11px;
+                                color: #64748b;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 12px;
+                        background: btn_close_export_sua.has-hover ? #f1f5f9 : transparent;
+
+                        Text { text: "✕"; font-size: 12px; font-weight: 700; color: #64748b; horizontal-alignment: center; vertical-alignment: center; }
+                        btn_close_export_sua := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_cerrar_modal_exportar_sua(); }
+                        }
+                    }
+                }
+
+                // Explicación
+                Rectangle {
+                    border-radius: 6px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 4px;
+                        Text {
+                            text: "Selecciona los registros de obra para filtrar los empleados a exportar:";
+                            font-size: 11.5px;
+                            font-weight: 700;
+                            color: #334155;
+                        }
+                        Text {
+                            text: "Por defecto se encuentran seleccionadas las obras creadas por el usuario en esta revisión. Los empleados no vinculados a las obras seleccionadas serán excluidos.";
+                            font-size: 11px;
+                            color: #64748b;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Botones rápidos: Marcar Todas / Desmarcar Todas
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    cross-axis-alignment: center;
+
+                    Rectangle {
+                        height: 26px;
+                        border-radius: 4px;
+                        background: btn_sel_all_sua.has-hover ? #fef3c7 : #fffbeb;
+                        border-width: 1px;
+                        border-color: #fcd34d;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "Marcar Todas";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: #b45309;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_sel_all_sua := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_sua_select_all_obras(true); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 26px;
+                        border-radius: 4px;
+                        background: btn_desel_all_sua.has-hover ? #f1f5f9 : #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "Desmarcar Todas";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_desel_all_sua := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_sua_select_all_obras(false); }
+                        }
+                    }
+
+                    Text {
+                        text: "(" + AppData.reporte_sua_selected_count + " obras • " + AppData.reporte_sua_total_empleados_filtrados + " empleados)";
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: #1e3a8a;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Lista de Obras con checkboxes
+                Rectangle {
+                    height: 180px;
+                    border-radius: 6px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+                    clip: true;
+
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 4px;
+
+                            for item in AppData.reporte_sua_obras : Rectangle {
+                                height: 42px;
+                                border-radius: 5px;
+                                background: item.selected ? #eff6ff : (touch_item_sua.has-hover ? #f1f5f9 : #ffffff);
+                                border-width: 1px;
+                                border-color: item.selected ? #3b82f6 : #e2e8f0;
+
+                                touch_item_sua := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { AppLogic.reporte_toggle_sua_obra(item.id); }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    alignment: space-between;
+                                    cross-axis-alignment: center;
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        cross-axis-alignment: center;
+
+                                        Rectangle {
+                                            width: 16px;
+                                            height: 16px;
+                                            border-radius: 3px;
+                                            background: item.selected ? #2563eb : #ffffff;
+                                            border-width: 1px;
+                                            border-color: item.selected ? #2563eb : #cbd5e1;
+
+                                            Text {
+                                                text: "✓";
+                                                font-size: 10px;
+                                                font-weight: 800;
+                                                color: #ffffff;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                                visible: item.selected;
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 1px;
+
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: item.numero;
+                                                    font-size: 12px;
+                                                    font-weight: 800;
+                                                    color: item.selected ? #1d4ed8 : #1e293b;
+                                                }
+                                                if item.tipo_obra != "" : Text {
+                                                    text: "- " + item.tipo_obra;
+                                                    font-size: 11px;
+                                                    font-weight: 500;
+                                                    color: #64748b;
+                                                }
+                                                if item.creado_usuario : Rectangle {
+                                                    height: 16px;
+                                                    border-radius: 3px;
+                                                    background: #dcfce7;
+                                                    border-width: 1px;
+                                                    border-color: #86efac;
+                                                    HorizontalLayout {
+                                                        padding-left: 4px;
+                                                        padding-right: 4px;
+                                                        Text { text: "Obra Usuario"; font-size: 9px; font-weight: 700; color: #166534; vertical-alignment: center; }
+                                                    }
+                                                }
+                                            }
+
+                                            if item.vigencia != "" : Text {
+                                                text: "📅 " + item.vigencia;
+                                                font-size: 10px;
+                                                font-weight: 500;
+                                                color: #047857;
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: item.selected ? #dbeafe : #f1f5f9;
+
+                                        HorizontalLayout {
+                                            padding-left: 6px;
+                                            padding-right: 6px;
+                                            cross-axis-alignment: center;
+                                            Text {
+                                                text: item.empleados_count + " empleados";
+                                                font-size: 10px;
+                                                font-weight: 600;
+                                                color: item.selected ? #1d4ed8 : #64748b;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Resumen de archivos a generar
+                Rectangle {
+                    border-radius: 6px;
+                    background: #fefce8;
+                    border-width: 1px;
+                    border-color: #fef08a;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 2px;
+                        Text {
+                            text: "Archivos que se generarán en la carpeta de destino:";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #854d0e;
+                        }
+                        Text {
+                            text: "• ASEG_<Folio>.TXT (Altas de trabajadores)   • AFIL_<Folio>.TXT (Datos afiliatorios)\n• MOVT_<Folio>.TXT (Movimientos/salarios)     • CRED_<Folio>.TXT (Créditos Infonavit)\n• INCAP.TXT (Incapacidades médicas)";
+                            font-size: 10px;
+                            color: #713f12;
+                        }
+                    }
+                }
+
+                // Botones de acción
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    cross-axis-alignment: center;
+
+                    Rectangle {
+                        height: 34px;
+                        width: 90px;
+                        border-radius: 5px;
+                        background: btn_cancel_sua.has-hover ? #e2e8f0 : #f1f5f9;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        Text { text: "Cancelar"; font-size: 12px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                        btn_cancel_sua := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_cerrar_modal_exportar_sua(); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 34px;
+                        width: 180px;
+                        border-radius: 5px;
+                        background: btn_submit_sua.has-hover ? #b45309 : #d97706;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            cross-axis-alignment: center;
+                            Text { text: "💾"; font-size: 12px; vertical-alignment: center; }
+                            Text { text: "Generar Archivos SUA"; font-size: 12px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                        }
+
+                        btn_submit_sua := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_generar_sua(); }
                         }
                     }
                 }

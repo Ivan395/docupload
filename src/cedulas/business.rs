@@ -79,6 +79,7 @@ pub struct Business {
     pub codigo_postal: Option<String>,
     pub entidad: Option<String>,
     pub rfc: Option<String>,
+    pub curp: Option<String>,
     pub area_geografica: Option<String>,
     pub prima: Option<String>,
     pub employees: Vec<Employee>,
@@ -101,6 +102,7 @@ impl Business {
         merge_field("codigo_postal", &mut self.codigo_postal, &other.codigo_postal, file_name);
         merge_field("entidad", &mut self.entidad, &other.entidad, file_name);
         merge_field("rfc", &mut self.rfc, &other.rfc, file_name);
+        merge_field("curp", &mut self.curp, &other.curp, file_name);
         merge_field("area_geografica", &mut self.area_geografica, &other.area_geografica, file_name);
         merge_field("prima", &mut self.prima, &other.prima, file_name);
     }
@@ -144,6 +146,21 @@ impl Business {
             if let Ok(Some(caps)) = patterns.business_rfc.captures(page) {
                 if let Some(m) = caps.name("rfc") {
                     self.rfc = Some(m.as_str().trim().to_uppercase());
+                }
+            }
+        }
+        if self.curp.is_none() {
+            if let Ok(Some(caps)) = patterns.business_curp.captures(page) {
+                if let Some(m) = caps.name("curp") {
+                    let c: String = m
+                        .as_str()
+                        .chars()
+                        .filter(|ch| ch.is_alphanumeric())
+                        .collect::<String>()
+                        .to_uppercase();
+                    if c.len() == 18 {
+                        self.curp = Some(c);
+                    }
                 }
             }
         }

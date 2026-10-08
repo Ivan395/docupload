@@ -815,7 +815,7 @@ export component RegistrosObrasView inherits Rectangle {
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 spacing: 4px;
-                                Text { text: "Número de Registro de Obra * (SIROC / SATIC)"; font-size: 11px; font-weight: 700; color: #334155; }
+                                Text { text: "Número de Registro de Obra * (Obligatorio)"; font-size: 11px; font-weight: 700; color: #334155; }
                                 LineEdit {
                                     text <=> AppData.obra_form_numero;
                                     placeholder-text: "Ej. C1234567 o 08-12345-67";
@@ -834,7 +834,7 @@ export component RegistrosObrasView inherits Rectangle {
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 spacing: 4px;
-                                Text { text: "Clase de Obra *"; font-size: 11px; font-weight: 700; color: #334155; }
+                                Text { text: "Clase de Obra"; font-size: 11px; font-weight: 700; color: #334155; }
                                 ComboBox {
                                     model: AppData.clases_obra_combo;
                                     current-value <=> AppData.obra_form_clase_val;
@@ -845,7 +845,7 @@ export component RegistrosObrasView inherits Rectangle {
                         // Línea 2: Tipo de Obra
                         VerticalLayout {
                             spacing: 4px;
-                            Text { text: "Tipo de Obra *"; font-size: 11px; font-weight: 700; color: #334155; }
+                            Text { text: "Tipo de Obra"; font-size: 11px; font-weight: 700; color: #334155; }
                             LineEdit {
                                 text <=> AppData.obra_form_tipo_obra;
                                 placeholder-text: "Ej. Edificación de Vivienda Multifamiliar / Comercial";
@@ -855,7 +855,7 @@ export component RegistrosObrasView inherits Rectangle {
                         // Línea 3: Ubicación
                         VerticalLayout {
                             spacing: 4px;
-                            Text { text: "Ubicación del Centro de Trabajo / Obra *"; font-size: 11px; font-weight: 700; color: #334155; }
+                            Text { text: "Ubicación del Centro de Trabajo / Obra"; font-size: 11px; font-weight: 700; color: #334155; }
                             LineEdit {
                                 text <=> AppData.obra_form_ubicacion;
                                 placeholder-text: "Ej. Av. Insurgentes Sur 1602, Benito Juárez, CDMX";
@@ -869,7 +869,7 @@ export component RegistrosObrasView inherits Rectangle {
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 spacing: 4px;
-                                Text { text: "Fecha de Inicio * (DD/MM/YYYY)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                Text { text: "Fecha de Inicio * (Obligatoria)"; font-size: 11px; font-weight: 700; color: #1e3a8a; }
                                 DatePickerField {
                                     date-val <=> AppData.obra_form_fecha_inicio;
                                     placeholder-text: "DD/MM/YYYY (ej. 01/02/2023)";
@@ -880,7 +880,7 @@ export component RegistrosObrasView inherits Rectangle {
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 spacing: 4px;
-                                Text { text: "Fecha Fin * (DD/MM/YYYY)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                Text { text: "Fecha Fin * (Obligatoria)"; font-size: 11px; font-weight: 700; color: #1e3a8a; }
                                 DatePickerField {
                                     date-val <=> AppData.obra_form_fecha_fin;
                                     placeholder-text: "DD/MM/YYYY (ej. 30/11/2023)";
@@ -906,10 +906,38 @@ export component RegistrosObrasView inherits Rectangle {
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 spacing: 4px;
-                                Text { text: "Monto Contratado ($ MXN)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text { text: "Monto Total de la Obra ($ MXN)"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    Rectangle {
+                                        border-radius: 4px;
+                                        background: #fef3c7;
+                                        HorizontalLayout {
+                                            padding-left: 5px;
+                                            padding-right: 5px;
+                                            padding-top: 1px;
+                                            padding-bottom: 1px;
+                                            Text {
+                                                text: "★ Requerido para Límite 18%";
+                                                font-size: 9px;
+                                                font-weight: 800;
+                                                color: #b45309;
+                                            }
+                                        }
+                                    }
+                                }
                                 LineEdit {
                                     text <=> AppData.obra_form_monto;
                                     placeholder-text: "Ej. 18500000.00";
+                                }
+                                Text {
+                                    text: (AppData.obra_form_monto == "" || AppData.obra_form_monto == "0" || AppData.obra_form_monto == "0.00")
+                                        ? "⚠️ Atención: Sin este monto no se podrá calcular el Límite del 18% en Reporte Liquidaciones."
+                                        : "✓ Monto capturado: se calculará el Límite del 18% de la obra.";
+                                    font-size: 9px;
+                                    font-weight: 600;
+                                    color: (AppData.obra_form_monto == "" || AppData.obra_form_monto == "0" || AppData.obra_form_monto == "0.00") ? #b45309 : #15803d;
+                                    wrap: word-wrap;
                                 }
                             }
                         }
@@ -979,9 +1007,7 @@ export component RegistrosObrasView inherits Rectangle {
                     Rectangle {
                         height: 38px;
                         border-radius: 6px;
-                        background: (AppData.obra_form_numero != "" && AppData.obra_form_numero_status == "valid")
-                            ? (btn_submit_obra.has-hover ? #047857 : #065f46)
-                            : #94a3b8;
+                        background: btn_submit_obra.has-hover ? #047857 : #065f46;
 
                         HorizontalLayout {
                             padding-left: 20px;
@@ -999,25 +1025,21 @@ export component RegistrosObrasView inherits Rectangle {
                         }
 
                         btn_submit_obra := TouchArea {
-                            mouse-cursor: (AppData.obra_form_numero != "" && AppData.obra_form_numero_status == "valid") ? pointer : default;
+                            mouse-cursor: pointer;
                             clicked => {
-                                if (AppData.obra_form_numero != "" && AppData.obra_form_numero_status == "valid") {
-                                    AppLogic.submit_obra(
-                                        AppData.obra_form_id,
-                                        AppData.obra_form_numero,
-                                        AppData.obra_form_clase_val,
-                                        AppData.obra_form_tipo_obra,
-                                        AppData.obra_form_fecha_inicio,
-                                        AppData.obra_form_fecha_fin,
-                                        AppData.obra_form_ubicacion,
-                                        AppData.obra_form_superficie,
-                                        AppData.obra_form_monto,
-                                        AppData.obra_form_delegacion,
-                                        AppData.obra_form_subdelegacion
-                                    );
-                                } else {
-                                    AppLogic.validate_obra_input();
-                                }
+                                AppLogic.submit_obra(
+                                    AppData.obra_form_id,
+                                    AppData.obra_form_numero,
+                                    AppData.obra_form_clase_val,
+                                    AppData.obra_form_tipo_obra,
+                                    AppData.obra_form_fecha_inicio,
+                                    AppData.obra_form_fecha_fin,
+                                    AppData.obra_form_ubicacion,
+                                    AppData.obra_form_superficie,
+                                    AppData.obra_form_monto,
+                                    AppData.obra_form_delegacion,
+                                    AppData.obra_form_subdelegacion
+                                );
                             }
                         }
                     }

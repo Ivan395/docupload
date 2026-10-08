@@ -67,6 +67,196 @@ pub fn resolve_business_context(
     resolve_business_context_for_revision(tx, biz, None)
 }
 
+fn update_cliente_and_rp_from_biz(
+    tx: &mut Transaction,
+    id_cliente: Uuid,
+    id_registro_patronal: Uuid,
+    biz: &Business,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 1. Actualizar Registro Patronal con la información obtenida de las cédulas
+    let act_upper = biz.actividad.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let dom_upper = biz.domicilio.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let cp_upper = biz.codigo_postal.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let ent_upper = biz.entidad.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let area_upper = biz.area_geografica.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let del_upper = biz.delegacion.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let subdel_upper = biz.subdelegacion.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let cod_del_upper = biz.codigo_delegacion.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let cod_subdel_upper = biz.codigo_subdelegacion.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let prima_float = biz.prima.as_deref().and_then(|s| s.trim().parse::<f64>().ok());
+
+    let _ = tx.execute(
+        r#"
+        UPDATE public.registros_patronales
+        SET actividad = COALESCE($2, actividad),
+            domicilio = COALESCE($3, domicilio),
+            codigo_postal = COALESCE($4, codigo_postal),
+            entidad = COALESCE($5, entidad),
+            area_geografica = COALESCE($6, area_geografica),
+            delegacion = COALESCE($7, delegacion),
+            subdelegacion = COALESCE($8, subdelegacion),
+            codigo_delegacion = COALESCE($9, codigo_delegacion),
+            codigo_subdelegacion = COALESCE($10, codigo_subdelegacion),
+            prima_riesgo = COALESCE($11, prima_riesgo)
+        WHERE id = $1
+        "#,
+        &[
+            &id_registro_patronal,
+            &truncate_str(act_upper.as_deref(), 300),
+            &truncate_str(dom_upper.as_deref(), 500),
+            &truncate_str(cp_upper.as_deref(), 5),
+            &truncate_str(ent_upper.as_deref(), 100),
+            &truncate_str(area_upper.as_deref(), 5),
+            &truncate_str(del_upper.as_deref(), 100),
+            &truncate_str(subdel_upper.as_deref(), 100),
+            &truncate_str(cod_del_upper.as_deref(), 10),
+            &truncate_str(cod_subdel_upper.as_deref(), 10),
+            &prima_float,
+        ],
+    );
+
+    // 2. Actualizar Cliente
+    let rz_upper = biz.razon_social.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+
+    // RFC: si se extrajo de la cédula, validar si no entra en conflicto con otro cliente
+    let rfc_c = biz.rfc.as_deref().map(|s| {
+        s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()
+    }).filter(|s| !s.is_empty());
+
+    let mut update_rfc: Option<String> = None;
+    if let Some(ref rfc_str) = rfc_c {
+        let rfc_trunc = truncate_str(Some(rfc_str), 13).unwrap_or_default();
+        let dup_rfc = tx.query_opt(
+            "SELECT id FROM public.clientes WHERE TRIM(rfc) = TRIM($1) AND id != $2",
+            &[&rfc_trunc, &id_cliente],
+        )?;
+        if dup_rfc.is_none() {
+            update_rfc = Some(rfc_trunc);
+        }
+    }
+
+    // CURP: Solo si aparece en las cédulas (18 caracteres)
+    let curp_c = biz.curp.as_deref().map(|s| {
+        s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()
+    }).filter(|s| s.len() == 18);
+
+    let mut update_curp: Option<String> = None;
+    if let Some(ref curp_str) = curp_c {
+        let curp_trunc = truncate_str(Some(curp_str), 18).unwrap_or_default();
+        let dup_curp = tx.query_opt(
+            "SELECT id FROM public.clientes WHERE TRIM(curp) = TRIM($1) AND id != $2",
+            &[&curp_trunc, &id_cliente],
+        )?;
+        if dup_curp.is_none() {
+            update_curp = Some(curp_trunc);
+        }
+    }
+
+    // Tipo Persona:
+    // • Persona Física: El RFC tiene 13 caracteres (4 letras y 9 números).
+    // • Persona Moral: El RFC tiene 12 caracteres (3 letras y 9 números).
+    let effective_rfc = match update_rfc.clone().or_else(|| rfc_c.clone()) {
+        Some(r) => Some(r),
+        None => {
+            let row = tx.query_opt("SELECT rfc FROM public.clientes WHERE id = $1", &[&id_cliente])?;
+            row.and_then(|r| r.get::<_, Option<String>>(0))
+                .map(|s| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase())
+        }
+    };
+
+    let target_tipo = match effective_rfc.as_deref().map(|s| s.len()) {
+        Some(13) => Some("FISICA"),
+        Some(12) => Some("MORAL"),
+        _ => None,
+    };
+
+    let mut target_cc_id: Option<Uuid> = None;
+    if let Some(tipo_str) = target_tipo {
+        let tp_id_opt: Option<Uuid> = if let Ok(Some(tp_row)) = tx.query_opt(
+            "SELECT id FROM public.tipos_personas WHERE TRIM(tipo) ILIKE $1 LIMIT 1",
+            &[&format!("%{}%", tipo_str)],
+        ) {
+            Some(tp_row.get(0))
+        } else {
+            let nid = Uuid::now_v7();
+            let ins_res = tx.query_one(
+                "INSERT INTO public.tipos_personas (id, tipo) VALUES ($1, $2) ON CONFLICT (tipo) DO UPDATE SET tipo = EXCLUDED.tipo RETURNING id",
+                &[&nid, &tipo_str],
+            );
+            ins_res.ok().map(|r| r.get(0))
+        };
+
+        if let Some(tp_id) = tp_id_opt {
+            let cc_row = tx.query_opt(
+                "SELECT cc.id_regimen_fiscal FROM public.clientes c LEFT JOIN public.clasificaciones_clientes cc ON cc.id = c.id_clasificacion_cliente WHERE c.id = $1",
+                &[&id_cliente],
+            )?;
+            let rf_id_opt: Option<Uuid> = cc_row.and_then(|r| r.get(0));
+
+            let cc_id: Option<Uuid> = if let Some(rf_id) = rf_id_opt {
+                let existing = tx.query_opt(
+                    "SELECT id FROM public.clasificaciones_clientes WHERE id_tipo_persona = $1 AND id_regimen_fiscal = $2 LIMIT 1",
+                    &[&tp_id, &rf_id],
+                )?;
+                if let Some(r) = existing {
+                    Some(r.get(0))
+                } else {
+                    let fallback = tx.query_opt(
+                        "SELECT id FROM public.clasificaciones_clientes WHERE id_tipo_persona = $1 LIMIT 1",
+                        &[&tp_id],
+                    )?;
+                    fallback.map(|r| r.get(0))
+                }
+            } else {
+                let existing = tx.query_opt(
+                    "SELECT id FROM public.clasificaciones_clientes WHERE id_tipo_persona = $1 LIMIT 1",
+                    &[&tp_id],
+                )?;
+                existing.map(|r| r.get(0))
+            };
+
+            let cc_id_final = match cc_id {
+                Some(id) => Some(id),
+                None => {
+                    let rf_row = tx.query_opt("SELECT id FROM public.regimenes_fiscales LIMIT 1", &[])?;
+                    if let Some(r_rf) = rf_row {
+                        let rf_id: Uuid = r_rf.get(0);
+                        let nid = Uuid::now_v7();
+                        let ins = tx.query_one(
+                            "INSERT INTO public.clasificaciones_clientes (id, id_tipo_persona, id_regimen_fiscal) VALUES ($1, $2, $3) ON CONFLICT (id_regimen_fiscal, id_tipo_persona) DO UPDATE SET id_tipo_persona = EXCLUDED.id_tipo_persona RETURNING id",
+                            &[&nid, &tp_id, &rf_id],
+                        )?;
+                        Some(ins.get(0))
+                    } else {
+                        None
+                    }
+                }
+            };
+            target_cc_id = cc_id_final;
+        }
+    }
+
+    let _ = tx.execute(
+        r#"
+        UPDATE public.clientes
+        SET razon_social = COALESCE($2, razon_social),
+            rfc = COALESCE($3, rfc),
+            curp = COALESCE($4, curp),
+            id_clasificacion_cliente = COALESCE($5, id_clasificacion_cliente)
+        WHERE id = $1
+        "#,
+        &[
+            &id_cliente,
+            &truncate_str(rz_upper.as_deref(), 300),
+            &update_rfc,
+            &update_curp,
+            &target_cc_id,
+        ],
+    );
+
+    Ok(())
+}
+
 pub fn resolve_business_context_for_revision(
     tx: &mut Transaction,
     biz: &Business,
@@ -95,56 +285,8 @@ pub fn resolve_business_context_for_revision(
             let del_upper = del_db.or_else(|| biz.delegacion.as_deref().map(|s| s.trim().to_uppercase()));
             let subdel_upper = subdel_db.or_else(|| biz.subdelegacion.as_deref().map(|s| s.trim().to_uppercase()));
 
-            // Actualizar datos patronales complementarios solo con COALESCE (sin crear registros nuevos)
-            let act_upper = biz.actividad.as_deref().map(|s| s.trim().to_uppercase());
-            let dom_upper = biz.domicilio.as_deref().map(|s| s.trim().to_uppercase());
-            let cp_upper = biz.codigo_postal.as_deref().map(|s| s.trim().to_uppercase());
-            let ent_upper = biz.entidad.as_deref().map(|s| s.trim().to_uppercase());
-            let area_upper = biz.area_geografica.as_deref().map(|s| s.trim().to_uppercase());
-            let cod_del_upper = biz.codigo_delegacion.as_deref().map(|s| s.trim().to_uppercase());
-            let cod_subdel_upper = biz.codigo_subdelegacion.as_deref().map(|s| s.trim().to_uppercase());
-            let prima_float = biz.prima.as_deref().and_then(|s| s.trim().parse::<f64>().ok());
-
-            let _ = tx.execute(
-                r#"
-                UPDATE public.registros_patronales
-                SET actividad = COALESCE(public.registros_patronales.actividad, $2),
-                    domicilio = COALESCE(public.registros_patronales.domicilio, $3),
-                    codigo_postal = COALESCE(public.registros_patronales.codigo_postal, $4),
-                    entidad = COALESCE(public.registros_patronales.entidad, $5),
-                    area_geografica = COALESCE(public.registros_patronales.area_geografica, $6),
-                    delegacion = COALESCE(public.registros_patronales.delegacion, $7),
-                    subdelegacion = COALESCE(public.registros_patronales.subdelegacion, $8),
-                    codigo_delegacion = COALESCE(public.registros_patronales.codigo_delegacion, $9),
-                    codigo_subdelegacion = COALESCE(public.registros_patronales.codigo_subdelegacion, $10),
-                    prima_riesgo = COALESCE(public.registros_patronales.prima_riesgo, $11)
-                WHERE id = $1
-                "#,
-                &[
-                    &id_registro_patronal,
-                    &truncate_str(act_upper.as_deref(), 300),
-                    &truncate_str(dom_upper.as_deref(), 500),
-                    &truncate_str(cp_upper.as_deref(), 5),
-                    &truncate_str(ent_upper.as_deref(), 100),
-                    &truncate_str(area_upper.as_deref(), 5),
-                    &truncate_str(del_upper.as_deref(), 100),
-                    &truncate_str(subdel_upper.as_deref(), 100),
-                    &truncate_str(cod_del_upper.as_deref(), 10),
-                    &truncate_str(cod_subdel_upper.as_deref(), 10),
-                    &prima_float,
-                ],
-            );
-
-            // Actualizar RFC en cliente si estaba vacío
-            if let Some(ref rfc_str) = biz.rfc {
-                let rfc_patron: String = rfc_str.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
-                if !rfc_patron.is_empty() {
-                    let _ = tx.execute(
-                        "UPDATE public.clientes SET rfc = COALESCE(NULLIF(public.clientes.rfc, ''), $2) WHERE id = $1",
-                        &[&id_cliente, &truncate_str(Some(&rfc_patron), 13)],
-                    );
-                }
-            }
+            // Actualizar datos patronales y del cliente con los campos extraídos de las cédulas
+            update_cliente_and_rp_from_biz(tx, id_cliente, id_registro_patronal, biz)?;
 
             return Ok(BusinessContext {
                 id_cliente,
@@ -240,35 +382,7 @@ pub fn resolve_business_context_for_revision(
     let id_registro_patronal: Uuid = match reg_id_opt {
         Some(row) => {
             let id: Uuid = row.get(0);
-            tx.execute(
-                r#"
-                UPDATE public.registros_patronales
-                SET actividad = COALESCE(public.registros_patronales.actividad, $2),
-                    domicilio = COALESCE(public.registros_patronales.domicilio, $3),
-                    codigo_postal = COALESCE(public.registros_patronales.codigo_postal, $4),
-                    entidad = COALESCE(public.registros_patronales.entidad, $5),
-                    area_geografica = COALESCE(public.registros_patronales.area_geografica, $6),
-                    delegacion = COALESCE(public.registros_patronales.delegacion, $7),
-                    subdelegacion = COALESCE(public.registros_patronales.subdelegacion, $8),
-                    codigo_delegacion = COALESCE(public.registros_patronales.codigo_delegacion, $9),
-                    codigo_subdelegacion = COALESCE(public.registros_patronales.codigo_subdelegacion, $10),
-                    prima_riesgo = COALESCE(public.registros_patronales.prima_riesgo, $11)
-                WHERE id = $1
-                "#,
-                &[
-                    &id,
-                    &truncate_str(act_upper.as_deref(), 300),
-                    &truncate_str(dom_upper.as_deref(), 500),
-                    &truncate_str(cp_upper.as_deref(), 5),
-                    &truncate_str(ent_upper.as_deref(), 100),
-                    &truncate_str(area_upper.as_deref(), 5),
-                    &truncate_str(del_upper.as_deref(), 100),
-                    &truncate_str(subdel_upper.as_deref(), 100),
-                    &truncate_str(cod_del_upper.as_deref(), 10),
-                    &truncate_str(cod_subdel_upper.as_deref(), 10),
-                    &prima_float,
-                ],
-            )?;
+            update_cliente_and_rp_from_biz(tx, id_cliente, id, biz)?;
             id
         }
         None => {
@@ -298,7 +412,9 @@ pub fn resolve_business_context_for_revision(
                     &prima_float,
                 ],
             )?;
-            row.get(0)
+            let id: Uuid = row.get(0);
+            update_cliente_and_rp_from_biz(tx, id_cliente, id, biz)?;
+            id
         }
     };
 
@@ -1042,3 +1158,103 @@ pub fn save_cedulas_to_db(
 
     Ok(stats)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_cliente_and_rp_from_biz() {
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(_) => return, // Skip if test database is not available
+        };
+
+        let mut tx = match client.transaction() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        let c_id = Uuid::now_v7();
+        let c_name = format!("CLI_TEST_{}", Uuid::now_v7());
+        tx.execute(
+            "INSERT INTO public.clientes (id, nombre, razon_social, rfc, curp) VALUES ($1, $2, 'OLD RAZON', 'XAXX01010100', 'OLD123456HDFRRN01')",
+            &[&c_id, &c_name],
+        ).unwrap();
+
+        let rp_id = Uuid::now_v7();
+        let unique_reg = format!("Z{:010}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_micros());
+        let reg_11: String = unique_reg.chars().take(11).collect();
+        tx.execute(
+            "INSERT INTO public.registros_patronales (id, id_cliente, registro, actividad, domicilio, codigo_postal, prima_riesgo) VALUES ($1, $2, $3, 'OLD ACT', 'OLD DOM', '00000', 1.0)",
+            &[&rp_id, &c_id, &reg_11],
+        ).unwrap();
+
+        // 1. Business sin CURP y con RFC de 12 caracteres (3 letras y 9 números) -> MORAL
+        let mut biz = Business::new();
+        biz.razon_social = Some("NUEVA RAZON SOCIAL SA DE CV".to_string());
+        biz.rfc = Some("XAXX01010100".to_string()); // 12 chars -> MORAL
+        biz.curp = None;
+        biz.actividad = Some("NUEVA ACTIVIDAD".to_string());
+        biz.domicilio = Some("CALLE NUEVA 123".to_string());
+        biz.codigo_postal = Some("54321".to_string());
+        biz.entidad = Some("ESTADO DE MEXICO".to_string());
+        biz.area_geografica = Some("B".to_string());
+        biz.delegacion = Some("DEL NUEVA".to_string());
+        biz.subdelegacion = Some("SUBDEL NUEVA".to_string());
+        biz.prima = Some("6.5".to_string());
+
+        update_cliente_and_rp_from_biz(&mut tx, c_id, rp_id, &biz).unwrap();
+
+        // Verificar datos en RP
+        let row_rp = tx.query_one(
+            "SELECT actividad, domicilio, TRIM(codigo_postal), entidad, TRIM(area_geografica), delegacion, subdelegacion, prima_riesgo FROM public.registros_patronales WHERE id = $1",
+            &[&rp_id],
+        ).unwrap();
+        assert_eq!(row_rp.get::<_, Option<String>>(0).as_deref(), Some("NUEVA ACTIVIDAD"));
+        assert_eq!(row_rp.get::<_, Option<String>>(1).as_deref(), Some("CALLE NUEVA 123"));
+        assert_eq!(row_rp.get::<_, Option<String>>(2).as_deref(), Some("54321"));
+        assert_eq!(row_rp.get::<_, Option<String>>(3).as_deref(), Some("ESTADO DE MEXICO"));
+        assert_eq!(row_rp.get::<_, Option<String>>(4).as_deref(), Some("B"));
+        assert_eq!(row_rp.get::<_, Option<String>>(5).as_deref(), Some("DEL NUEVA"));
+        assert_eq!(row_rp.get::<_, Option<String>>(6).as_deref(), Some("SUBDEL NUEVA"));
+        assert_eq!(row_rp.get::<_, Option<f64>>(7), Some(6.5));
+
+        // Verificar datos en Cliente (curp preservada, razon social actualizada, tipo persona MORAL)
+        let row_c = tx.query_one(
+            r#"
+            SELECT c.razon_social, TRIM(c.curp), TRIM(tp.tipo)
+            FROM public.clientes c
+            LEFT JOIN public.clasificaciones_clientes cc ON cc.id = c.id_clasificacion_cliente
+            LEFT JOIN public.tipos_personas tp ON tp.id = cc.id_tipo_persona
+            WHERE c.id = $1
+            "#,
+            &[&c_id],
+        ).unwrap();
+        assert_eq!(row_c.get::<_, Option<String>>(0).as_deref(), Some("NUEVA RAZON SOCIAL SA DE CV"));
+        assert_eq!(row_c.get::<_, Option<String>>(1).as_deref(), Some("OLD123456HDFRRN01"));
+        assert_eq!(row_c.get::<_, Option<String>>(2).as_deref(), Some("MORAL"));
+
+        // 2. Ahora cédula con CURP nueva y RFC de 13 caracteres (4 letras y 9 números) -> FISICA
+        let mut biz2 = Business::new();
+        biz2.rfc = Some("XAXX010101000".to_string()); // 13 chars -> FISICA
+        biz2.curp = Some("NEWC123456HDFRRN02".to_string());
+        update_cliente_and_rp_from_biz(&mut tx, c_id, rp_id, &biz2).unwrap();
+
+        let row_c2 = tx.query_one(
+            r#"
+            SELECT TRIM(c.curp), TRIM(tp.tipo)
+            FROM public.clientes c
+            LEFT JOIN public.clasificaciones_clientes cc ON cc.id = c.id_clasificacion_cliente
+            LEFT JOIN public.tipos_personas tp ON tp.id = cc.id_tipo_persona
+            WHERE c.id = $1
+            "#,
+            &[&c_id],
+        ).unwrap();
+        assert_eq!(row_c2.get::<_, Option<String>>(0).as_deref(), Some("NEWC123456HDFRRN02"));
+        assert_eq!(row_c2.get::<_, Option<String>>(1).as_deref(), Some("FISICA"));
+
+        let _ = tx.rollback();
+    }
+}
+

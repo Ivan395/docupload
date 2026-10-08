@@ -188,6 +188,11 @@ pub fn upload_file_to_rustfs(
     Ok(object_key)
 }
 
+pub fn is_trash_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    lower.starts_with("trash/") || lower.contains("/trash/")
+}
+
 /// Lista los archivos en RustFS bajo la carpeta dada (recursivo, preservando subcarpetas pero omitiendo "Trash")
 pub fn list_rustfs_files(
     cliente: &str,
@@ -214,7 +219,7 @@ pub fn list_rustfs_files(
             if obj.key.ends_with("/.keep") || obj.key.ends_with('/') {
                 continue;
             }
-            if obj.key.to_lowercase().contains("/trash/") {
+            if is_trash_key(&obj.key) {
                 continue;
             }
             let rel = obj.key.strip_prefix(&prefix).unwrap_or(&obj.key);
@@ -227,44 +232,6 @@ pub fn list_rustfs_files(
                 filename: rel.to_string(),
                 size: obj.size,
             });
-        }
-    }
-
-    // Fallback: si no encontró con prefijo exacto de cliente, buscar por RP, Revisión y Subcarpeta
-    if results.is_empty() {
-        if let Ok(all_pages) = bucket.list("".to_string(), None) {
-            for page in all_pages {
-                for obj in page.contents {
-                    let k = &obj.key;
-                    if k.contains(&clean_rp)
-                        && k.contains(&clean_r)
-                        && k.contains(subfolder)
-                        && !k.ends_with("/.keep")
-                        && !k.ends_with('/')
-                        && !k.to_lowercase().contains("/trash/")
-                    {
-                        let rel = if let Some(pos) = k.find(subfolder) {
-                            let after = &k[pos + subfolder.len()..];
-                            after.trim_start_matches('/').to_string()
-                        } else {
-                            Path::new(k)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| k.clone())
-                        };
-
-                        if rel.is_empty() || rel == ".keep" || rel.to_lowercase().starts_with("trash/") {
-                            continue;
-                        }
-
-                        results.push(RustfsFileInfo {
-                            key: k.clone(),
-                            filename: rel,
-                            size: obj.size,
-                        });
-                    }
-                }
-            }
         }
     }
 
@@ -302,17 +269,13 @@ pub fn move_file_to_trash(
     }
 
     if file_data.is_none() {
-        // Fallback: buscar la key en el bucket
-        if let Ok(all_pages) = bucket.list("".to_string(), None) {
+        // Fallback: buscar dentro de la subcarpeta de esta revisión específica
+        let search_prefix = format!("{}/{}/{}/{}/", clean_c, clean_rp, clean_r, subfolder);
+        if let Ok(all_pages) = bucket.list(search_prefix, None) {
             'outer: for page in all_pages {
                 for obj in page.contents {
                     let k = &obj.key;
-                    if k.contains(&clean_rp)
-                        && k.contains(&clean_r)
-                        && k.contains(subfolder)
-                        && !k.to_lowercase().contains("/trash/")
-                        && (k.ends_with(&clean_fn) || k.ends_with(filename))
-                    {
+                    if !is_trash_key(k) && (k.ends_with(&clean_fn) || k.ends_with(filename)) {
                         if let Ok(res) = bucket.get_object(k) {
                             if res.status_code() == 200 {
                                 actual_src_key = k.clone();
@@ -382,6 +345,125 @@ pub fn move_all_files_to_trash(
                     let _ = bucket.delete_object(&actual_src_key);
                     moved_count += 1;
                     log::info!("Archivo movido a Trash en RustFS: {} -> {}", actual_src_key, actual_dst_key);
+                }
+            }
+        }
+    }
+    Ok(moved_count)
+}
+
+/// Mueve todos los archivos de un cliente a la carpeta "Trash" en la raíz del bucket:
+/// <Cliente>/... -> Trash/<Cliente>/...
+pub fn move_client_to_trash(cliente: &str) -> Result<usize, String> {
+    ensure_bucket_exists()?;
+    let bucket = get_rustfs_bucket(BUCKET_NAME)?;
+    let clean_c = sanitize_path_component(cliente);
+    let prefix = format!("{}/", clean_c);
+
+    let list_res = bucket
+        .list(prefix.clone(), None)
+        .map_err(|e| format!("Error listando archivos para mover cliente a Trash: {}", e))?;
+
+    let mut moved_count = 0;
+    for list_page in list_res {
+        for obj in list_page.contents {
+            if obj.key.to_lowercase().starts_with("trash/") {
+                continue;
+            }
+            let actual_src_key = obj.key;
+            let actual_dst_key = format!("Trash/{}", actual_src_key);
+
+            if let Ok(res) = bucket.get_object(&actual_src_key) {
+                if res.status_code() == 200 {
+                    let bytes = res.bytes();
+                    if bucket.put_object(&actual_dst_key, bytes).is_ok() {
+                        let _ = bucket.delete_object(&actual_src_key);
+                        moved_count += 1;
+                        log::info!("Cliente movido a Trash en RustFS: {} -> {}", actual_src_key, actual_dst_key);
+                    }
+                }
+            }
+        }
+    }
+    Ok(moved_count)
+}
+
+/// Mueve todos los archivos de un Registro Patronal a la carpeta "Trash" dentro del cliente:
+/// <Cliente>/<RP>/... -> <Cliente>/Trash/<RP>/...
+pub fn move_rp_to_trash(cliente: &str, rp: &str) -> Result<usize, String> {
+    ensure_bucket_exists()?;
+    let bucket = get_rustfs_bucket(BUCKET_NAME)?;
+    let clean_c = sanitize_path_component(cliente);
+    let clean_rp = sanitize_path_component(rp);
+    let prefix = format!("{}/{}/", clean_c, clean_rp);
+
+    let list_res = bucket
+        .list(prefix.clone(), None)
+        .map_err(|e| format!("Error listando archivos para mover RP a Trash: {}", e))?;
+
+    let mut moved_count = 0;
+    for list_page in list_res {
+        for obj in list_page.contents {
+            if is_trash_key(&obj.key) {
+                continue;
+            }
+            let actual_src_key = obj.key;
+            let rel = match actual_src_key.strip_prefix(&format!("{}/", clean_c)) {
+                Some(r) => r,
+                None => continue,
+            };
+            let actual_dst_key = format!("{}/Trash/{}", clean_c, rel);
+
+            if let Ok(res) = bucket.get_object(&actual_src_key) {
+                if res.status_code() == 200 {
+                    let bytes = res.bytes();
+                    if bucket.put_object(&actual_dst_key, bytes).is_ok() {
+                        let _ = bucket.delete_object(&actual_src_key);
+                        moved_count += 1;
+                        log::info!("RP movido a Trash en RustFS: {} -> {}", actual_src_key, actual_dst_key);
+                    }
+                }
+            }
+        }
+    }
+    Ok(moved_count)
+}
+
+/// Mueve todos los archivos de una Revisión a la carpeta "Trash" dentro de su RP:
+/// <Cliente>/<RP>/<Revision>/... -> <Cliente>/<RP>/Trash/<Revision>/...
+pub fn move_revision_to_trash(cliente: &str, rp: &str, revision: &str) -> Result<usize, String> {
+    ensure_bucket_exists()?;
+    let bucket = get_rustfs_bucket(BUCKET_NAME)?;
+    let clean_c = sanitize_path_component(cliente);
+    let clean_rp = sanitize_path_component(rp);
+    let clean_r = sanitize_path_component(revision);
+    let prefix = format!("{}/{}/{}/", clean_c, clean_rp, clean_r);
+
+    let list_res = bucket
+        .list(prefix.clone(), None)
+        .map_err(|e| format!("Error listando archivos para mover revisión a Trash: {}", e))?;
+
+    let mut moved_count = 0;
+    for list_page in list_res {
+        for obj in list_page.contents {
+            if is_trash_key(&obj.key) {
+                continue;
+            }
+            let actual_src_key = obj.key;
+            let rel = match actual_src_key.strip_prefix(&format!("{}/{}/", clean_c, clean_rp)) {
+                Some(r) => r,
+                None => continue,
+            };
+            let actual_dst_key = format!("{}/{}/Trash/{}", clean_c, clean_rp, rel);
+
+            if let Ok(res) = bucket.get_object(&actual_src_key) {
+                if res.status_code() == 200 {
+                    let bytes = res.bytes();
+                    if bucket.put_object(&actual_dst_key, bytes).is_ok() {
+                        let _ = bucket.delete_object(&actual_src_key);
+                        moved_count += 1;
+                        log::info!("Revisión movida a Trash en RustFS: {} -> {}", actual_src_key, actual_dst_key);
+                    }
                 }
             }
         }
@@ -647,5 +729,60 @@ mod tests {
             println!("Card: {} | Type: {} | Pages: {} | Status: {}", c.filename, c.file_type, c.pages_detected, c.status_badge);
         }
         assert!(list.len() >= 9, "Expected at least 9 cards, got {}", list.len());
+    }
+
+    #[test]
+    fn test_move_revision_rp_client_to_trash() {
+        if let Err(e) = ensure_bucket_exists() {
+            eprintln!("RustFS no disponible para test (skipping): {}", e);
+            return;
+        }
+
+        let cl = "TEST_TRASH_SCOPES";
+        let rp = "C1122334455";
+        let rev = "REV_2026_TEST";
+
+        // 1. Upload files
+        let _ = upload_file_to_rustfs(cl, rp, rev, "Nominas", "nomina1.xml", b"<xml>1</xml>");
+        let _ = upload_file_to_rustfs(cl, rp, rev, "Cedulas_de_cuotas", "cedula1.pdf", b"pdf");
+
+        // 2. Move revision to trash: <Cliente>/<RP>/Trash/<Revision>/...
+        let moved_rev = move_revision_to_trash(cl, rp, rev).unwrap();
+        assert!(moved_rev >= 2);
+        let list_rev = list_rustfs_files(cl, rp, rev, "Nominas").unwrap();
+        assert_eq!(list_rev.len(), 0);
+
+        // Upload another file under RP for testing move_rp_to_trash
+        let rev2 = "REV_2026_TEST_2";
+        let _ = upload_file_to_rustfs(cl, rp, rev2, "Nominas", "nomina2.xml", b"<xml>2</xml>");
+        let moved_rp = move_rp_to_trash(cl, rp).unwrap();
+        assert!(moved_rp >= 1);
+        let list_rp = list_rustfs_files(cl, rp, rev2, "Nominas").unwrap();
+        assert_eq!(list_rp.len(), 0);
+
+        // Upload another file under client for testing move_client_to_trash
+        let rp2 = "D9988776655";
+        let _ = upload_file_to_rustfs(cl, rp2, "REV_3", "Nominas", "nomina3.xml", b"<xml>3</xml>");
+        let moved_client = move_client_to_trash(cl).unwrap();
+        assert!(moved_client >= 1);
+        let list_client = list_rustfs_files(cl, rp2, "REV_3", "Nominas").unwrap();
+        assert_eq!(list_client.len(), 0);
+
+        // Cleanup
+        let bucket = get_rustfs_bucket(BUCKET_NAME).unwrap();
+        if let Ok(pages) = bucket.list(format!("{}/", cl), None) {
+            for page in pages {
+                for obj in page.contents {
+                    let _ = bucket.delete_object(&obj.key);
+                }
+            }
+        }
+        if let Ok(pages) = bucket.list(format!("Trash/{}/", cl), None) {
+            for page in pages {
+                for obj in page.contents {
+                    let _ = bucket.delete_object(&obj.key);
+                }
+            }
+        }
     }
 }

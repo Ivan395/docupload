@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
 
-use crate::cedulas::business::month_num_to_name;
+use crate::cedulas::business::{month_num_to_name, month_to_num};
 
 #[derive(Debug, Clone)]
 pub struct ObraOptionDb {
@@ -190,7 +190,18 @@ pub fn fetch_obras_for_revision(client: &mut Client, id_revision: Uuid) -> Resul
                COALESCE(ro.monto, 0.0) AS monto
         FROM public.registros_obras ro
         WHERE ro.id_revision = $1
-           OR ro.id_registro_patronal = (SELECT r.id_registro_patronal FROM public.revisiones r WHERE r.id = $1)
+           OR ro.id IN (
+               SELECT rv.id_registro_obra 
+               FROM public.reportes_vinculaciones_obras_liquidaciones rv
+               JOIN public.reportes_liquidaciones rl ON rl.id = rv.id_reporte_liquidacion
+               WHERE rl.id_revision = $1
+           )
+           OR ro.id IN (
+               SELECT vol.id_registro_obra
+               FROM public.vinculaciones_obras_liquidaciones vol
+               JOIN public.liquidaciones l ON l.id = vol.id_liquidacion
+               WHERE l.id_revision = $1
+           )
         ORDER BY ro.numero ASC
         "#,
         &[&id_revision],
@@ -1181,7 +1192,7 @@ pub fn export_reporte_liquidaciones_to_excel(
     file_path: &Path,
     cliente_nombre: &str,
     rp_registro: &str,
-    revision_nombre: &str,
+    revision_folio: &str,
 ) -> Result<(), String> {
     use rust_xlsxwriter::{Color, Format, FormatBorder, Workbook};
 
@@ -1267,7 +1278,7 @@ pub fn export_reporte_liquidaciones_to_excel(
 
     // Encabezado del Reporte
     worksheet.write_string_with_format(0, 0, "Reporte de Liquidaciones y Prorrateo por Obra - CONSTRUAUDIT", &title_format).map_err(|e| e.to_string())?;
-    worksheet.write_string_with_format(1, 0, &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_nombre), &subtitle_format).map_err(|e| e.to_string())?;
+    worksheet.write_string_with_format(1, 0, &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_folio), &subtitle_format).map_err(|e| e.to_string())?;
     worksheet.write_string_with_format(2, 0, "Fórmula: (Monto Cédula / Días Cédula) * Días Obra", &subtitle_format).map_err(|e| e.to_string())?;
 
     // Encabezados sin la columna "Total Prorrateado"
@@ -1781,7 +1792,7 @@ pub fn export_reporte_liquidaciones_to_excel(
         ws_emp_obra.write_string_with_format(
             1,
             0,
-            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_nombre),
+            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_folio),
             &subtitle_format,
         ).map_err(|e| e.to_string())?;
 
@@ -2058,7 +2069,7 @@ pub fn export_reporte_liquidaciones_to_excel(
         ws_emp.write_string_with_format(
             1,
             0,
-            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_nombre),
+            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_folio),
             &subtitle_format,
         ).map_err(|e| e.to_string())?;
 
@@ -2338,7 +2349,7 @@ pub fn export_reporte_liquidaciones_to_excel(
         ws_guard.write_string_with_format(
             1,
             0,
-            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_nombre),
+            &format!("Empresa: {} | Registro Patronal: {} | Revisión: {}", cliente_nombre, rp_registro, revision_folio),
             &subtitle_format,
         ).map_err(|e| e.to_string())?;
 
@@ -2522,6 +2533,124 @@ pub fn export_reporte_liquidaciones_to_excel(
     Ok(())
 }
 
+/// Parsea el mes (1..=12) y el año a partir de `mes_str`, `anio` y/o `periodo_str`.
+pub fn parse_month_and_year(mes_str: &str, anio: i16, periodo_str: &str) -> Option<(u32, i32)> {
+    let mut month = month_to_num(mes_str);
+    let mut year = anio as i32;
+
+    if (month == 0 || year <= 1900) && !periodo_str.is_empty() {
+        let parts: Vec<&str> = periodo_str
+            .split(|c| c == '/' || c == '-' || c == ' ')
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        for part in &parts {
+            let p_trim = part.trim();
+            if let Ok(y) = p_trim.parse::<i32>() {
+                if (1900..=2100).contains(&y) {
+                    year = y;
+                }
+            }
+            if month == 0 {
+                let m = month_to_num(p_trim);
+                if (1..=12).contains(&m) {
+                    month = m;
+                }
+            }
+        }
+    }
+
+    if (1..=12).contains(&month) && year >= 1900 {
+        Some((month, year))
+    } else {
+        None
+    }
+}
+
+/// Obtiene el rango de fechas (primer día, último día) y número total de días de un mes dado.
+pub fn get_month_date_range(month: u32, year: i32) -> Option<(NaiveDate, NaiveDate, i16)> {
+    let start_date = NaiveDate::from_ymd_opt(year, month, 1)?;
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let next_month_start = NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    let end_date = next_month_start.pred_opt()?;
+    let days_in_month = (end_date - start_date).num_days() as i16 + 1;
+    Some((start_date, end_date, days_in_month))
+}
+
+/// Calcula el número de días que una obra estuvo activa dentro de un mes específico,
+/// basándose en su fecha de inicio y fecha de fin.
+/// Devuelve `None` si la obra no tiene restricción de fechas (ambas fechas `None`).
+pub fn calculate_obra_days_in_month(
+    month: u32,
+    year: i32,
+    obra_fecha_inicio: Option<NaiveDate>,
+    obra_fecha_fin: Option<NaiveDate>,
+) -> Option<i16> {
+    let (month_start, month_end, _) = get_month_date_range(month, year)?;
+
+    match (obra_fecha_inicio, obra_fecha_fin) {
+        (Some(f_ini), Some(f_fin)) => {
+            let active_start = f_ini.max(month_start);
+            let active_end = f_fin.min(month_end);
+            if active_start <= active_end {
+                Some(((active_end - active_start).num_days() as i16 + 1).max(0))
+            } else {
+                Some(0)
+            }
+        }
+        (Some(f_ini), None) => {
+            let active_start = f_ini.max(month_start);
+            if active_start <= month_end {
+                Some(((month_end - active_start).num_days() as i16 + 1).max(0))
+            } else {
+                Some(0)
+            }
+        }
+        (None, Some(f_fin)) => {
+            let active_end = f_fin.min(month_end);
+            if active_end >= month_start {
+                Some(((active_end - month_start).num_days() as i16 + 1).max(0))
+            } else {
+                Some(0)
+            }
+        }
+        (None, None) => None,
+    }
+}
+
+/// Calcula el número máximo de días de obra que un empleado puede tener en un periodo específico:
+/// 1. Días efectivos del trabajador = Cédula - Lic - Inc - Aus.
+/// 2. Días activos de la obra en el mes (según fecha inicio y fecha fin de la obra).
+/// El máximo para ese empleado es `min(días efectivos, días activos de la obra en el mes)`.
+/// Retorna `(max_dias, dias_obra_activos_en_el_mes)`.
+pub fn calculate_max_dias_obra_for_employee(
+    dias_cedula: i16,
+    lic: f64,
+    inc: f64,
+    aus: f64,
+    mes_str: &str,
+    anio: i16,
+    periodo_str: &str,
+    obra_fecha_inicio: Option<NaiveDate>,
+    obra_fecha_fin: Option<NaiveDate>,
+) -> (i16, Option<i16>) {
+    let dias_efectivos = (dias_cedula as f64 - lic - inc - aus).round().max(0.0) as i16;
+
+    let dias_obra_en_mes = parse_month_and_year(mes_str, anio, periodo_str)
+        .and_then(|(m, y)| calculate_obra_days_in_month(m, y, obra_fecha_inicio, obra_fecha_fin));
+
+    let max_dias = if let Some(d_obra) = dias_obra_en_mes {
+        dias_efectivos.min(d_obra)
+    } else {
+        dias_efectivos
+    };
+
+    (max_dias, dias_obra_en_mes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2529,13 +2658,13 @@ mod tests {
 
     #[test]
     fn test_export_reporte_liquidaciones_excel_multi_sheet() {
-        let obra_user_1 = Uuid::new_v4();
-        let obra_user_2 = Uuid::new_v4();
-        let obra_cedula = Uuid::new_v4();
+        let obra_user_1 = Uuid::now_v7();
+        let obra_user_2 = Uuid::now_v7();
+        let obra_cedula = Uuid::now_v7();
 
-        let emp_1 = Uuid::new_v4();
-        let emp_2 = Uuid::new_v4();
-        let emp_3 = Uuid::new_v4();
+        let emp_1 = Uuid::now_v7();
+        let emp_2 = Uuid::now_v7();
+        let emp_3 = Uuid::now_v7();
 
         let mut valid_obras = HashSet::new();
         valid_obras.insert(obra_user_1);
@@ -2543,9 +2672,9 @@ mod tests {
 
         let make_row = |emp_id: Uuid, nombre: &str, oid: Option<Uuid>, obra_num: &str, is_user: bool, mes: &str, anio: i16, dias: i16, sub: f64| -> ReporteLiquidacionRowDb {
             ReporteLiquidacionRowDb {
-                id_reporte_liq: Uuid::new_v4(),
-                id_parent_reporte_liq: Uuid::new_v4(),
-                id_liquidacion: Uuid::new_v4(),
+                id_reporte_liq: Uuid::now_v7(),
+                id_parent_reporte_liq: Uuid::now_v7(),
+                id_liquidacion: Uuid::now_v7(),
                 id_empleado: emp_id,
                 nombre_trabajador: nombre.to_string(),
                 rfc: "XAXX010101000".to_string(),
@@ -2642,7 +2771,7 @@ mod tests {
         assert!(!guarderias_kpis[0].supera_18);
 
         let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join(format!("test_export_liq_{}.xlsx", Uuid::new_v4()));
+        let test_file = temp_dir.join(format!("test_export_liq_{}.xlsx", Uuid::now_v7()));
 
         let res = export_reporte_liquidaciones_to_excel(
             &rows,
