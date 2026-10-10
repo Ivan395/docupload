@@ -53,6 +53,8 @@ pub fn process_nominas(
     temp_dir: &Path,
     progress_callback: impl Fn(usize, usize, &str) + Send + Sync,
     revision_id: Uuid,
+    expected_client_rfc: Option<&str>,
+    expected_rp: Option<&str>,
 ) -> Result<NominasProcessResult, String> {
     progress_callback(0, 0, "Buscando y extrayendo nóminas XML...");
 
@@ -149,12 +151,65 @@ pub fn process_nominas(
         }
     }
 
-    // 2. Deduplication check: Detect and filter duplicate UUIDs or identical receipts
+    // 2. Validate client RFC and Registro Patronal against active revision
+    let clean_exp_rfc = expected_client_rfc.map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let clean_exp_rp = expected_rp.map(|s| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()).filter(|s| !s.is_empty() && s != "GENERAL");
+
+    let mut context_filtered = Vec::new();
+    for (file_display_name, emp) in parsed_ok {
+        // Validar RFC Emisor
+        if let Some(ref exp_rfc) = clean_exp_rfc {
+            let emisor = emp.rfc_emisor.as_deref().unwrap_or("").trim().to_uppercase();
+            if !emisor.is_empty() && emisor != *exp_rfc {
+                invalid_items.push(UnprocessedNomina {
+                    filename: file_display_name,
+                    uuid: emp.uuid.clone().unwrap_or_default(),
+                    rfc_emisor: emisor.clone(),
+                    rfc_receptor: emp.rfc_receptor.clone().unwrap_or_default(),
+                    total: emp.total.unwrap_or(0.0),
+                    category: "RFC EMISOR NO COINCIDE".to_string(),
+                    reason: format!(
+                        "El RFC emisor '{}' en el XML no coincide con el RFC '{}' registrado para la empresa en la aplicación.",
+                        emisor, exp_rfc
+                    ),
+                    is_sat_error: false,
+                });
+                continue;
+            }
+        }
+
+        // Validar Registro Patronal si el XML lo incluye
+        if let Some(ref exp_rp) = clean_exp_rp {
+            if let Some(ref rp) = emp.registro_patronal {
+                let clean_rp: String = rp.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
+                if !clean_rp.is_empty() && clean_rp != *exp_rp {
+                    invalid_items.push(UnprocessedNomina {
+                        filename: file_display_name,
+                        uuid: emp.uuid.clone().unwrap_or_default(),
+                        rfc_emisor: emp.rfc_emisor.clone().unwrap_or_default(),
+                        rfc_receptor: emp.rfc_receptor.clone().unwrap_or_default(),
+                        total: emp.total.unwrap_or(0.0),
+                        category: "REGISTRO PATRONAL NO COINCIDE".to_string(),
+                        reason: format!(
+                            "El Registro Patronal '{}' en el XML no coincide con el Registro Patronal '{}' registrado para la revisión.",
+                            rp.trim(), exp_rp
+                        ),
+                        is_sat_error: false,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        context_filtered.push((file_display_name, emp));
+    }
+
+    // 3. Deduplication check: Detect and filter duplicate UUIDs or identical receipts
     let mut seen_uuids = HashSet::new();
     let mut unique_parsed = Vec::new();
     let mut duplicate_count = 0;
 
-    for (file_display_name, emp) in parsed_ok {
+    for (file_display_name, emp) in context_filtered {
         let uuid_key = emp.uuid.as_deref().unwrap_or("").trim().to_uppercase();
         if !uuid_key.is_empty() {
             if seen_uuids.contains(&uuid_key) {

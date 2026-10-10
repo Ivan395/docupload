@@ -553,6 +553,7 @@ pub fn wire_nominas_upload_callbacks(
         let rustfs_cliente = d.get_selected_cliente_nombre().to_string();
         let rustfs_rp = d.get_selected_rp_registro().to_string();
         let rustfs_revision = d.get_selected_revision_nombre().to_string();
+        let client_rfc = d.get_selected_cliente_rfc().to_string();
         let revision_id = d.get_selected_revision_id().to_string();
         let revision_id_parsed = Uuid::parse_str(&revision_id).expect("Revision ID inválido: debe seleccionar una revisión válida en la UI");
 
@@ -560,6 +561,9 @@ pub fn wire_nominas_upload_callbacks(
         let session_w = s_pg.clone();
         let pool_w = pool_pg.clone();
         let revision_id_w = revision_id_parsed;
+
+        let rustfs_rp_cb = rustfs_rp.clone();
+        let client_rfc_cb = client_rfc.clone();
 
         std::thread::spawn(move || {
             let temp_dir_handle = tempfile::Builder::new()
@@ -589,8 +593,11 @@ pub fn wire_nominas_upload_callbacks(
                 });
             };
 
+            let rfc_arg = if !client_rfc_cb.trim().is_empty() { Some(client_rfc_cb.as_str()) } else { None };
+            let rp_arg = if !rustfs_rp_cb.trim().is_empty() && rustfs_rp_cb != "GENERAL" { Some(rustfs_rp_cb.as_str()) } else { None };
+
             let res = crate::nominas::processor::process_nominas(
-                &paths, &temp_excel, &temp_dir, progress_cb, revision_id_w,
+                &paths, &temp_excel, &temp_dir, progress_cb, revision_id_w, rfc_arg, rp_arg,
             );
 
             // Subida a RustFS de los archivos originales, conservando
@@ -659,6 +666,45 @@ pub fn wire_nominas_upload_callbacks(
 
                 match res {
                     Ok(r) => {
+                        let mismatch_items_slint: Vec<crate::MismatchDetailItem> = r
+                            .invalid_items
+                            .iter()
+                            .filter_map(|it| {
+                                if it.category == "RFC EMISOR NO COINCIDE" {
+                                    Some(crate::MismatchDetailItem {
+                                        filename: it.filename.clone().into(),
+                                        tipo_error: "RFC no coincide".into(),
+                                        valor_esperado: format!("RFC: {}", client_rfc).into(),
+                                        valor_encontrado: format!("RFC: {}", it.rfc_emisor).into(),
+                                        descripcion: it.reason.clone().into(),
+                                    })
+                                } else if it.category == "REGISTRO PATRONAL NO COINCIDE" {
+                                    Some(crate::MismatchDetailItem {
+                                        filename: it.filename.clone().into(),
+                                        tipo_error: "Registro Patronal no coincide".into(),
+                                        valor_esperado: format!("RP: {}", rustfs_rp).into(),
+                                        valor_encontrado: format!("RP: {}", it.reason.split('\'').nth(1).unwrap_or("")).into(),
+                                        descripcion: it.reason.clone().into(),
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        if r.valid_count == 0 && !mismatch_items_slint.is_empty() {
+                            app_data.set_nominas_mismatch_title("Discrepancia en Nóminas XML".into());
+                            app_data.set_nominas_mismatch_expected_cliente(rustfs_cliente.into());
+                            app_data.set_nominas_mismatch_expected_rfc(client_rfc.into());
+                            app_data.set_nominas_mismatch_expected_rp(rustfs_rp.into());
+                            app_data.set_nominas_mismatch_mensaje(
+                                "Los archivos XML cargados no corresponden con el RFC de la empresa o el Registro Patronal de la revisión.".into(),
+                            );
+                            app_data.set_nominas_mismatch_items(slint::ModelRc::new(slint::VecModel::from(mismatch_items_slint)));
+                            app_data.set_show_nominas_mismatch_modal(true);
+                            return;
+                        }
+
                         // Los archivos ya fueron procesados y guardados en BD;
                         // se retiran de la sesión y se pasa al estado 2.
                         {

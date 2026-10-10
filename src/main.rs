@@ -1046,11 +1046,12 @@ fn spawn_nominas_worker(
         }
     }
 
-    let (nom_client_nom, nom_rp_reg, nom_rev_nom, nom_rev_id) = if let Some(ui) = ui_weak.upgrade() {
+    let (nom_client_nom, nom_rp_reg, nom_rev_nom, nom_rev_id, nom_client_rfc) = if let Some(ui) = ui_weak.upgrade() {
         let app_data = ui.global::<AppData>();
         let c = app_data.get_selected_cliente_nombre().to_string();
         let rp = app_data.get_selected_rp_registro().to_string();
         let r = app_data.get_selected_revision_nombre().to_string();
+        let rfc = app_data.get_selected_cliente_rfc().to_string();
         let rev_id_str = app_data.get_selected_revision_id().to_string();
         let rev_id = Uuid::parse_str(&rev_id_str).expect("Revision ID inválido: debe seleccionar una revisión válida en la UI");
         (
@@ -1058,9 +1059,10 @@ fn spawn_nominas_worker(
             if rp.is_empty() { "GENERAL".to_string() } else { rp },
             if r.is_empty() { "GENERAL".to_string() } else { r },
             rev_id,
+            rfc,
         )
     } else {
-        ("GENERAL".to_string(), "GENERAL".to_string(), "GENERAL".to_string(), Uuid::now_v7())
+        ("GENERAL".to_string(), "GENERAL".to_string(), "GENERAL".to_string(), Uuid::now_v7(), String::new())
     };
 
     let ui_w = ui_weak.clone();
@@ -1129,7 +1131,9 @@ fn spawn_nominas_worker(
             }
         };
 
-        let res = nominas::processor::process_nominas(&nominas_paths, &nominas_out_path, &temp_dir, progress_cb, nom_rev_id);
+        let exp_rfc_opt = if !nom_client_rfc.trim().is_empty() { Some(nom_client_rfc.as_str()) } else { None };
+        let exp_rp_opt = if nom_rp_reg != "GENERAL" && !nom_rp_reg.trim().is_empty() { Some(nom_rp_reg.as_str()) } else { None };
+        let res = nominas::processor::process_nominas(&nominas_paths, &nominas_out_path, &temp_dir, progress_cb, nom_rev_id, exp_rfc_opt, exp_rp_opt);
 
         let ui_event = ui_w.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -1708,12 +1712,13 @@ fn handle_cedulas_upload_and_inspect(
         let mut c_nom = cliente_nombre;
         let mut r_reg = rp_registro;
         let mut rev_nom = revision_nombre;
+        let mut c_rfc = String::new();
 
         if let Some(ref pool) = pool_clone {
             if let Ok(mut client) = pool.get() {
                 if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
                     if let Ok(Some(row)) = client.query_opt(
-                        "SELECT c.nombre, rp.registro_patronal, r.nombre_revision
+                        "SELECT c.nombre, rp.registro, r.nombre, c.rfc
                          FROM revisiones r
                          JOIN registros_patronales rp ON r.id_registro_patronal = rp.id
                          JOIN clientes c ON rp.id_cliente = c.id
@@ -1723,6 +1728,7 @@ fn handle_cedulas_upload_and_inspect(
                         c_nom = row.get(0);
                         r_reg = row.get(1);
                         rev_nom = row.get(2);
+                        c_rfc = row.get::<_, Option<String>>(3).unwrap_or_default();
                     }
                 }
             }
@@ -1856,12 +1862,27 @@ fn handle_cedulas_upload_and_inspect(
         }
 
         // 6. Sincronizar y recargar la lista activa desde RustFS
-        let final_cards = crate::rustfs::sync_and_load_cedulas_view_files(
+        let mut final_cards = crate::rustfs::sync_and_load_cedulas_view_files(
             &c_nom,
             &r_reg,
             &rev_nom,
             &cache_dir,
         ).unwrap_or(existing_cards);
+
+        let exp_rfc_opt = if !c_rfc.trim().is_empty() { Some(c_rfc.trim()) } else { None };
+        let exp_rp_opt = if !r_reg.trim().is_empty() && r_reg != "GENERAL" { Some(r_reg.trim()) } else { None };
+
+        for card in &mut final_cards {
+            let path_buf = PathBuf::from(&card.id);
+            if path_buf.exists() {
+                let inspected = crate::cedulas::view_logic::inspect_cedula_file_with_context(
+                    &path_buf,
+                    exp_rfc_opt,
+                    exp_rp_opt,
+                );
+                card.warning_msg = inspected.warning_msg;
+            }
+        }
 
         // 7. Generar mensaje detallado de archivos duplicados si aplica
         let duplicate_msg_text = if !duplicates.is_empty() {
@@ -1990,7 +2011,7 @@ fn spawn_cedulas_view_worker(
             if let Ok(mut c) = pool.get() {
                 if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
                     if let Ok(row) = c.query_opt(
-                        "SELECT rp.registro_patronal FROM revisiones r JOIN registros_patronales rp ON r.id_registro_patronal = rp.id WHERE r.id = $1",
+                        "SELECT rp.registro FROM revisiones r JOIN registros_patronales rp ON r.id_registro_patronal = rp.id WHERE r.id = $1",
                         &[&rev_uuid],
                     ) {
                         if let Some(r) = row {
@@ -2046,16 +2067,23 @@ fn spawn_cedulas_view_worker(
             });
         };
 
+        let target_rp_opt = if !rp_for_rustfs.trim().is_empty() && rp_for_rustfs != "GENERAL" {
+            Some(rp_for_rustfs.as_str())
+        } else {
+            None
+        };
+
         match process_and_audit_cedulas(
             &files_to_process,
             target_rfc_opt,
             target_nombre_opt,
+            target_rp_opt,
             &revision_obras_registered,
             &temp_excel,
             &temp_dir,
             progress_cb,
         ) {
-            Ok((audit_res, businesses)) => {
+            Ok((audit_res, businesses, mismatch_report)) => {
 
                 // Guardar en Base de Datos PostgreSQL
                 let mut db_saved_summary = String::new();
@@ -2094,7 +2122,7 @@ fn spawn_cedulas_view_worker(
 
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_final.upgrade() {
-                        let is_mismatch = audit_res.validos_sua == 0 || businesses.is_empty();
+                        let is_mismatch = audit_res.validos_sua == 0 || businesses.is_empty() || !mismatch_report.is_empty();
                         if is_mismatch {
                             {
                                 let mut sess = session_final.lock().unwrap();
@@ -2104,6 +2132,23 @@ fn spawn_cedulas_view_worker(
                             app_data.set_cedulas_view_is_processing(false);
                             app_data.set_cedulas_view_progress_fraction(0.0);
                             app_data.set_cedulas_view_progress_text("".into());
+
+                            let ui_items: Vec<crate::MismatchDetailItem> = mismatch_report.items.into_iter().map(|it| crate::MismatchDetailItem {
+                                filename: it.filename.into(),
+                                tipo_error: it.error_type.into(),
+                                valor_esperado: it.expected_val.into(),
+                                valor_encontrado: it.found_val.into(),
+                                descripcion: it.details.into(),
+                            }).collect();
+                            let mismatch_model = std::rc::Rc::new(slint::VecModel::from(ui_items));
+                            app_data.set_cedulas_mismatch_items(mismatch_model.into());
+                            app_data.set_cedulas_mismatch_expected_rfc(mismatch_report.expected_rfc.into());
+                            app_data.set_cedulas_mismatch_expected_rp(mismatch_report.expected_rp.into());
+                            app_data.set_cedulas_mismatch_expected_cliente(mismatch_report.expected_cliente.into());
+                            app_data.set_cedulas_mismatch_title("Inconsistencias detectadas en Cédulas".into());
+                            app_data.set_cedulas_mismatch_mensaje(
+                                "Los archivos de cédulas seleccionados no corresponden con el Registro Patronal o RFC de la empresa registrada en esta revisión.".into()
+                            );
                             app_data.set_show_cedulas_client_mismatch_modal(true);
                             return;
                         }
@@ -2211,11 +2256,10 @@ fn spawn_cedulas_view_worker(
                     }
                 });
             }
-            Err(e) => {
+            Err((err_msg, mismatch_report)) => {
                 let ui_err = ui_w.clone();
                 let session_err = session_w.clone();
-                let err_msg = e.to_string();
-                let is_client_mismatch = err_msg.contains("CLIENT_MISMATCH") || err_msg.contains("no pertenecen a la empresa");
+                let is_client_mismatch = err_msg.contains("CLIENT_MISMATCH") || err_msg.contains("no pertenecen a la empresa") || !mismatch_report.is_empty();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_err.upgrade() {
                         let app_data = ui.global::<AppData>();
@@ -2228,6 +2272,22 @@ fn spawn_cedulas_view_worker(
                                 let mut sess = session_err.lock().unwrap();
                                 reset_cedulas_ui_to_state_zero(&ui, &mut sess);
                             }
+                            let ui_items: Vec<crate::MismatchDetailItem> = mismatch_report.items.into_iter().map(|it| crate::MismatchDetailItem {
+                                filename: it.filename.into(),
+                                tipo_error: it.error_type.into(),
+                                valor_esperado: it.expected_val.into(),
+                                valor_encontrado: it.found_val.into(),
+                                descripcion: it.details.into(),
+                            }).collect();
+                            let mismatch_model = std::rc::Rc::new(slint::VecModel::from(ui_items));
+                            app_data.set_cedulas_mismatch_items(mismatch_model.into());
+                            app_data.set_cedulas_mismatch_expected_rfc(mismatch_report.expected_rfc.into());
+                            app_data.set_cedulas_mismatch_expected_rp(mismatch_report.expected_rp.into());
+                            app_data.set_cedulas_mismatch_expected_cliente(mismatch_report.expected_cliente.into());
+                            app_data.set_cedulas_mismatch_title("Inconsistencias detectadas en Cédulas".into());
+                            app_data.set_cedulas_mismatch_mensaje(
+                                "Los archivos de cédulas seleccionados no corresponden con el Registro Patronal o RFC de la empresa registrada.".into()
+                            );
                             app_data.set_show_cedulas_client_mismatch_modal(true);
                         } else {
                             show_toast_message(&ui, &format!("Error al procesar: {}", err_msg));
@@ -2258,7 +2318,7 @@ fn sync_and_load_cedulas_view_data(
         }
     };
 
-    // 1. Obtener metadatos de la revisión (cliente, registro patronal, nombre revisión)
+    // 1. Obtener metadatos de la revisión (cliente, registro patronal, nombre revisión, rfc)
     let rev_meta = match uuid::Uuid::parse_str(rev_id.trim()) {
         Ok(rev_uuid) => {
             client.query_opt(
@@ -2266,7 +2326,8 @@ fn sync_and_load_cedulas_view_data(
                 SELECT 
                     c.nombre AS cliente_nombre,
                     rp.registro AS rp_registro,
-                    r.nombre AS revision_nombre
+                    r.nombre AS revision_nombre,
+                    c.rfc AS cliente_rfc
                 FROM public.revisiones r
                 JOIN public.registros_patronales rp ON r.id_registro_patronal = rp.id
                 JOIN public.clientes c ON rp.id_cliente = c.id
@@ -2278,11 +2339,12 @@ fn sync_and_load_cedulas_view_data(
         Err(_) => None,
     };
 
-    let (cliente_nombre, rp_registro, revision_nombre) = match rev_meta {
+    let (cliente_nombre, rp_registro, revision_nombre, cliente_rfc) = match rev_meta {
         Some(row) => (
             row.get::<_, String>(0),
             row.get::<_, String>(1),
             row.get::<_, String>(2),
+            row.get::<_, Option<String>>(3).unwrap_or_default(),
         ),
         None => {
             let app_data = ui.global::<AppData>();
@@ -2290,18 +2352,34 @@ fn sync_and_load_cedulas_view_data(
                 app_data.get_selected_cliente_nombre().to_string(),
                 app_data.get_selected_rp_registro().to_string(),
                 app_data.get_selected_revision_nombre().to_string(),
+                app_data.get_selected_cliente_rfc().to_string(),
             )
         }
     };
 
     // 2. Sincronizar y descargar archivos de RustFS
     let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(rev_id);
-    let rustfs_files = crate::rustfs::sync_and_load_cedulas_view_files(
+    let mut rustfs_files = crate::rustfs::sync_and_load_cedulas_view_files(
         &cliente_nombre,
         &rp_registro,
         &revision_nombre,
         &cache_dir,
     ).unwrap_or_default();
+
+    let exp_rfc_opt = if !cliente_rfc.trim().is_empty() { Some(cliente_rfc.trim()) } else { None };
+    let exp_rp_opt = if !rp_registro.trim().is_empty() && rp_registro != "GENERAL" { Some(rp_registro.trim()) } else { None };
+
+    for card in &mut rustfs_files {
+        let p = std::path::PathBuf::from(&card.id);
+        if p.exists() {
+            let inspected = crate::cedulas::view_logic::inspect_cedula_file_with_context(
+                &p,
+                exp_rfc_opt,
+                exp_rp_opt,
+            );
+            card.warning_msg = inspected.warning_msg;
+        }
+    }
 
     // 3. Cargar liquidaciones y calcular estadísticos desde PostgreSQL
     let db_res = load_cedulas_from_db(&mut client, rev_id);
@@ -2470,9 +2548,42 @@ fn handle_descargar_cedulas_excel(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn ensure_linux_desktop_integration() {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        let apps_dir = home.join(".local/share/applications");
+        let icons_dir = home.join(".local/share/icons/hicolor/256x256/apps");
+        let _ = fs::create_dir_all(&apps_dir);
+        let _ = fs::create_dir_all(&icons_dir);
+
+        let icon_path = icons_dir.join("docu_ffacd.png");
+        let icon_bytes = include_bytes!("../ui/assets/app_icon_256.png");
+        let _ = fs::write(&icon_path, icon_bytes);
+
+        let icons_base = home.join(".local/share/icons");
+        let _ = fs::write(icons_base.join("docu_ffacd.png"), icon_bytes);
+
+        let current_exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "docu_ffacd".to_string());
+
+        let desktop_path = apps_dir.join("docu_ffacd.desktop");
+        let desktop_content = format!(
+            "[Desktop Entry]\nVersion=1.0\nType=Application\nName=Firma Fiscal ACD\nGenericName=Procesamiento de Nóminas SAT y Cédulas SUA\nComment=Validación SAT SOAP y Procesamiento SUA IMSS\nExec={}\nIcon=docu_ffacd\nTerminal=false\nCategories=Office;Finance;Utility;\nStartupWMClass=docu_ffacd\nX-KDE-SubstituteUID=false\n",
+            current_exe
+        );
+        let _ = fs::write(&desktop_path, desktop_content);
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let _ = slint::set_xdg_app_id("docu_ffacd");
     let main_window = MainWindow::new()?;
+    let _ = slint::set_xdg_app_id("docu_ffacd");
+
+    #[cfg(target_os = "linux")]
+    ensure_linux_desktop_integration();
 
     let nominas_list = Rc::new(RefCell::new(Vec::<SelectedFileEntry>::new()));
     let cedulas_list = Rc::new(RefCell::new(Vec::<SelectedFileEntry>::new()));
@@ -5566,6 +5677,16 @@ fn main() -> Result<(), slint::PlatformError> {
         app_logic.on_close_cedulas_client_mismatch_modal(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.global::<AppData>().set_show_cedulas_client_mismatch_modal(false);
+            }
+        });
+    }
+
+    // Cerrar modal de inconsistencias en Nóminas
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_close_nominas_mismatch_modal(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_nominas_mismatch_modal(false);
             }
         });
     }

@@ -27,6 +27,14 @@ export struct UnprocessedItemData {
     is_sat_error: bool,
 }
 
+export struct MismatchDetailItem {
+    filename: string,
+    tipo_error: string,
+    valor_esperado: string,
+    valor_encontrado: string,
+    descripcion: string,
+}
+
 export struct ProcessingSummary {
     nominas_total: int,
     nominas_valid: int,
@@ -234,6 +242,15 @@ export struct ReporteBatchWorkerItem {
     dias_cedula: int,
     dias_obra: int,
     tope_max: int,
+}
+
+export struct ReporteSelectedItem {
+    id: string,
+    idx: int,
+    nombre_trabajador: string,
+    nss: string,
+    periodo: string,
+    obra_label: string,
 }
 
 export struct ReporteMesTotalItem {
@@ -854,8 +871,14 @@ export global AppData {
     // Modal de confirmación para Borrar Todas las Cédulas
     in-out property <bool> show_delete_all_cedulas_modal: false;
 
-    // Modal de Alerta: Archivos no pertenecen a la empresa en revisión
+    // Modal de Alerta: Archivos no pertenecen a la empresa o registro patronal en revisión
     in-out property <bool> show_cedulas_client_mismatch_modal: false;
+    in-out property <string> cedulas_mismatch_title: "Discrepancia en Cédulas de Cuotas";
+    in-out property <string> cedulas_mismatch_mensaje: "";
+    in-out property <string> cedulas_mismatch_expected_rfc: "";
+    in-out property <string> cedulas_mismatch_expected_rp: "";
+    in-out property <string> cedulas_mismatch_expected_cliente: "";
+    in-out property <[MismatchDetailItem]> cedulas_mismatch_items: [];
 
     // Modal informativo de Carga y Actualizaciones por Vista
     in-out property <bool> show_cedulas_success_modal: false;
@@ -899,6 +922,15 @@ export global AppData {
     // Estadísticas mensuales (para análisis del analista)
     in-out property <[MesStatsRow]> nominas_view_mes_stats: [];
     in-out property <int> nominas_view_total_empleados_unicos: 0;
+
+    // Modal de Alerta: Discrepancias en Nóminas XML
+    in-out property <bool> show_nominas_mismatch_modal: false;
+    in-out property <string> nominas_mismatch_title: "Discrepancia en Nóminas XML";
+    in-out property <string> nominas_mismatch_mensaje: "";
+    in-out property <string> nominas_mismatch_expected_rfc: "";
+    in-out property <string> nominas_mismatch_expected_rp: "";
+    in-out property <string> nominas_mismatch_expected_cliente: "";
+    in-out property <[MismatchDetailItem]> nominas_mismatch_items: [];
     in-out property <string> nominas_view_promedio_dias_por_empleado: "0";
     in-out property <string> nominas_view_promedio_percepciones_por_empleado: "$0.00";
     in-out property <string> nominas_view_total_nominas_sin_cedula: "0";
@@ -977,6 +1009,7 @@ export global AppData {
     // Panel de Modificación Masiva
     in-out property <bool> reporte_batch_panel_open: true;
     in-out property <int> reporte_selected_count: 0;
+    in-out property <[ReporteSelectedItem]> reporte_selected_items: [];
     in-out property <bool> reporte_all_filter_selected: false;
     in-out property <int> reporte_batch_obra_idx: 0;
     in-out property <string> reporte_batch_dias_input: "";
@@ -1318,6 +1351,7 @@ callback recargar_cedulas_view();
     callback confirmar_borrar_todas_nominas();
 
     callback close_cedulas_client_mismatch_modal();
+    callback close_nominas_mismatch_modal();
     // Empleados
     callback open_new_empleado_dialog();
     callback select_empleado_for_edit(string);
@@ -1371,6 +1405,7 @@ callback recargar_cedulas_view();
     callback reporte_cambiar_pagina(int);
     callback reporte_toggle_select_row(string);
     callback reporte_toggle_select_all(bool);
+    callback reporte_limpiar_seleccion();
     callback reporte_open_obra_picker(string);
     callback reporte_filter_obra_picker(string);
     callback reporte_select_obra_picker(string, string);
@@ -1407,7 +1442,6 @@ callback recargar_cedulas_view();
     callback reporte_execute_confirm_igualar_dias();
     callback exportar_reporte_liquidaciones_excel();
     callback revertir_reporte_liquidaciones();
-    callback guardar_reporte_liquidaciones();
 
     // Callbacks de ordenamiento multi-criterio
     callback reporte_open_sort_modal();
@@ -1439,6 +1473,7 @@ callback recargar_cedulas_view();
     callback reporte_cerrar_modal_exportar_sua();
     callback reporte_toggle_sua_obra(string);
     callback reporte_sua_select_all_obras(bool);
+    callback reporte_sua_select_preset(string);
     callback reporte_generar_sua();
 
     // Calendario Fiscal & Revisiones Callbacks

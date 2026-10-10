@@ -175,7 +175,7 @@ export component RevisionesView inherits Rectangle {
 
         // Banner de Alerta por Registro Patronal con Estructura Inválida
         if !AppData.selected_rp_is_valid_structure && AppData.selected_rp_registro != "" : Rectangle {
-            height: 40px;
+            height: 46px;
             border-radius: 6px;
             background: #fef2f2;
             border-width: 1px;
@@ -189,7 +189,7 @@ export component RevisionesView inherits Rectangle {
 
                 Text { text: "⚠️"; font-size: 14px; vertical-alignment: center; }
                 Text {
-                    text: "La estructura del registro patronal no es correcta. No se pueden crear revisiones hasta corregirlo.";
+                    text: "El Registro Patronal seleccionado '" + AppData.selected_rp_registro + "' no cumple con el formato oficial IMSS (11 caracteres: 1 letra y 10 dígitos). Corríjalo en Registros Patronales (F3) para habilitar revisiones.";
                     font-size: 12px;
                     font-weight: 700;
                     color: #b91c1c;

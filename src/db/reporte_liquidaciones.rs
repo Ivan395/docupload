@@ -492,7 +492,13 @@ pub fn sync_reportes_liquidaciones_for_revision(
                 let factor = if target_obra_id.is_some() && dias_det.map(|d| d > 0).unwrap_or(false) {
                     let d_ced = dias_det.unwrap() as f64;
                     let d_obr = target_dias.unwrap_or(dias_det.unwrap()) as f64;
-                    (d_obr / d_ced).clamp(0.0, 10.0)
+                    let sum_inc = lic.unwrap_or(0.0) + inc.unwrap_or(0.0) + aus.unwrap_or(0.0);
+                    let d_base = if sum_inc > 0.001 { sum_inc } else { d_ced };
+                    if d_base > 0.0001 {
+                        (d_obr / d_base).clamp(0.0, 10.0)
+                    } else {
+                        0.0
+                    }
                 } else {
                     1.0
                 };
@@ -537,20 +543,90 @@ pub fn sync_reportes_liquidaciones_for_revision(
             r#"
             UPDATE public.reportes_detalles_liquidaciones rdl
             SET 
-                cf = ROUND((dl.cf * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                exc_pat = ROUND((dl.exc_pat * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                exc_obr = ROUND((dl.exc_obr * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                pd_pat = ROUND((dl.pd_pat * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                pd_obr = ROUND((dl.pd_obr * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                gmp_pat = ROUND((dl.gmp_pat * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                gmp_obr = ROUND((dl.gmp_obr * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                rt = ROUND((dl.rt * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                iv_pat = ROUND((dl.iv_pat * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                iv_obr = ROUND((dl.iv_obr * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                gps = ROUND((dl.gps * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                patronal = ROUND((dl.patronal * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                obrera = ROUND((dl.obrera * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8,
-                subtotal = ROUND((dl.subtotal * ((rvol.dias_registro_obra::float8) / NULLIF(rdl.dias, 0)::float8))::numeric, 2)::float8
+                cf = ROUND((dl.cf * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                exc_pat = ROUND((dl.exc_pat * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                exc_obr = ROUND((dl.exc_obr * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                pd_pat = ROUND((dl.pd_pat * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                pd_obr = ROUND((dl.pd_obr * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                gmp_pat = ROUND((dl.gmp_pat * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                gmp_obr = ROUND((dl.gmp_obr * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                rt = ROUND((dl.rt * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                iv_pat = ROUND((dl.iv_pat * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                iv_obr = ROUND((dl.iv_obr * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                gps = ROUND((dl.gps * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                patronal = ROUND((dl.patronal * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                obrera = ROUND((dl.obrera * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8,
+                subtotal = ROUND((dl.subtotal * ((rvol.dias_registro_obra::float8) / NULLIF(
+                    CASE 
+                        WHEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001 
+                        THEN (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))
+                        ELSE rdl.dias::float8 
+                    END, 0)::float8))::numeric, 2)::float8
             FROM public.reportes_liquidaciones rl,
                  public.detalles_liquidaciones dl,
                  public.reportes_vinculaciones_obras_liquidaciones rvol
@@ -562,7 +638,7 @@ pub fn sync_reportes_liquidaciones_for_revision(
               AND rl.id_revision = $1
               AND rvol.id_registro_obra IS NOT NULL
               AND rvol.dias_registro_obra IS NOT NULL
-              AND rdl.dias IS NOT NULL AND rdl.dias > 0
+              AND ((rdl.dias IS NOT NULL AND rdl.dias > 0) OR (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0)) > 0.001)
               AND rvol.id_registro_obra = ANY($2);
             "#,
             &[&id_revision, &valid_obras_vec],
@@ -604,6 +680,369 @@ pub fn sync_reportes_liquidaciones_for_revision(
 
     tx.commit().map_err(|e| format!("Error en commit de sincronización: {}", e))?;
     Ok(copied_count)
+}
+
+/// Revierte todos los cambios en Reporte Liquidaciones para la revisión indicada:
+/// Elimina los registros modificados en reportes_detalles_liquidaciones y reportes_vinculaciones_obras_liquidaciones,
+/// restaura los valores originales desde detalles_liquidaciones (tal como venían en los archivos de cédulas),
+/// re-asigna la vinculación original de obra (desde vinculaciones_obras_liquidaciones o clave_ubicacion)
+/// y recalcula los topes y prorrateos en base a los valores por defecto y movimientos del trabajador.
+pub fn revertir_reporte_liquidaciones_a_originales(
+    client: &mut Client,
+    id_revision: Uuid,
+) -> Result<usize, String> {
+    let obras = fetch_obras_for_revision(client, id_revision)?;
+
+    // 1. Obtener los años y los nombres de los meses en español a partir de las fechas de las obras
+    let mut anios_set: BTreeSet<i16> = BTreeSet::new();
+    let mut meses_set: BTreeSet<String> = BTreeSet::new();
+
+    for o in &obras {
+        if let (Some(f_ini), Some(f_fin)) = (o.fecha_inicio, o.fecha_fin) {
+            let mut curr_y = f_ini.year();
+            let mut curr_m = f_ini.month();
+            let end_y = f_fin.year();
+            let end_m = f_fin.month();
+
+            while (curr_y < end_y) || (curr_y == end_y && curr_m <= end_m) {
+                anios_set.insert(curr_y as i16);
+                let mes_nom = month_num_to_name(curr_m);
+                if !mes_nom.is_empty() {
+                    meses_set.insert(mes_nom.to_string());
+                }
+                curr_m += 1;
+                if curr_m > 12 {
+                    curr_m = 1;
+                    curr_y += 1;
+                }
+            }
+        }
+    }
+
+    let mut tx = client.transaction().map_err(|e| format!("Error iniciando transacción: {}", e))?;
+
+    // Mapa de obras válidas con sus rangos de fechas
+    let valid_obras_rows = tx.query(
+        "SELECT id, fecha_inicio, fecha_fin FROM public.registros_obras WHERE id_revision = $1",
+        &[&id_revision],
+    ).map_err(|e| format!("Error consultando registros de obras: {}", e))?;
+
+    let mut obras_map: HashMap<Uuid, (Option<NaiveDate>, Option<NaiveDate>)> = HashMap::new();
+    for r in valid_obras_rows {
+        let oid: Uuid = r.get(0);
+        let f_ini: Option<NaiveDate> = r.try_get(1).ok().flatten();
+        let f_fin: Option<NaiveDate> = r.try_get(2).ok().flatten();
+        obras_map.insert(oid, (f_ini, f_fin));
+    }
+
+    // 2. Limpiar todos los detalles y vinculaciones actuales de reportes para esta revisión
+    tx.execute(
+        r#"
+        DELETE FROM public.reportes_detalles_liquidaciones
+        WHERE id_reporte_liquidacion IN (
+            SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1
+        )
+        "#,
+        &[&id_revision],
+    ).map_err(|e| format!("Error limpiando reportes_detalles_liquidaciones: {}", e))?;
+
+    tx.execute(
+        r#"
+        DELETE FROM public.reportes_vinculaciones_obras_liquidaciones
+        WHERE id_reporte_liquidacion IN (
+            SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1
+        )
+        "#,
+        &[&id_revision],
+    ).map_err(|e| format!("Error limpiando reportes_vinculaciones_obras_liquidaciones: {}", e))?;
+
+    // 3. Consultar las liquidaciones correspondientes al periodo analizado
+    let liq_rows = if !anios_set.is_empty() && !meses_set.is_empty() {
+        let anios_vec: Vec<i16> = anios_set.into_iter().collect();
+        let meses_vec: Vec<String> = meses_set.into_iter().collect();
+
+        // Limpiar en reportes_liquidaciones aquellos registros fuera del periodo
+        let _ = tx.execute(
+            r#"
+            DELETE FROM public.reportes_liquidaciones
+            WHERE id_revision = $1
+              AND (
+                  NOT (UPPER(TRIM(mes_periodo)) = ANY($2))
+                  OR NOT (anio_periodo = ANY($3))
+              )
+            "#,
+            &[&id_revision, &meses_vec, &anios_vec],
+        );
+
+        tx.query(
+            r#"
+            SELECT l.id, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
+            FROM public.liquidaciones l
+            WHERE l.id_revision = $1
+              AND UPPER(TRIM(l.mes_periodo)) = ANY($2)
+              AND l.anio_periodo = ANY($3)
+            ORDER BY l.anio_periodo ASC, l.mes_periodo ASC
+            "#,
+            &[&id_revision, &meses_vec, &anios_vec],
+        ).map_err(|e| format!("Error consultando liquidaciones filtradas: {}", e))?
+    } else {
+        tx.query(
+            r#"
+            SELECT l.id, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
+            FROM public.liquidaciones l
+            WHERE l.id_revision = $1
+            ORDER BY l.anio_periodo ASC, l.mes_periodo ASC
+            "#,
+            &[&id_revision],
+        ).map_err(|e| format!("Error consultando liquidaciones: {}", e))?
+    };
+
+    let mut restored_count = 0;
+
+    for row in liq_rows {
+        let id_liq: Uuid = match row.try_get(0) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let id_emp: Uuid = match row.try_get(1) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mes_str: Option<String> = row.try_get(2).ok();
+        let anio: Option<i16> = row.try_get(3).ok();
+        let nombre_arch: Option<String> = row.try_get(4).ok();
+
+        // Asegurar reporte_liquidacion
+        let rep_liq_opt = tx.query_opt(
+            "SELECT id FROM public.reportes_liquidaciones WHERE id_liquidacion = $1 LIMIT 1",
+            &[&id_liq],
+        ).map_err(|e| format!("Error buscando reporte_liquidacion: {}", e))?;
+
+        let id_rep_liq = match rep_liq_opt {
+            Some(r) => r.try_get::<_, Uuid>(0).unwrap_or_else(|_| Uuid::now_v7()),
+            None => {
+                let new_rep_id = Uuid::now_v7();
+                tx.execute(
+                    r#"
+                    INSERT INTO public.reportes_liquidaciones (
+                        id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    "#,
+                    &[&new_rep_id, &id_liq, &id_revision, &id_emp, &mes_str, &anio, &nombre_arch],
+                ).map_err(|e| format!("Error insertando reporte_liquidacion: {}", e))?;
+                new_rep_id
+            }
+        };
+
+        // Identificar la obra y días originales tal como venían en los archivos de cédulas de obra
+        let orig_vinc_opt = tx.query_opt(
+            "SELECT id_registro_obra, dias_registro_obra FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1 LIMIT 1",
+            &[&id_liq],
+        ).map_err(|e| format!("Error consultando vinculación original: {}", e))?;
+
+        let (target_obra_id, target_dias) = match orig_vinc_opt {
+            Some(ref ov) => {
+                let o_id: Option<Uuid> = ov.try_get::<_, Option<Uuid>>(0).ok().flatten();
+                let d_obra: Option<i16> = ov.try_get::<_, Option<i16>>(1).ok().flatten();
+                if let Some(oid) = o_id {
+                    if obras_map.contains_key(&oid) {
+                        (Some(oid), d_obra)
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                }
+            }
+            None => {
+                let emp_obra_row = tx.query_opt(
+                    r#"
+                    SELECT ro.id FROM public.registros_obras ro
+                    JOIN public.empleados e ON ro.numero = LEFT(TRIM(e.clave_ubicacion), 15)
+                    WHERE ro.id_revision = $1 AND e.id = $2
+                    LIMIT 1
+                    "#,
+                    &[&id_revision, &id_emp],
+                ).ok().flatten();
+                if let Some(er) = emp_obra_row {
+                    let oid: Uuid = er.get(0);
+                    (Some(oid), Some(30))
+                } else {
+                    (None, None)
+                }
+            }
+        };
+
+        // Extraer movimientos del trabajador en este mes a partir de detalles_liquidaciones
+        let mes_clean = mes_str.as_deref().unwrap_or("").trim();
+        let anio_val = anio.unwrap_or(0);
+        let mov_rows = tx.query(
+            r#"
+            SELECT dl.clave, dl.fecha
+            FROM public.detalles_liquidaciones dl
+            JOIN public.liquidaciones l ON dl.id_liquidacion = l.id
+            WHERE l.id_empleado = $1
+              AND UPPER(TRIM(l.mes_periodo)) = UPPER(TRIM($2))
+              AND l.anio_periodo = $3
+              AND dl.fecha IS NOT NULL
+            ORDER BY dl.fecha ASC
+            "#,
+            &[&id_emp, &mes_clean, &anio_val],
+        ).unwrap_or_default();
+
+        let mut movements: Vec<EmployeeMovement> = Vec::new();
+        for mr in mov_rows {
+            let clv: String = mr.try_get::<_, Option<String>>(0).ok().flatten().unwrap_or_default();
+            if let Ok(f) = mr.try_get::<_, NaiveDate>(1) {
+                let c_low = clv.trim().to_lowercase();
+                if c_low.contains("baja") {
+                    movements.push(EmployeeMovement { kind: MovementKind::Baja, fecha: f });
+                } else if c_low.contains("alta") || c_low.contains("reing") {
+                    movements.push(EmployeeMovement { kind: MovementKind::Alta, fecha: f });
+                }
+            }
+        }
+        movements.sort_by(|a, b| a.fecha.cmp(&b.fecha).then_with(|| a.kind.cmp(&b.kind)));
+        movements.dedup();
+
+        // Consultar los detalles originales tal como vinieron en las cédulas
+        let orig_detalles = tx.query(
+            r#"
+            SELECT clave, fecha, dias, sdi, lic, inc, aus, cf,
+                   exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
+                   gps, patronal, obrera, subtotal
+            FROM public.detalles_liquidaciones
+            WHERE id_liquidacion = $1
+            ORDER BY fecha ASC NULLS FIRST, clave ASC NULLS FIRST
+            "#,
+            &[&id_liq],
+        ).map_err(|e| format!("Error leyendo detalles originales para reversión: {}", e))?;
+
+        let mut max_dias_for_vinc: Option<i16> = None;
+        let mut obra_assigned_for_vinc: Option<Uuid> = None;
+
+        for od in orig_detalles {
+            let id_rep_det = Uuid::now_v7();
+            let clave: Option<String> = od.get(0);
+            let fecha: Option<NaiveDate> = od.get(1);
+            let dias_det: Option<i16> = od.get(2);
+            let sdi: Option<f64> = od.get(3);
+            let lic: Option<f64> = od.get(4);
+            let inc: Option<f64> = od.get(5);
+            let aus: Option<f64> = od.get(6);
+
+            let cf: Option<f64> = od.get(7);
+            let exc_pat: Option<f64> = od.get(8);
+            let exc_obr: Option<f64> = od.get(9);
+            let pd_pat: Option<f64> = od.get(10);
+            let pd_obr: Option<f64> = od.get(11);
+            let gmp_pat: Option<f64> = od.get(12);
+            let gmp_obr: Option<f64> = od.get(13);
+            let rt: Option<f64> = od.get(14);
+            let iv_pat: Option<f64> = od.get(15);
+            let iv_obr: Option<f64> = od.get(16);
+            let gps: Option<f64> = od.get(17);
+            let patronal: Option<f64> = od.get(18);
+            let obrera: Option<f64> = od.get(19);
+            let subtotal: Option<f64> = od.get(20);
+
+            let is_baja = clave.as_deref().unwrap_or("").trim().to_lowercase().contains("baja");
+
+            let (det_obra_id, det_dias_obr, factor) = if is_baja || target_obra_id.is_none() {
+                (None, if is_baja { Some(0) } else { None }, 1.0)
+            } else {
+                let target_oid = target_obra_id.unwrap();
+                let (obra_ini, obra_fin) = obras_map.get(&target_oid).copied().unwrap_or((None, None));
+                let d_ced = dias_det.unwrap_or(0);
+                let lic_v = lic.unwrap_or(0.0);
+                let inc_v = inc.unwrap_or(0.0);
+                let aus_v = aus.unwrap_or(0.0);
+
+                let (tope_max, _) = calculate_max_dias_obra_for_employee_movements(
+                    d_ced,
+                    lic_v,
+                    inc_v,
+                    aus_v,
+                    mes_clean,
+                    anio_val,
+                    "",
+                    obra_ini,
+                    obra_fin,
+                    &movements,
+                );
+
+                if tope_max <= 0 {
+                    (None, Some(0), 1.0)
+                } else {
+                    let default_dias = target_dias.unwrap_or(d_ced);
+                    let final_dias = default_dias.min(tope_max).max(0);
+
+                    let sum_inc = lic_v + inc_v + aus_v;
+                    let dias_base = if sum_inc > 0.001 {
+                        sum_inc
+                    } else {
+                        d_ced as f64
+                    };
+
+                    let f = if dias_base > 0.0001 {
+                        ((final_dias as f64) / dias_base).clamp(0.0, 10.0)
+                    } else {
+                        0.0
+                    };
+
+                    obra_assigned_for_vinc = Some(target_oid);
+                    max_dias_for_vinc = Some(max_dias_for_vinc.unwrap_or(0).max(final_dias));
+
+                    (Some(target_oid), Some(final_dias), f)
+                }
+            };
+
+            let calc = |v: Option<f64>| {
+                if (factor - 1.0).abs() < 0.0001 {
+                    v
+                } else {
+                    v.map(|x| (x * factor * 100.0).round() / 100.0)
+                }
+            };
+
+            tx.execute(
+                r#"
+                INSERT INTO public.reportes_detalles_liquidaciones (
+                    id, id_reporte_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
+                    exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
+                    gps, patronal, obrera, subtotal, id_registro_obra, dias_registro_obra
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+                )
+                "#,
+                &[
+                    &id_rep_det, &id_rep_liq, &clave, &fecha, &dias_det, &sdi, &lic, &inc, &aus,
+                    &calc(cf), &calc(exc_pat), &calc(exc_obr), &calc(pd_pat), &calc(pd_obr),
+                    &calc(gmp_pat), &calc(gmp_obr), &calc(rt), &calc(iv_pat), &calc(iv_obr),
+                    &calc(gps), &calc(patronal), &calc(obrera), &calc(subtotal),
+                    &det_obra_id, &det_dias_obr
+                ],
+            ).map_err(|e| format!("Error insertando detalle revertido: {}", e))?;
+
+            restored_count += 1;
+        }
+
+        // Si se asignó obra en alguno de los detalles, reflejarla en reportes_vinculaciones_obras_liquidaciones
+        if let (Some(o_id), Some(d_vinc)) = (obra_assigned_for_vinc, max_dias_for_vinc) {
+            let new_vinc_id = Uuid::now_v7();
+            let _ = tx.execute(
+                r#"
+                INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (
+                    id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra
+                ) VALUES ($1, $2, $3, $4)
+                "#,
+                &[&new_vinc_id, &Some(o_id), &id_rep_liq, &Some(d_vinc)],
+            );
+        }
+    }
+
+    tx.commit().map_err(|e| format!("Error en commit de reversión: {}", e))?;
+    Ok(restored_count)
 }
 
 /// Consulta todas las filas de reportes_liquidaciones para la revisión activa,
@@ -910,8 +1349,19 @@ pub fn batch_save_reporte_row_updates(
         ).map_err(|e| format!("Error actualizando reporte detalle: {}", e))?;
 
         // 2. Recalcular conceptos prorrateados para esta fila de detalle específica
-        let factor = if dias_cedula > 0 && id_registro_obra_opt.is_some() {
-            (dias_obra as f64 / dias_cedula as f64).clamp(0.0, 10.0)
+        let sum_inc: f64 = tx.query_opt(
+            "SELECT (COALESCE(lic, 0.0) + COALESCE(inc, 0.0) + COALESCE(aus, 0.0))::float8 FROM public.reportes_detalles_liquidaciones WHERE id = $1",
+            &[&id_reporte_liq],
+        ).ok().flatten().map(|r| r.get(0)).unwrap_or(0.0);
+
+        let dias_base = if sum_inc > 0.001 {
+            sum_inc
+        } else {
+            dias_cedula as f64
+        };
+
+        let factor = if dias_base > 0.0 && id_registro_obra_opt.is_some() {
+            (dias_obra as f64 / dias_base).clamp(0.0, 10.0)
         } else {
             1.0
         };
@@ -1040,7 +1490,8 @@ pub fn batch_update_reporte_rows(
         // Obtener días de cédula y estado actual sin COALESCE
         let row_opt = tx.query_opt(
             r#"
-            SELECT rdl.dias, rvol.id_registro_obra, rvol.dias_registro_obra
+            SELECT rdl.dias, rvol.id_registro_obra, rvol.dias_registro_obra,
+                   (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))::float8
             FROM public.reportes_liquidaciones rl
             LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
             LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rvol ON rvol.id_reporte_liquidacion = rl.id
@@ -1054,6 +1505,7 @@ pub fn batch_update_reporte_rows(
             let dias_ced: i16 = row_get_i16(&r, 0, 0);
             let curr_obra: Option<Uuid> = r.try_get(1).ok().flatten();
             let curr_dias_obra: i16 = row_get_i16(&r, 2, 0);
+            let sum_inc: f64 = row_get_f64(&r, 3, 0.0);
 
             let new_obra = if set_obra_id.is_some() {
                 set_obra_id
@@ -1101,8 +1553,13 @@ pub fn batch_update_reporte_rows(
             }
 
             // Recalcular prorrateo
-            let factor = if dias_ced > 0 && new_obra.is_some() {
-                (new_dias_obra as f64 / dias_ced as f64).clamp(0.0, 10.0)
+            let dias_base = if sum_inc > 0.001 {
+                sum_inc
+            } else {
+                dias_ced as f64
+            };
+            let factor = if dias_base > 0.0 && new_obra.is_some() {
+                (new_dias_obra as f64 / dias_base).clamp(0.0, 10.0)
             } else {
                 1.0
             };

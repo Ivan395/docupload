@@ -1,5 +1,5 @@
 import { ScrollView } from "std-widgets.slint";
-import { AppData, AppLogic, FileItemData, NominaRow } from "models.slint";
+import { AppData, AppLogic, FileItemData, NominaRow, MismatchDetailItem } from "models.slint";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Vista de Carga de Nóminas
@@ -1137,6 +1137,259 @@ export component NominasUploadView inherits Rectangle {
                         btn_confirm_del_all := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { AppLogic.confirmar_borrar_todas_nominas(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal de Alerta: Discrepancias en Nóminas XML
+    if AppData.show_nominas_mismatch_modal : Rectangle {
+        background: #00000088;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 720px;
+            max-height: 580px;
+            border-radius: 12px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #fecaca;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                // Cabecera del modal
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 46px;
+                        height: 46px;
+                        border-radius: 23px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "⚠️";
+                            font-size: 22px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: AppData.nominas_mismatch_title != "" ? AppData.nominas_mismatch_title : "Discrepancia en Comprobantes de Nómina";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+                        Text {
+                            text: AppData.nominas_mismatch_mensaje != "" ? AppData.nominas_mismatch_mensaje : "Los comprobantes XML seleccionados contienen información que no coincide con el RFC emisor o Registro Patronal de esta revisión.";
+                            font-size: 12.5px;
+                            font-weight: 500;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Card resumen: Datos esperados registrados en la app
+                Rectangle {
+                    border-radius: 8px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+
+                    VerticalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        spacing: 6px;
+
+                        Text {
+                            text: "DATOS REGISTRADOS DE LA REVISIÓN ACTIVA EN LA APLICACIÓN:";
+                            font-size: 10.5px;
+                            font-weight: 800;
+                            color: #1e3a8a;
+                        }
+                        HorizontalLayout {
+                            spacing: 18px;
+                            HorizontalLayout {
+                                spacing: 4px;
+                                Text { text: "Empresa:"; font-size: 11.5px; font-weight: 700; color: #64748b; }
+                                Text { text: AppData.nominas_mismatch_expected_cliente != "" ? AppData.nominas_mismatch_expected_cliente : AppData.selected_cliente_nombre; font-size: 11.5px; font-weight: 800; color: #0f172a; }
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                Text { text: "RFC Emisor:"; font-size: 11.5px; font-weight: 700; color: #64748b; }
+                                Text { text: AppData.nominas_mismatch_expected_rfc != "" ? AppData.nominas_mismatch_expected_rfc : AppData.selected_cliente_rfc; font-size: 11.5px; font-weight: 800; color: #047857; }
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                Text { text: "Reg. Patronal:"; font-size: 11.5px; font-weight: 700; color: #64748b; }
+                                Text { text: AppData.nominas_mismatch_expected_rp != "" ? AppData.nominas_mismatch_expected_rp : AppData.selected_rp_registro; font-size: 11.5px; font-weight: 800; color: #0369a1; }
+                            }
+                        }
+                    }
+                }
+
+                // Lista detallada de archivos con discrepancias
+                if AppData.nominas_mismatch_items.length > 0 : VerticalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "DETALLE DE DISCREPANCIAS POR ARCHIVO (" + AppData.nominas_mismatch_items.length + "):";
+                        font-size: 11px;
+                        font-weight: 800;
+                        color: #b91c1c;
+                    }
+
+                    Rectangle {
+                        max-height: 220px;
+                        border-radius: 6px;
+                        background: #ffffff;
+                        border-width: 1px;
+                        border-color: #f1f5f9;
+
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 8px;
+
+                                for item in AppData.nominas_mismatch_items : Rectangle {
+                                    border-radius: 6px;
+                                    background: #fef2f2;
+                                    border-width: 1px;
+                                    border-color: #fecaca;
+
+                                    VerticalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        padding-top: 8px;
+                                        padding-bottom: 8px;
+                                        spacing: 4px;
+
+                                        HorizontalLayout {
+                                            alignment: space-between;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                Text { text: "📄"; font-size: 12px; vertical-alignment: center; }
+                                                Text {
+                                                    text: item.filename;
+                                                    font-size: 12px;
+                                                    font-weight: 800;
+                                                    color: #0f172a;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            Rectangle {
+                                                height: 20px;
+                                                border-radius: 4px;
+                                                background: #fee2e2;
+                                                border-width: 1px;
+                                                border-color: #fca5a5;
+                                                HorizontalLayout {
+                                                    padding-left: 6px;
+                                                    padding-right: 6px;
+                                                    Text {
+                                                        text: item.tipo_error;
+                                                        font-size: 10px;
+                                                        font-weight: 800;
+                                                        color: #991b1b;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 16px;
+                                            Text {
+                                                text: "Esperado: " + item.valor_esperado;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                color: #065f46;
+                                            }
+                                            Text {
+                                                text: "Encontrado en XML: " + item.valor_encontrado;
+                                                font-size: 11px;
+                                                font-weight: 800;
+                                                color: #dc2626;
+                                            }
+                                        }
+
+                                        if item.descripcion != "" : Text {
+                                            text: item.descripcion;
+                                            font-size: 10.5px;
+                                            color: #475569;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Sugerencia para corregir
+                Rectangle {
+                    border-radius: 6px;
+                    background: #f0fdf4;
+                    border-width: 1px;
+                    border-color: #bbf7d0;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 8px;
+                        Text { text: "💡"; font-size: 12px; vertical-alignment: center; }
+                        Text {
+                            text: "Sugerencia: Verifique los comprobantes XML entregados. Si el RFC o Registro Patronal del cliente fue registrado incorrectamente, actualícelo desde Catálogo de Clientes (F2) o Registros Patronales (F3).";
+                            font-size: 10.5px;
+                            font-weight: 500;
+                            color: #166534;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Botón Entendido
+                HorizontalLayout {
+                    alignment: end;
+                    Rectangle {
+                        height: 36px;
+                        width: 120px;
+                        border-radius: 6px;
+                        background: btn_accept_nom_mismatch.has-hover ? #1e40af : #1e3a8a;
+                        Text {
+                            text: "Entendido";
+                            font-size: 12.5px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_accept_nom_mismatch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.close_nominas_mismatch_modal(); }
                         }
                     }
                 }

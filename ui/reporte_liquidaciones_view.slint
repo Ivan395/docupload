@@ -1,5 +1,5 @@
 import { ScrollView, Button, LineEdit, ComboBox, CheckBox } from "std-widgets.slint";
-import { AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem, ReporteBatchWorkerItem } from "models.slint";
+import { AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem, ReporteBatchWorkerItem, ReporteSelectedItem } from "models.slint";
 component ReporteNumericCell inherits Rectangle {
     in property <string> curr_str: "$0.00";
     in property <string> orig_str: "$0.00";
@@ -40,6 +40,365 @@ component ReporteNumericCell inherits Rectangle {
     }
 
     cell_touch := TouchArea {}
+}
+
+component ReporteSelectedCombobox inherits Rectangle {
+    height: 34px;
+    border-radius: 5px;
+    background: sel_touch.has-hover || sel_pop.is-open ? #dbeafe : (AppData.reporte_selected_count > 0 ? #eff6ff : #ffffff);
+    border-width: 1px;
+    border-color: sel_touch.has-hover || sel_pop.is-open ? #2563eb : (AppData.reporte_selected_count > 0 ? #93c5fd : #cbd5e1);
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: center;
+        cross-axis-alignment: center;
+
+        Text {
+            text: "☑️";
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: AppData.reporte_selected_count > 0
+                ? "Seleccionados (" + AppData.reporte_selected_count + ")"
+                : "Seleccionados (0)";
+            font-size: 12px;
+            font-weight: 700;
+            color: AppData.reporte_selected_count > 0 ? #1d4ed8 : #64748b;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: sel_pop.is-open ? "▴" : "▾";
+            font-size: 13px;
+            font-weight: 800;
+            color: AppData.reporte_selected_count > 0 ? #2563eb : #94a3b8;
+            vertical-alignment: center;
+        }
+    }
+
+    sel_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if sel_pop.is-open {
+                sel_pop.close();
+            } else {
+                sel_pop.show();
+            }
+        }
+    }
+
+    sel_pop := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        width: 440px;
+        height: AppData.reporte_selected_count == 0 ? 120px : 320px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #93c5fd;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000028;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                // Cabecera del Combobox
+                HorizontalLayout {
+                    alignment: space-between;
+                    cross-axis-alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        cross-axis-alignment: center;
+
+                        Text { text: "📋"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Registros Seleccionados";
+                            font-size: 12.5px;
+                            font-weight: 800;
+                            color: #1e3a8a;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            height: 20px;
+                            border-radius: 10px;
+                            background: #dbeafe;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                alignment: center;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: "" + AppData.reporte_selected_count;
+                                    font-size: 11px;
+                                    font-weight: 800;
+                                    color: #1d4ed8;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        cross-axis-alignment: center;
+
+                        if AppData.reporte_selected_count > 0 : Rectangle {
+                            height: 24px;
+                            border-radius: 4px;
+                            background: btn_pop_clear.has-hover ? #fee2e2 : #fef2f2;
+                            border-width: 1px;
+                            border-color: #fca5a5;
+
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                spacing: 3px;
+                                alignment: center;
+                                cross-axis-alignment: center;
+                                Text { text: "🗑️"; font-size: 10px; vertical-alignment: center; }
+                                Text {
+                                    text: "Remover todos";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #dc2626;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            btn_pop_clear := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    AppLogic.reporte_limpiar_seleccion();
+                                    sel_pop.close();
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: btn_pop_close.has-hover ? #f1f5f9 : transparent;
+
+                            Text {
+                                text: "✕";
+                                font-size: 11px;
+                                font-weight: 800;
+                                color: #64748b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            btn_pop_close := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    sel_pop.close();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Línea separadora
+                Rectangle { height: 1px; background: #e2e8f0; }
+
+                // Estado vacío si no hay selección
+                if AppData.reporte_selected_count == 0 : VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    padding: 10px;
+
+                    Text {
+                        text: "ℹ️ No hay liquidaciones seleccionadas.";
+                        font-size: 12px;
+                        color: #64748b;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "Marca casillas en la tabla para verlas y gestionarlas aquí.";
+                        font-size: 11px;
+                        color: #94a3b8;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Lista de seleccionados con Scroll
+                if AppData.reporte_selected_count > 0 : ScrollView {
+                    VerticalLayout {
+                        spacing: 4px;
+                        padding-right: 4px;
+
+                        for item in AppData.reporte_selected_items : Rectangle {
+                            height: 44px;
+                            border-radius: 5px;
+                            background: item_row_touch.has-hover ? #f1f5f9 : #ffffff;
+                            border-width: 1px;
+                            border-color: item_row_touch.has-hover ? #cbd5e1 : #e2e8f0;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
+                                cross-axis-alignment: center;
+
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    background: #2563eb;
+                                    border-width: 1px;
+                                    border-color: #1d4ed8;
+
+                                    Text {
+                                        text: "✓";
+                                        font-size: 12px;
+                                        font-weight: 800;
+                                        color: #ffffff;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 2px;
+                                    horizontal-stretch: 1;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        cross-axis-alignment: center;
+
+                                        Text {
+                                            text: item.nombre_trabajador;
+                                            font-size: 11.5px;
+                                            font-weight: 700;
+                                            color: #1e293b;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+
+                                        Rectangle {
+                                            height: 16px;
+                                            border-radius: 3px;
+                                            background: #dbeafe;
+                                            HorizontalLayout {
+                                                padding-left: 4px;
+                                                padding-right: 4px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: item.periodo;
+                                                    font-size: 10px;
+                                                    font-weight: 700;
+                                                    color: #1e40af;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        cross-axis-alignment: center;
+
+                                        Text {
+                                            text: "NSS: " + item.nss;
+                                            font-size: 10px;
+                                            color: #64748b;
+                                        }
+
+                                        Text {
+                                            text: "• " + item.obra_label;
+                                            font-size: 10px;
+                                            color: #3b82f6;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 20px;
+                                    height: 20px;
+                                    border-radius: 10px;
+                                    background: item_row_touch.has-hover ? #fee2e2 : transparent;
+
+                                    Text {
+                                        text: "✕";
+                                        font-size: 11px;
+                                        font-weight: 800;
+                                        color: item_row_touch.has-hover ? #dc2626 : #94a3b8;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            item_row_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    AppLogic.reporte_toggle_select_row(item.id);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Pie informativo
+                if AppData.reporte_selected_count > 0 : HorizontalLayout {
+                    alignment: space-between;
+                    cross-axis-alignment: center;
+                    padding-top: 2px;
+
+                    Text {
+                        text: "Haz clic en una casilla para deseleccionar.";
+                        font-size: 10px;
+                        color: #94a3b8;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: btn_pop_done.has-hover ? #e2e8f0 : #f1f5f9;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            alignment: center;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "Listo";
+                                font-size: 10.5px;
+                                font-weight: 700;
+                                color: #475569;
+                            }
+                        }
+
+                        btn_pop_done := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                sel_pop.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 export component ReporteLiquidacionesView inherits Rectangle {
@@ -91,32 +450,6 @@ export component ReporteLiquidacionesView inherits Rectangle {
             HorizontalLayout {
                 spacing: 8px;
                 alignment: end;
-
-                // Guardar
-                Rectangle {
-                    height: 38px;
-                    width: 105px;
-                    border-radius: 6px;
-                    background: btn_save.has-hover ? #1e40af : #1e3a8a;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 6px;
-                        Text { text: "💾"; font-size: 13px; vertical-alignment: center; }
-                        Text {
-                            text: "Guardar";
-                            font-size: 13px;
-                            font-weight: 700;
-                            color: #ffffff;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    btn_save := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { AppLogic.guardar_reporte_liquidaciones(); }
-                    }
-                }
 
                 // Exportar a Excel
                 Rectangle {
@@ -481,7 +814,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                 // Título del lote y conteo
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: 8px;
                     alignment: center;
                     cross-axis-alignment: center;
                     Text { text: "⚡"; font-size: 14px; vertical-alignment: center; }
@@ -492,23 +825,39 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         color: #1e40af;
                         vertical-alignment: center;
                     }
-                    Rectangle {
-                        height: 24px;
-                        border-radius: 12px;
-                        background: #dbeafe;
+
+                    // Combobox desplegable con los elementos seleccionados
+                    ReporteSelectedCombobox {}
+
+                    // Botón directo para remover todos los seleccionados
+                    if AppData.reporte_selected_count > 0 : Rectangle {
+                        height: 34px;
+                        border-radius: 5px;
+                        background: btn_clear_all_sel.has-hover ? #fee2e2 : #ffffff;
+                        border-width: 1px;
+                        border-color: #fca5a5;
 
                         HorizontalLayout {
                             padding-left: 8px;
-                            padding-right: 8px;
+                            padding-right: 10px;
+                            spacing: 5px;
                             alignment: center;
                             cross-axis-alignment: center;
+
+                            Text { text: "✕"; font-size: 12px; font-weight: 800; color: #dc2626; vertical-alignment: center; }
                             Text {
-                                text: AppData.reporte_selected_count + " seleccionados";
+                                text: "Remover Selección";
                                 font-size: 12px;
                                 font-weight: 700;
-                                color: #1d4ed8;
+                                color: #dc2626;
                                 vertical-alignment: center;
-                                horizontal-alignment: center;
+                            }
+                        }
+
+                        btn_clear_all_sel := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_limpiar_seleccion();
                             }
                         }
                     }
@@ -684,51 +1033,6 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         clicked => {
                             AppLogic.reporte_open_select_obras_modal();
                         }
-                    }
-                }
-
-                // Separador visual
-                Rectangle { width: 1px; height: 26px; background: #bfdbfe; }
-
-                // Checkbox seleccionar todas del filtro
-                HorizontalLayout {
-                    spacing: 6px;
-                    alignment: center;
-                    cross-axis-alignment: center;
-
-                    Rectangle {
-                        width: 18px;
-                        height: 18px;
-                        border-radius: 4px;
-                        background: AppData.reporte_all_filter_selected ? #2563eb : #ffffff;
-                        border-width: 1px;
-                        border-color: AppData.reporte_all_filter_selected ? #2563eb : #94a3b8;
-
-                        Text {
-                            text: "✓";
-                            font-size: 12px;
-                            font-weight: 800;
-                            color: #ffffff;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            visible: AppData.reporte_all_filter_selected;
-                        }
-
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                AppData.reporte_all_filter_selected = !AppData.reporte_all_filter_selected;
-                                AppLogic.reporte_toggle_select_all(AppData.reporte_all_filter_selected);
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "Filtro (" + AppData.reporte_total_filtered + ")";
-                        font-size: 12px;
-                        font-weight: 600;
-                        color: #334155;
-                        vertical-alignment: center;
                     }
                 }
 
@@ -1583,7 +1887,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         padding-right: 8px;
                         alignment: center;
                         Text {
-                            text: "F2 Editar | Tab Sig. Celda | Enter Confirmar | Ctrl+S Guardar";
+                            text: "F2 Editar | Tab Sig. Celda | Enter Confirmar";
                             font-size: 11px;
                             font-weight: 600;
                             color: #64748b;
@@ -4322,16 +4626,71 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
-                // Botones rápidos: Marcar Todas / Desmarcar Todas
+                // Botones rápidos de selección
                 HorizontalLayout {
-                    spacing: 8px;
+                    spacing: 6px;
                     alignment: start;
                     cross-axis-alignment: center;
 
+                    // Todas
                     Rectangle {
                         height: 26px;
                         border-radius: 4px;
-                        background: btn_sel_all_sua.has-hover ? #fef3c7 : #fffbeb;
+                        background: btn_sel_all_sua.has-hover ? #dbeafe : #eff6ff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "Todas";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_sel_all_sua := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_sua_select_preset("all"); }
+                        }
+                    }
+
+                    // Solo con Obra
+                    Rectangle {
+                        height: 26px;
+                        border-radius: 4px;
+                        background: btn_sel_obras_sua.has-hover ? #dcfce7 : #f0fdf4;
+                        border-width: 1px;
+                        border-color: #86efac;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            cross-axis-alignment: center;
+                            Text {
+                                text: "Solo con Obra";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: #166534;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_sel_obras_sua := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_sua_select_preset("obras"); }
+                        }
+                    }
+
+                    // Solo sin Asignar
+                    Rectangle {
+                        height: 26px;
+                        border-radius: 4px;
+                        background: btn_sel_sin_obra_sua.has-hover ? #fef3c7 : #fffbeb;
                         border-width: 1px;
                         border-color: #fcd34d;
 
@@ -4340,7 +4699,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             padding-right: 8px;
                             cross-axis-alignment: center;
                             Text {
-                                text: "Marcar Todas";
+                                text: "Solo sin Asignar";
                                 font-size: 10px;
                                 font-weight: 700;
                                 color: #b45309;
@@ -4348,12 +4707,13 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             }
                         }
 
-                        btn_sel_all_sua := TouchArea {
+                        btn_sel_sin_obra_sua := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { AppLogic.reporte_sua_select_all_obras(true); }
+                            clicked => { AppLogic.reporte_sua_select_preset("sin_obra"); }
                         }
                     }
 
+                    // Desmarcar
                     Rectangle {
                         height: 26px;
                         border-radius: 4px;
@@ -4366,7 +4726,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             padding-right: 8px;
                             cross-axis-alignment: center;
                             Text {
-                                text: "Desmarcar Todas";
+                                text: "Desmarcar";
                                 font-size: 10px;
                                 font-weight: 700;
                                 color: #475569;
@@ -4376,12 +4736,12 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                         btn_desel_all_sua := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { AppLogic.reporte_sua_select_all_obras(false); }
+                            clicked => { AppLogic.reporte_sua_select_preset("none"); }
                         }
                     }
 
                     Text {
-                        text: "(" + AppData.reporte_sua_selected_count + " obras • " + AppData.reporte_sua_total_empleados_filtrados + " empleados)";
+                        text: "(" + AppData.reporte_sua_selected_count + " selecc. • " + AppData.reporte_sua_total_empleados_filtrados + " empleados)";
                         font-size: 11px;
                         font-weight: 600;
                         color: #1e3a8a;
@@ -4406,9 +4766,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             for item in AppData.reporte_sua_obras : Rectangle {
                                 height: 42px;
                                 border-radius: 5px;
-                                background: item.selected ? #eff6ff : (touch_item_sua.has-hover ? #f1f5f9 : #ffffff);
+                                background: item.selected ? (item.id == "__SIN_OBRA__" ? #fffbeb : #eff6ff) : (touch_item_sua.has-hover ? #f1f5f9 : #ffffff);
                                 border-width: 1px;
-                                border-color: item.selected ? #3b82f6 : #e2e8f0;
+                                border-color: item.selected ? (item.id == "__SIN_OBRA__" ? #f59e0b : #3b82f6) : #e2e8f0;
 
                                 touch_item_sua := TouchArea {
                                     mouse-cursor: pointer;
@@ -4429,9 +4789,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             width: 16px;
                                             height: 16px;
                                             border-radius: 3px;
-                                            background: item.selected ? #2563eb : #ffffff;
+                                            background: item.selected ? (item.id == "__SIN_OBRA__" ? #d97706 : #2563eb) : #ffffff;
                                             border-width: 1px;
-                                            border-color: item.selected ? #2563eb : #cbd5e1;
+                                            border-color: item.selected ? (item.id == "__SIN_OBRA__" ? #d97706 : #2563eb) : #cbd5e1;
 
                                             Text {
                                                 text: "✓";
@@ -4455,7 +4815,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                                     text: item.numero;
                                                     font-size: 12px;
                                                     font-weight: 800;
-                                                    color: item.selected ? #1d4ed8 : #1e293b;
+                                                    color: item.selected ? (item.id == "__SIN_OBRA__" ? #b45309 : #1d4ed8) : #1e293b;
                                                 }
                                                 if item.tipo_obra != "" : Text {
                                                     text: "- " + item.tipo_obra;
@@ -4463,7 +4823,19 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                                     font-weight: 500;
                                                     color: #64748b;
                                                 }
-                                                if item.creado_usuario : Rectangle {
+                                                if item.id == "__SIN_OBRA__" : Rectangle {
+                                                    height: 16px;
+                                                    border-radius: 3px;
+                                                    background: #fef3c7;
+                                                    border-width: 1px;
+                                                    border-color: #fcd34d;
+                                                    HorizontalLayout {
+                                                        padding-left: 4px;
+                                                        padding-right: 4px;
+                                                        Text { text: "Sin Asignar"; font-size: 9px; font-weight: 700; color: #b45309; vertical-alignment: center; }
+                                                    }
+                                                }
+                                                if item.creado_usuario && item.id != "__SIN_OBRA__" : Rectangle {
                                                     height: 16px;
                                                     border-radius: 3px;
                                                     background: #dcfce7;

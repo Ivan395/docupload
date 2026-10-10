@@ -9,6 +9,7 @@ use crate::{
     MainWindow, AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem,
     ReporteFilterOptionItem, ReporteMesTotalItem, ReporteGuarderiaObraItem,
     ReporteObraUsuarioItem, ReporteSuaObraItem, ReporteBatchWorkerItem,
+    ReporteSelectedItem,
 };
 use crate::cedulas::business::month_to_num;
 use crate::db::DbPool;
@@ -16,7 +17,8 @@ use crate::db::reporte_liquidaciones::{
     ReporteLiquidacionRowDb, ObraOptionDb,
     fetch_reporte_liquidaciones, fetch_obras_for_revision,
     update_single_reporte_row, batch_save_reporte_row_updates,
-    sync_reportes_liquidaciones_for_revision, export_reporte_liquidaciones_to_excel,
+    sync_reportes_liquidaciones_for_revision, revertir_reporte_liquidaciones_a_originales,
+    export_reporte_liquidaciones_to_excel,
     compute_guarderias_kpis,
     extract_all_employee_movements, build_all_employee_movements_map,
     calculate_max_dias_obra_for_employee_movements, validate_obra_assignment_for_employee_movements,
@@ -73,6 +75,7 @@ pub struct ReporteSessionState {
 
     // Exportación SUA
     pub sua_selected_obra_ids: HashSet<Uuid>,
+    pub sua_include_unassigned: bool,
 }
 
 impl Default for ReporteSessionState {
@@ -121,6 +124,7 @@ impl Default for ReporteSessionState {
             quick_select_obras: Vec::new(),
 
             sua_selected_obra_ids: HashSet::new(),
+            sua_include_unassigned: false,
         }
     }
 }
@@ -210,7 +214,14 @@ pub fn get_obra_colors(index: usize) -> (slint::Color, slint::Color, slint::Colo
 }
 
 pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
-    if row.dias_cedula <= 0 {
+    let sum_incidencias = row.lic + row.inc + row.aus;
+    let dias_base = if sum_incidencias > 0.001 {
+        sum_incidencias
+    } else {
+        row.dias_cedula as f64
+    };
+
+    if dias_base <= 0.0001 {
         row.cf = 0.0;
         row.exc_pat = 0.0;
         row.exc_obr = 0.0;
@@ -228,8 +239,8 @@ pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
         return;
     }
 
-    let factor = if row.id_registro_obra.is_some() && row.dias_cedula > 0 {
-        (row.dias_obra as f64) / (row.dias_cedula as f64)
+    let factor = if row.id_registro_obra.is_some() && dias_base > 0.0 {
+        (row.dias_obra as f64) / dias_base
     } else {
         1.0
     };
@@ -682,8 +693,28 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
 
     let all_page_selected = non_baja_in_page > 0 && selected_non_baja_in_page == non_baja_in_page;
 
+    // Elementos seleccionados para el combobox desplegable
+    let mut selected_items = Vec::new();
+    for (i, r) in state.all_rows.iter().enumerate() {
+        if state.selected_ids.contains(&r.id_reporte_liq) {
+            selected_items.push(ReporteSelectedItem {
+                id: r.id_reporte_liq.to_string().into(),
+                idx: (i + 1) as i32,
+                nombre_trabajador: r.nombre_trabajador.clone().into(),
+                nss: r.nss.clone().into(),
+                periodo: r.periodo_str.clone().into(),
+                obra_label: if r.obra_label.trim().is_empty() {
+                    "Sin asignar".into()
+                } else {
+                    r.obra_label.clone().into()
+                },
+            });
+        }
+    }
+
     app_data.set_reporte_liquidaciones_list(ModelRc::new(VecModel::from(page_rows)));
     app_data.set_reporte_selected_count(state.selected_ids.len() as i32);
+    app_data.set_reporte_selected_items(ModelRc::new(VecModel::from(selected_items)));
     app_data.set_reporte_all_filter_selected(all_page_selected);
     app_data.set_reporte_filter_obra_idx(state.filter_obra_idx as i32);
     app_data.set_reporte_filter_periodo_idx(state.filter_periodo_idx as i32);
@@ -1006,9 +1037,32 @@ pub fn sync_and_load_reporte_data(
 }
 
 pub fn refresh_sua_modal_ui(app_data: &AppData, state: &ReporteSessionState) {
-    let mut sua_obras_vec = Vec::with_capacity(state.obras_options.len());
+    let mut sua_obras_vec = Vec::with_capacity(state.obras_options.len() + 1);
     let mut selected_count = 0;
 
+    // 1. Opción para trabajadores sin obra asignada
+    let mut unassigned_emp_ids = HashSet::new();
+    for r in &state.all_rows {
+        if r.id_registro_obra.is_none() {
+            unassigned_emp_ids.insert(r.id_empleado);
+        }
+    }
+    if !unassigned_emp_ids.is_empty() {
+        if state.sua_include_unassigned {
+            selected_count += 1;
+        }
+        sua_obras_vec.push(ReporteSuaObraItem {
+            id: "__SIN_OBRA__".into(),
+            numero: "Sin Asignar (Sin Obra)".into(),
+            tipo_obra: "Liquidaciones sin obra".into(),
+            vigencia: "Trabajadores permanentes / sin obra".into(),
+            selected: state.sua_include_unassigned,
+            creado_usuario: false,
+            empleados_count: unassigned_emp_ids.len() as i32,
+        });
+    }
+
+    // 2. Obras registradas
     for o in &state.obras_options {
         let is_selected = state.sua_selected_obra_ids.contains(&o.id);
         if is_selected {
@@ -1042,6 +1096,8 @@ pub fn refresh_sua_modal_ui(app_data: &AppData, state: &ReporteSessionState) {
             if state.sua_selected_obra_ids.contains(&oid) {
                 filtered_workers.insert(r.id_empleado);
             }
+        } else if state.sua_include_unassigned {
+            filtered_workers.insert(r.id_empleado);
         }
     }
 
@@ -1205,6 +1261,19 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 } else {
                     state.selected_ids.clear();
                 }
+                render_reporte_ui(&ui, &state);
+            }
+        });
+    }
+
+    // 9.1. Limpiar todos los seleccionados
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_limpiar_seleccion(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                state.selected_ids.clear();
                 render_reporte_ui(&ui, &state);
             }
         });
@@ -2968,27 +3037,35 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let rev_id = ui.global::<AppData>().get_selected_revision_id().to_string();
                 if !rev_id.is_empty() {
-                    sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &rev_id);
-                    crate::show_toast_message(&ui, "Cambios revertidos al estado de la base de datos.");
+                    if let Ok(rev_uuid) = Uuid::parse_str(&rev_id) {
+                        if let Some(pool) = &pool_clone {
+                            match pool.get() {
+                                Ok(mut client) => {
+                                    match revertir_reporte_liquidaciones_a_originales(&mut client, rev_uuid) {
+                                        Ok(count) => {
+                                            log::info!("Revertidos {} registros de reporte liquidaciones a sus valores originales.", count);
+                                            sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &rev_id);
+                                            crate::show_toast_message(&ui, "Cambios revertidos exitosamente a los valores originales de las cédulas.");
+                                        }
+                                        Err(e) => {
+                                            log::error!("Error revirtiendo reporte: {}", e);
+                                            crate::show_toast_message(&ui, &format!("Error al revertir cambios: {}", e));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Error de conexión al pool para reversión: {}", e);
+                                    crate::show_toast_message(&ui, "Error de conexión a la base de datos.");
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
     }
 
-    // 21. Guardar cambios
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_guardar_reporte_liquidaciones(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                crate::show_toast_message(
-                    &ui,
-                    "Todos los cambios de días y obras se encuentran sincronizados y guardados en PostgreSQL.",
-                );
-            }
-        });
-    }
-
-    // 22. Abrir modal de ordenamiento multi-criterio
+    // 21. Abrir modal de ordenamiento multi-criterio
     {
         let ui_weak = main_window.as_weak();
         app_logic.on_reporte_open_sort_modal(move || {
@@ -3696,16 +3773,18 @@ pub fn wire_reporte_liquidaciones_callbacks(
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_toggle_sua_obra(move |obra_id_str| {
             if let Some(ui) = ui_weak.upgrade() {
-                if let Ok(oid) = Uuid::parse_str(obra_id_str.as_str()) {
-                    let mut state = session_clone.lock().unwrap();
+                let mut state = session_clone.lock().unwrap();
+                if obra_id_str == "__SIN_OBRA__" {
+                    state.sua_include_unassigned = !state.sua_include_unassigned;
+                } else if let Ok(oid) = Uuid::parse_str(obra_id_str.as_str()) {
                     if state.sua_selected_obra_ids.contains(&oid) {
                         state.sua_selected_obra_ids.remove(&oid);
                     } else {
                         state.sua_selected_obra_ids.insert(oid);
                     }
-                    let app_data = ui.global::<AppData>();
-                    refresh_sua_modal_ui(&app_data, &state);
                 }
+                let app_data = ui.global::<AppData>();
+                refresh_sua_modal_ui(&app_data, &state);
             }
         });
     }
@@ -3723,6 +3802,46 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     for id in all_ids {
                         state.sua_selected_obra_ids.insert(id);
                     }
+                    state.sua_include_unassigned = true;
+                } else {
+                    state.sua_include_unassigned = false;
+                }
+                let app_data = ui.global::<AppData>();
+                refresh_sua_modal_ui(&app_data, &state);
+            }
+        });
+    }
+
+    // 32.1. Seleccionar preset para SUA: "all", "obras", "sin_obra", "none"
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_sua_select_preset(move |preset| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                state.sua_selected_obra_ids.clear();
+                match preset.as_str() {
+                    "all" => {
+                        let all_ids: Vec<Uuid> = state.obras_options.iter().map(|o| o.id).collect();
+                        for id in all_ids {
+                            state.sua_selected_obra_ids.insert(id);
+                        }
+                        state.sua_include_unassigned = true;
+                    }
+                    "obras" => {
+                        let all_ids: Vec<Uuid> = state.obras_options.iter().map(|o| o.id).collect();
+                        for id in all_ids {
+                            state.sua_selected_obra_ids.insert(id);
+                        }
+                        state.sua_include_unassigned = false;
+                    }
+                    "sin_obra" => {
+                        state.sua_include_unassigned = true;
+                    }
+                    _ => {
+                        // "none" u otros
+                        state.sua_include_unassigned = false;
+                    }
                 }
                 let app_data = ui.global::<AppData>();
                 refresh_sua_modal_ui(&app_data, &state);
@@ -3736,34 +3855,35 @@ pub fn wire_reporte_liquidaciones_callbacks(
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_generar_sua(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let (selected_obra_ids, all_rows, folio_rev) = {
+                let (selected_obra_ids, include_unassigned, all_rows, folio_rev) = {
                     let state = session_clone.lock().unwrap();
                     (
                         state.sua_selected_obra_ids.clone(),
+                        state.sua_include_unassigned,
                         state.all_rows.clone(),
                         state.revision_folio.clone(),
                     )
                 };
 
-                if selected_obra_ids.is_empty() {
-                    crate::show_toast_message(&ui, "Debe seleccionar al menos un registro de obra para exportar.");
+                if selected_obra_ids.is_empty() && !include_unassigned {
+                    crate::show_toast_message(&ui, "Debe seleccionar al menos una opción (obra o sin asignar) para exportar.");
                     return;
                 }
 
-                // Filtrar los empleados en base a los registros de obra seleccionados
+                // Filtrar los empleados en base a los registros de obra y/o sin asignar seleccionados
                 let filtered_rows: Vec<ReporteLiquidacionRowDb> = all_rows
                     .into_iter()
                     .filter(|r| {
                         if let Some(oid) = r.id_registro_obra {
                             selected_obra_ids.contains(&oid)
                         } else {
-                            false
+                            include_unassigned
                         }
                     })
                     .collect();
 
                 if filtered_rows.is_empty() {
-                    crate::show_toast_message(&ui, "No se encontraron empleados vinculados a las obras seleccionadas.");
+                    crate::show_toast_message(&ui, "No se encontraron empleados para las opciones seleccionadas.");
                     return;
                 }
 

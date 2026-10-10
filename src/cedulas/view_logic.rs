@@ -30,6 +30,29 @@ pub struct CedulaFileCardInfo {
     pub warning_msg: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CedulaMismatchItem {
+    pub filename: String,
+    pub error_type: String,
+    pub expected_val: String,
+    pub found_val: String,
+    pub details: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CedulaMismatchReport {
+    pub expected_rfc: String,
+    pub expected_rp: String,
+    pub expected_cliente: String,
+    pub items: Vec<CedulaMismatchItem>,
+}
+
+impl CedulaMismatchReport {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DetalleRowModel {
     pub idx: i32,
@@ -124,6 +147,7 @@ pub struct CedulasAuditResult {
     pub gran_total_str: String,
 
     pub excel_path: Option<PathBuf>,
+    pub mismatch_report: CedulaMismatchReport,
 }
 
 pub fn compute_sha256_short(path: &Path) -> String {
@@ -278,6 +302,68 @@ pub fn inspect_cedula_file(path: &Path) -> CedulaFileCardInfo {
     }
 }
 
+/// Inspecciona un archivo PDF de Cédula y verifica si el RFC o Registro Patronal
+/// corresponden a los seleccionados en la revisión activa, reportando advertencias tempranas.
+pub fn inspect_cedula_file_with_context(
+    path: &Path,
+    expected_rfc: Option<&str>,
+    expected_rp: Option<&str>,
+) -> CedulaFileCardInfo {
+    let mut card = inspect_cedula_file(path);
+    if card.status_is_valid {
+        if let Ok(raw_text) = extract_with_layout(path) {
+            if let Ok(p) = crate::cedulas::regex_expressions::initialize_patterns() {
+                let cleaned = clean_text(&raw_text.to_lowercase(), &p);
+                // Validar Registro Patronal
+                if let Some(target_rp) = expected_rp {
+                    let clean_t = canonical_reg(target_rp);
+                    if !clean_t.is_empty() && clean_t != "GENERAL" {
+                        if let Ok(Some(mat)) = p.business_registro_patronal.find(&cleaned) {
+                            let chunk = &cleaned[mat.start()..cleaned.len().min(mat.start() + 200)];
+                            if let Ok(Some(caps)) = p.business_registro_patronal.captures(chunk) {
+                                if let Some(m) = caps.name("registro_patronal") {
+                                    let clean_found = canonical_reg(m.as_str());
+                                    if !clean_found.is_empty() && clean_found != clean_t {
+                                        card.has_warning = true;
+                                        card.warning_msg = format!(
+                                            "Registro Patronal '{}' no coincide con el de la revisión ('{}')",
+                                            m.as_str().trim(), target_rp
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Validar RFC
+                if let Some(target_rfc) = expected_rfc {
+                    let clean_t: String = target_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
+                    if !clean_t.is_empty() {
+                        let mut biz = Business::new();
+                        biz.extract_from_page(&cleaned, &p);
+                        if let Some(ref b_rfc) = biz.rfc {
+                            let clean_b: String = b_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
+                            if !clean_b.is_empty() && clean_b != clean_t {
+                                card.has_warning = true;
+                                let rfc_msg = format!(
+                                    "RFC '{}' no coincide con el RFC registrado ('{}')",
+                                    b_rfc.trim(), target_rfc
+                                );
+                                if card.warning_msg.is_empty() {
+                                    card.warning_msg = rfc_msg;
+                                } else {
+                                    card.warning_msg = format!("{} | {}", card.warning_msg, rfc_msg);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    card
+}
+
 /// Extrae el nombre estandarizado de Cédula tal como se genera en PostgreSQL public.liquidaciones.nombre_archivo:
 /// "Cédula SUA <registro_patronal> - <mes>.pdf".
 pub fn extract_cedula_pdf_postgres_filename(path: &Path, default_rp: &str) -> String {
@@ -370,14 +456,16 @@ pub fn process_and_audit_cedulas(
     input_paths: &[PathBuf],
     target_client_rfc: Option<&str>,
     target_client_name: Option<&str>,
+    target_registro_patronal: Option<&str>,
     revision_obras_registered: &HashSet<String>,
     output_excel_path: &Path,
     temp_dir: &Path,
     progress_callback: impl Fn(usize, usize, &str) + Send + Sync,
-) -> Result<(CedulasAuditResult, Vec<Business>), String> {
+) -> Result<(CedulasAuditResult, Vec<Business>, CedulaMismatchReport), (String, CedulaMismatchReport)> {
     progress_callback(0, 0, "Extrayendo y analizando archivos de cédulas...");
 
-    let pdf_files = collect_or_extract_files(input_paths, "pdf", temp_dir, Some(&progress_callback))?;
+    let pdf_files = collect_or_extract_files(input_paths, "pdf", temp_dir, Some(&progress_callback))
+        .map_err(|e| (e, CedulaMismatchReport::default()))?;
     let total_archivos_analizados = pdf_files.len();
 
     let mut validos_sua = 0;
@@ -386,11 +474,19 @@ pub fn process_and_audit_cedulas(
 
     let clean_target_rfc = target_client_rfc.map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
     let clean_target_name = target_client_name.map(canonical_razon).filter(|s| !s.is_empty() && s != "TODOS LOS CLIENTES");
+    let clean_target_rp = target_registro_patronal.map(canonical_reg).filter(|s| !s.is_empty() && s != "GENERAL");
+
+    let mut mismatch_report = CedulaMismatchReport {
+        expected_rfc: target_client_rfc.unwrap_or("").to_string(),
+        expected_rp: target_registro_patronal.unwrap_or("").to_string(),
+        expected_cliente: target_client_name.unwrap_or("").to_string(),
+        items: Vec::new(),
+    };
 
     let mut valid_businesses: Vec<Business> = Vec::new();
 
     let patterns = crate::cedulas::regex_expressions::initialize_patterns()
-        .map_err(|e| format!("Error en expresiones regulares: {}", e))?;
+        .map_err(|e| (format!("Error en expresiones regulares: {}", e), mismatch_report.clone()))?;
 
     for (idx, pdf_path) in pdf_files.iter().enumerate() {
         let file_display_name = pdf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -404,6 +500,13 @@ pub fn process_and_audit_cedulas(
             Ok(t) => t,
             Err(_) => {
                 no_procesados += 1;
+                mismatch_report.items.push(CedulaMismatchItem {
+                    filename: file_display_name,
+                    error_type: "Error Lectura PDF".to_string(),
+                    expected_val: "Documento PDF legible".to_string(),
+                    found_val: "Error al extraer capas de texto".to_string(),
+                    details: "No se pudo leer la información interna del archivo PDF.".to_string(),
+                });
                 continue;
             }
         };
@@ -417,6 +520,13 @@ pub fn process_and_audit_cedulas(
 
         if !is_sua || raw_text.trim().len() < 50 {
             no_procesados += 1;
+            mismatch_report.items.push(CedulaMismatchItem {
+                filename: file_display_name,
+                error_type: "Formato no válido".to_string(),
+                expected_val: "Cédula SUA oficial (PDF Vectorial)".to_string(),
+                found_val: "Sin formato SUA / Escaneo raster".to_string(),
+                details: "El archivo no contiene el encabezado oficial de Cédula de Cuotas SUA o carece de capa de texto OCR vectorial.".to_string(),
+            });
             continue;
         }
 
@@ -507,6 +617,13 @@ pub fn process_and_audit_cedulas(
 
         if pdf_sections.is_empty() || pdf_sections.iter().all(|(_, emps)| emps.is_empty()) {
             no_procesados += 1;
+            mismatch_report.items.push(CedulaMismatchItem {
+                filename: file_display_name,
+                error_type: "Sin trabajadores".to_string(),
+                expected_val: "Renglones de trabajadores cotizantes".to_string(),
+                found_val: "0 trabajadores detectados".to_string(),
+                details: "No se identificaron datos de empleados (NSS, días, cuotas) en las secciones analizadas del archivo.".to_string(),
+            });
             continue;
         }
 
@@ -516,17 +633,52 @@ pub fn process_and_audit_cedulas(
                 continue;
             }
 
-            // Validar si pertenece al cliente auditado
+            // Validar si pertenece al cliente auditado y al Registro Patronal de la revisión
             let mut mismatch = false;
+
+            // 1. Validar Registro Patronal si se especificó para la revisión
+            if let Some(ref target_rp) = clean_target_rp {
+                if let Some(ref b_rp) = biz.registro_patronal {
+                    let clean_b = canonical_reg(b_rp);
+                    let clean_t = canonical_reg(target_rp);
+                    if !clean_b.is_empty() && !clean_t.is_empty() && clean_b != clean_t {
+                        mismatch = true;
+                        mismatch_report.items.push(CedulaMismatchItem {
+                            filename: file_display_name.clone(),
+                            error_type: "Registro Patronal no coincide".to_string(),
+                            expected_val: format!("RP: {}", target_registro_patronal.unwrap_or("")),
+                            found_val: format!("RP: {}", b_rp),
+                            details: format!(
+                                "El Registro Patronal '{}' extraído de esta cédula no coincide con el Registro Patronal '{}' seleccionado para esta revisión.",
+                                b_rp, target_registro_patronal.unwrap_or("")
+                            ),
+                        });
+                    }
+                }
+            }
+
+            // 2. Validar RFC del Cliente si se especificó
             if let Some(ref target_rfc) = clean_target_rfc {
                 if let Some(ref b_rfc) = biz.rfc {
                     let clean_b: String = b_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
                     let clean_t: String = target_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
                     if !clean_b.is_empty() && !clean_t.is_empty() && clean_b != clean_t {
                         mismatch = true;
+                        mismatch_report.items.push(CedulaMismatchItem {
+                            filename: file_display_name.clone(),
+                            error_type: "RFC no coincide".to_string(),
+                            expected_val: format!("RFC: {}", target_client_rfc.unwrap_or("")),
+                            found_val: format!("RFC: {}", b_rfc),
+                            details: format!(
+                                "El RFC '{}' extraído de esta cédula no coincide con el RFC '{}' registrado para la empresa en el Catálogo de Clientes.",
+                                b_rfc, target_client_rfc.unwrap_or("")
+                            ),
+                        });
                     }
                 }
             }
+
+            // 3. Validar Razón Social del Cliente como red de seguridad
             if !mismatch {
                 if let Some(ref target_name) = clean_target_name {
                     if let Some(ref b_name) = biz.razon_social {
@@ -534,8 +686,18 @@ pub fn process_and_audit_cedulas(
                         let t_name_clean = canonical_razon(target_name);
                         if !b_name_clean.is_empty() && !t_name_clean.is_empty() {
                             if !b_name_clean.contains(&t_name_clean) && !t_name_clean.contains(&b_name_clean) {
-                                if clean_target_rfc.is_none() {
+                                if clean_target_rfc.is_none() && clean_target_rp.is_none() {
                                     mismatch = true;
+                                    mismatch_report.items.push(CedulaMismatchItem {
+                                        filename: file_display_name.clone(),
+                                        error_type: "Empresa no coincide".to_string(),
+                                        expected_val: format!("Empresa: {}", target_client_name.unwrap_or("")),
+                                        found_val: format!("Empresa: {}", b_name),
+                                        details: format!(
+                                            "La razón social '{}' extraída de la cédula no coincide con el nombre de la empresa '{}'.",
+                                            b_name, target_client_name.unwrap_or("")
+                                        ),
+                                    });
                                 }
                             }
                         }
@@ -561,14 +723,32 @@ pub fn process_and_audit_cedulas(
     }
 
     if valid_businesses.is_empty() {
-        if archivos_cliente_invalido_count > 0 {
-            return Err("CLIENT_MISMATCH: No se pudieron procesar los archivos ya que no pertenecen a la empresa a la que se está realizando la revisión.".to_string());
+        if archivos_cliente_invalido_count > 0 || !mismatch_report.items.is_empty() {
+            let mut summary_parts = Vec::new();
+            if mismatch_report.items.iter().any(|i| i.error_type == "Registro Patronal no coincide") {
+                summary_parts.push("Registros Patronales que no corresponden con la revisión");
+            }
+            if mismatch_report.items.iter().any(|i| i.error_type == "RFC no coincide") {
+                summary_parts.push("RFCs que no coinciden con el cliente registrado");
+            }
+            if mismatch_report.items.iter().any(|i| i.error_type == "Empresa no coincide") {
+                summary_parts.push("Nombres de empresa que no coinciden");
+            }
+            if mismatch_report.items.iter().any(|i| i.error_type == "Formato no válido") {
+                summary_parts.push("Archivos con formato no oficial SUA");
+            }
+            let desc = if !summary_parts.is_empty() {
+                format!("CLIENT_MISMATCH: Se encontraron {}", summary_parts.join(", "))
+            } else {
+                "CLIENT_MISMATCH: No se pudieron procesar los archivos ya que no pertenecen a la empresa o registro patronal de esta revisión.".to_string()
+            };
+            return Err((desc, mismatch_report));
         } else {
-            return Err("No se encontraron cédulas SUA válidas con datos de trabajadores para procesar.".to_string());
+            return Err(("No se encontraron cédulas SUA válidas con datos de trabajadores para procesar.".to_string(), mismatch_report));
         }
     }
 
-    let audit_res = build_cedulas_audit_from_businesses(
+    let mut audit_res = build_cedulas_audit_from_businesses(
         &valid_businesses,
         revision_obras_registered,
         total_archivos_analizados,
@@ -577,8 +757,9 @@ pub fn process_and_audit_cedulas(
         archivos_cliente_invalido_count,
         Some(output_excel_path),
     );
+    audit_res.mismatch_report = mismatch_report.clone();
 
-    Ok((audit_res, valid_businesses))
+    Ok((audit_res, valid_businesses, mismatch_report))
 }
 
 pub fn build_cedulas_audit_from_businesses(
@@ -958,6 +1139,7 @@ pub fn build_cedulas_audit_from_businesses(
         gran_total_str: format_currency(total_importe),
 
         excel_path: output_excel_path.map(|p| p.to_path_buf()),
+        mismatch_report: Default::default(),
     }
 }
 
