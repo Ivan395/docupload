@@ -1041,6 +1041,110 @@ WHERE NOT EXISTS (
         "#,
     )?;
 
+    // 7. Backfill oficial del SAT para empleados con RFC nulo, vacío o inválido
+    backfill_empleados_rfc_sat(client)?;
+
+    // 8. Backfill oficial de RENAPO para empleados con CURP nula, vacía o inválida
+    backfill_empleados_curp_renapo(client)?;
+
     log::info!("Esquema de base de datos verificado y listo.");
     Ok(())
+}
+
+/// Genera y actualiza el RFC oficial del SAT para todos los empleados que lo tengan vacío o incompleto.
+/// Trata de generarlo con los datos que se tienen; en caso de no poder, asigna el RFC genérico ("XAXX010101000") aceptado por el SUA.
+pub fn backfill_empleados_rfc_sat(client: &mut Client) -> Result<usize, postgres::Error> {
+    let emp_rows = client.query(
+        "SELECT id, nombre, curp, nss, rfc FROM public.empleados WHERE (rfc IS NULL OR TRIM(rfc) = '' OR TRIM(rfc) = 'XAXX010101000' OR LENGTH(TRIM(rfc)) < 13)",
+        &[],
+    )?;
+
+    let mut count = 0;
+    for r in emp_rows {
+        let id: uuid::Uuid = r.get(0);
+        let nom: Option<String> = r.get(1);
+        let curp: Option<String> = r.get(2);
+        let nss: Option<String> = r.get(3);
+        let rfc_actual: Option<String> = r.get(4);
+
+        if let Some(ref n) = nom {
+            let clean = n.trim();
+            if !clean.is_empty() && !clean.eq_ignore_ascii_case("NONE") && clean.chars().any(|c| c.is_alphabetic()) {
+                let nuevo_rfc = crate::cedulas::rfc_sat::calcular_rfc_sat(
+                    clean,
+                    curp.as_deref(),
+                    nss.as_deref(),
+                );
+                let target_rfc = if nuevo_rfc.len() == 13 && nuevo_rfc != "0000000000000" {
+                    nuevo_rfc
+                } else {
+                    "XAXX010101000".to_string()
+                };
+                if rfc_actual.as_deref() != Some(&target_rfc) {
+                    let _ = client.execute(
+                        "UPDATE public.empleados SET rfc = $1 WHERE id = $2",
+                        &[&target_rfc, &id],
+                    )?;
+                    count += 1;
+                }
+                continue;
+            }
+        }
+        // En caso de no poder, asegurar que aparezca el RFC genérico aceptado por el SUA
+        let _ = client.execute(
+            "UPDATE public.empleados SET rfc = 'XAXX010101000' WHERE id = $1 AND (rfc IS NULL OR TRIM(rfc) = '' OR LENGTH(TRIM(rfc)) < 13)",
+            &[&id],
+        )?;
+    }
+    if count > 0 {
+        log::info!("Se procesaron {} RFCs para empleados.", count);
+    }
+    Ok(count)
+}
+
+/// Genera y actualiza la CURP oficial de RENAPO para todos los empleados que la tengan vacía o incompleta,
+/// sólo si se cuenta con nombre y datos suficientes para determinarla. Si no se puede determinar, la deja en blanco (NULL).
+pub fn backfill_empleados_curp_renapo(client: &mut Client) -> Result<usize, postgres::Error> {
+    let emp_rows = client.query(
+        "SELECT id, nombre, rfc, nss FROM public.empleados WHERE (curp IS NULL OR TRIM(curp) = '' OR TRIM(curp) = 'XAXX010101000' OR LENGTH(TRIM(curp)) < 18)",
+        &[],
+    )?;
+
+    let mut count = 0;
+    for r in emp_rows {
+        let id: uuid::Uuid = r.get(0);
+        let nom: Option<String> = r.get(1);
+        let rfc: Option<String> = r.get(2);
+        let nss: Option<String> = r.get(3);
+
+        if let Some(ref n) = nom {
+            let clean = n.trim();
+            if !clean.is_empty() && !clean.eq_ignore_ascii_case("NONE") && clean.chars().any(|c| c.is_alphabetic()) {
+                let nueva_curp = crate::cedulas::curp_renapo::calcular_curp_oficial(
+                    clean,
+                    rfc.as_deref(),
+                    nss.as_deref(),
+                    None,
+                    None,
+                );
+                if !nueva_curp.is_empty() && crate::cedulas::curp_renapo::validar_curp_formato(&nueva_curp) {
+                    let _ = client.execute(
+                        "UPDATE public.empleados SET curp = $1 WHERE id = $2",
+                        &[&nueva_curp, &id],
+                    )?;
+                    count += 1;
+                    continue;
+                }
+            }
+        }
+        // Si no se puede determinar con los datos del empleado, dejar en blanco (NULL)
+        let _ = client.execute(
+            "UPDATE public.empleados SET curp = NULL WHERE id = $1 AND (TRIM(curp) = 'XAXX010101000' OR LENGTH(TRIM(curp)) < 18)",
+            &[&id],
+        )?;
+    }
+    if count > 0 {
+        log::info!("Se actualizaron {} CURPs oficiales de RENAPO para empleados.", count);
+    }
+    Ok(count)
 }

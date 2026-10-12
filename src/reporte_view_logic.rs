@@ -3900,7 +3900,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 match sua_export::export_sua_files(&folder, &folio_rev, &filtered_rows) {
                     Ok(res) => {
                         let msg = format!(
-                            "Archivos SUA exportados exitosamente en:\n{}\n• ASEG: {} trabajadores\n• AFIL: {} afiliados\n• MOVT: {} movimientos\n• CRED: {}\n• INCAP: {} incapacidades",
+                            "Archivos SUA exportados exitosamente en:\n{}\n• 1. ASEG: {} trabajadores\n• 2. AFIL: {} afiliados\n• 3. MOVT: {} movimientos\n• 4. CRED: {}\n• 5. INCAP: {} incapacidades",
                             res.folder.display(),
                             res.aseg_count,
                             res.afil_count,

@@ -5897,6 +5897,7 @@ mod tests_ui {
             gran_total_obrera_str: "$309,390.00".into(),
             gran_total_str: "$1,489,630.50".into(),
             excel_path: None,
+            mismatch_report: Default::default(),
         };
 
         for i in 1..=150 {

@@ -473,15 +473,57 @@ pub fn save_single_cedula_employee_tx(
     let mut vinculaciones_count = 0;
 
     let emp_nombre = emp.nombre.as_deref().map(|s| s.trim().to_uppercase());
-    let emp_rfc = emp.rfc.as_deref().map(|s| {
+    let mut emp_rfc = emp.rfc.as_deref().map(|s| {
         s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()
-    });
-    let emp_curp = emp.curp.as_deref().map(|s| {
+    }).filter(|s| !s.is_empty() && (s.len() == 13 || s.len() == 12));
+    let mut emp_curp = emp.curp.as_deref().map(|s| {
         s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()
-    });
+    }).filter(|s| !s.is_empty() && s.len() == 18);
     let emp_nss = emp.no_seguro_social.as_deref().map(|s| {
         s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()
     });
+
+    let puede_calcular = emp_nombre
+        .as_deref()
+        .map(|n| {
+            let clean = n.trim();
+            !clean.is_empty() && !clean.eq_ignore_ascii_case("NONE") && clean.chars().any(|c| c.is_alphabetic())
+        })
+        .unwrap_or(false);
+
+    // Si la CURP no vino en el archivo, intentar generarla sólo si se cuenta con RFC válido con fecha
+    if emp_curp.is_none() && puede_calcular {
+        let curp_generada = crate::cedulas::curp_renapo::calcular_curp_oficial(
+            emp_nombre.as_deref().unwrap(),
+            emp_rfc.as_deref(),
+            emp_nss.as_deref(),
+            None,
+            None,
+        );
+        if !curp_generada.is_empty() && crate::cedulas::curp_renapo::validar_curp_formato(&curp_generada) {
+            emp_curp = Some(curp_generada);
+        } else {
+            emp_curp = None;
+        }
+    }
+
+    // Si el RFC no vino en el archivo, intentar generarlo con los datos que se tienen; en caso de no poder, usar el genérico oficial del SUA
+    if emp_rfc.is_none() {
+        if puede_calcular && emp_curp.is_some() {
+            let rfc_generado = crate::cedulas::rfc_sat::calcular_rfc_sat(
+                emp_nombre.as_deref().unwrap(),
+                emp_curp.as_deref(),
+                emp_nss.as_deref(),
+            );
+            if rfc_generado.len() == 13 && rfc_generado != "0000000000000" && rfc_generado != "XAXX010101000" {
+                emp_rfc = Some(rfc_generado);
+            } else {
+                emp_rfc = Some("XAXX010101000".to_string());
+            }
+        } else {
+            emp_rfc = Some("XAXX010101000".to_string());
+        }
+    }
     let emp_clave_ubicacion = truncate_str(emp.clave_ubicacion.as_deref(), 50).filter(|ub| {
         let clean = ub.trim();
         !clean.is_empty()
@@ -546,10 +588,24 @@ pub fn save_single_cedula_employee_tx(
             tx.execute(
                 r#"
                 UPDATE public.empleados
-                SET nombre = COALESCE(public.empleados.nombre, $2),
-                    rfc = COALESCE(public.empleados.rfc, $3),
-                    curp = COALESCE(public.empleados.curp, $4),
-                    nss = COALESCE(public.empleados.nss, $5),
+                SET nombre = COALESCE(NULLIF(TRIM(public.empleados.nombre), ''), $2),
+                    rfc = CASE
+                        WHEN public.empleados.rfc IS NOT NULL
+                             AND TRIM(public.empleados.rfc) <> ''
+                             AND TRIM(public.empleados.rfc) <> 'XAXX010101000'
+                             AND LENGTH(TRIM(public.empleados.rfc)) = 13
+                        THEN public.empleados.rfc
+                        ELSE $3
+                    END,
+                    curp = CASE
+                        WHEN public.empleados.curp IS NOT NULL
+                             AND TRIM(public.empleados.curp) <> ''
+                             AND TRIM(public.empleados.curp) <> 'XAXX010101000'
+                             AND LENGTH(TRIM(public.empleados.curp)) = 18
+                        THEN public.empleados.curp
+                        ELSE $4
+                    END,
+                    nss = COALESCE(NULLIF(TRIM(public.empleados.nss), ''), $5),
                     clave_ubicacion = COALESCE(public.empleados.clave_ubicacion, $6)
                 WHERE id = $1
                 "#,

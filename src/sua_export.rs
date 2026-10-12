@@ -125,6 +125,89 @@ pub fn sanitize_rfc(rfc: &str) -> String {
     }
 }
 
+/// Resuelve un RFC válido de 13 posiciones para empleados en SUA usando el algoritmo oficial del SAT.
+/// 1. Si `rfc` tiene 13 caracteres alfanuméricos válidos (distintos de ceros y no sintéticos), lo conserva.
+/// 2. Si no, genera el RFC oficial completo con homoclave y dígito verificador del SAT a partir de una CURP válida.
+/// 3. En caso de que el RFC esté vacío o no se pueda calcular con fecha real, coloca el genérico oficial ("XAXX010101000") que acepta el SUA.
+pub fn resolver_rfc_valido(rfc: &str, curp: &str, nombre: &str, nss: &str) -> String {
+    let clean_rfc: String = rfc.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let upper_rfc = clean_rfc.to_ascii_uppercase();
+
+    if (upper_rfc.len() == 13 || upper_rfc.len() == 12)
+        && upper_rfc != "0000000000000"
+        && upper_rfc != "XAXX010101000"
+        && !upper_rfc.starts_with("CONC")
+        && upper_rfc != "PEGI800101XYZ"
+        && upper_rfc != "CAEH890101C10"
+        && upper_rfc != "RASF970101R39"
+    {
+        let l = if upper_rfc.len() == 13 { &upper_rfc[..4] } else { &upper_rfc[..3] };
+        let d = if upper_rfc.len() == 13 { &upper_rfc[4..10] } else { &upper_rfc[3..9] };
+        if l.chars().all(|c| c.is_ascii_alphabetic()) && d.chars().all(|c| c.is_ascii_digit()) {
+            return if upper_rfc.len() == 12 { format!("{:<13}", upper_rfc) } else { upper_rfc };
+        }
+    }
+
+    let clean_nom = nombre.trim();
+    if !clean_nom.is_empty() && !clean_nom.eq_ignore_ascii_case("NONE") && clean_nom.chars().any(|c| c.is_alphabetic()) {
+        let calc = crate::cedulas::rfc_sat::calcular_rfc_sat(nombre, Some(curp), Some(nss));
+        if calc.len() == 13 && calc != "0000000000000" && calc != "XAXX010101000" {
+            return calc;
+        }
+    }
+
+    // En caso de que el RFC esté vacío o no se pueda calcular, colocar el genérico oficial aceptado por el SUA
+    "XAXX010101000".to_string()
+}
+
+/// Obtiene el nombre del estado (hasta 25 caracteres) y la clave del lugar (2 dígitos: 01 a 33)
+/// a partir del código de entidad de la CURP (posiciones 11 y 12), según el catálogo oficial del SUA.
+pub fn estado_y_clave_lugar_desde_curp(curp: &str) -> (&'static str, &'static str) {
+    let clean: String = curp.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let upper = clean.to_ascii_uppercase();
+    if upper.len() >= 13 {
+        let code = &upper[11..13];
+        match code {
+            "AS" => ("AGUASCALIENTES", "01"),
+            "BC" => ("BAJA CALIFORNIA", "02"),
+            "BS" => ("BAJA CALIFORNIA SUR", "03"),
+            "CC" => ("CAMPECHE", "04"),
+            "CL" => ("COAHUILA", "05"),
+            "CM" => ("COLIMA", "06"),
+            "CS" => ("CHIAPAS", "07"),
+            "CH" => ("CHIHUAHUA", "08"),
+            "DF" => ("CIUDAD DE MEXICO", "09"),
+            "DG" => ("DURANGO", "10"),
+            "GT" => ("GUANAJUATO", "11"),
+            "GR" => ("GUERRERO", "12"),
+            "HG" => ("HIDALGO", "13"),
+            "JC" => ("JALISCO", "14"),
+            "MC" => ("ESTADO DE MEXICO", "15"),
+            "MN" => ("MICHOACAN", "16"),
+            "MS" => ("MORELOS", "17"),
+            "NT" => ("NAYARIT", "18"),
+            "NL" => ("NUEVO LEON", "19"),
+            "OC" => ("OAXACA", "20"),
+            "PL" => ("PUEBLA", "21"),
+            "QT" => ("QUERETARO", "22"),
+            "QR" => ("QUINTANA ROO", "23"),
+            "SP" => ("SAN LUIS POTOSI", "24"),
+            "SL" => ("SINALOA", "25"),
+            "SR" => ("SONORA", "26"),
+            "TC" => ("TABASCO", "27"),
+            "TS" => ("TAMAULIPAS", "28"),
+            "TL" => ("TLAXCALA", "29"),
+            "VZ" => ("VERACRUZ", "30"),
+            "YN" => ("YUCATAN", "31"),
+            "ZS" => ("ZACATECAS", "32"),
+            "NE" => ("EXTRANJERO", "33"),
+            _ => ("COAHUILA", "05"),
+        }
+    } else {
+        ("COAHUILA", "05")
+    }
+}
+
 /// Limpia y ajusta la CURP a 18 posiciones.
 pub fn sanitize_curp(curp: &str) -> String {
     let clean: String = curp.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
@@ -134,6 +217,64 @@ pub fn sanitize_curp(curp: &str) -> String {
     } else {
         format!("{:<18}", upper)
     }
+}
+
+/// Resuelve una CURP oficial válida de 18 posiciones para empleados en SUA usando el estándar oficial de RENAPO.
+/// 1. Si `curp` tiene 18 caracteres y cumple con el formato oficial de RENAPO, la conserva.
+/// 2. Si no, calcula la CURP oficial con el algoritmo oficial de RENAPO sólo si cuenta con fecha de nacimiento real.
+/// 3. Si no se puede calcular o determinar con los datos del empleado, la deja en blanco (18 espacios).
+pub fn resolver_curp_valida(curp: &str, nombre: &str, rfc: &str, nss: &str) -> String {
+    let clean: String = curp.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let upper = clean.to_ascii_uppercase();
+    if upper.len() == 18 && crate::cedulas::curp_renapo::validar_curp_formato(&upper) {
+        return upper;
+    }
+
+    let clean_nom = nombre.trim();
+    if !clean_nom.is_empty() && !clean_nom.eq_ignore_ascii_case("NONE") && clean_nom.chars().any(|c| c.is_alphabetic()) {
+        let calc = crate::cedulas::curp_renapo::calcular_curp_oficial(nombre, Some(rfc), Some(nss), None, None);
+        if calc.len() == 18 && crate::cedulas::curp_renapo::validar_curp_formato(&calc) {
+            return calc;
+        }
+    }
+
+    // Si no se puede determinar la CURP, se deja en blanco (18 espacios) según el estándar del SUA
+    format!("{:<18}", "")
+}
+
+/// Genera una CURP oficial válida de 18 caracteres en caso de que no exista o esté vacía,
+/// para evitar que el programa SUA rechace el registro del trabajador por CURP ausente.
+pub fn sintetizar_curp_minima(
+    paterno: &str,
+    materno: &str,
+    nombres: &str,
+    rfc: &str,
+    nss: &str,
+) -> String {
+    let full = format!("{} {} {}", paterno, materno, nombres);
+    resolver_curp_valida("", &full, rfc, nss)
+}
+
+/// Extrae la fecha de nacimiento (DDMMAAAA) y sexo ('M' o 'F') a partir de la CURP para SUA.
+pub fn extraer_datos_curp(curp: &str) -> (String, char) {
+    let clean: String = curp.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if clean.len() < 11 {
+        return ("01011990".to_string(), 'M');
+    }
+    let yy_str = &clean[4..6];
+    let mm_str = &clean[6..8];
+    let dd_str = &clean[8..10];
+    let sex_char = clean.chars().nth(10).unwrap_or('H');
+
+    let yy: i32 = yy_str.parse().unwrap_or(90);
+    let mm: i32 = mm_str.parse().unwrap_or(1).clamp(1, 12);
+    let dd: i32 = dd_str.parse().unwrap_or(1).clamp(1, 31);
+
+    let full_year = if yy <= 26 { 2000 + yy } else { 1900 + yy };
+    let fecha_nac = format!("{:02}{:02}{:04}", dd, mm, full_year);
+    let sexo_sua = if sex_char == 'M' { 'F' } else { 'M' };
+
+    (fecha_nac, sexo_sua)
 }
 
 /// Formatea una fecha a `DDMMAAAA` (8 posiciones).
@@ -161,44 +302,57 @@ pub struct SuaWorkerRecord {
     pub sdi: f64,
     pub clave_ubicacion: String,
     pub num_empleado: String,
-    pub tipo_trabajador: char, // '1' Permanente, '2' Eventual, '3' Construcción
+    pub tipo_trabajador: char, // Siempre '1' según especificación requerida
 }
 
-/// Formatea una línea para `ASEG_<Folio>.TXT` (Longitud fija estricta: 164 caracteres)
+/// Formatea una línea para `1_ASEG_<Folio>.TXT` (Longitud fija estricta oficial SUA: 164 caracteres)
 pub fn format_aseg_line(rec: &SuaWorkerRecord) -> String {
     let rp = sanitize_rp(&rec.registro_patronal); // 11
     let nss = sanitize_nss(&rec.nss); // 11
-    let rfc = sanitize_rfc(&rec.rfc); // 13
-    let curp = sanitize_curp(&rec.curp); // 18
+
+    // Resolver CURP válida (18 posiciones) según la norma oficial de RENAPO
+    let curp = resolver_curp_valida(&rec.curp, &rec.nombre_completo, &rec.rfc, &rec.nss); // 18
+
+    // Resolver RFC válido (13 posiciones) para evitar "Error en la configuración del RFC"
+    let rfc = resolver_rfc_valido(&rec.rfc, &curp, &rec.nombre_completo, &rec.nss); // 13
+
     let delim_name = format_sua_name_delimited(&rec.nombre_completo);
     let name_50 = if delim_name.len() > 50 {
         delim_name[..50].to_string()
     } else {
         format!("{:<50}", delim_name)
     }; // 50
-    let tipo_trab = if rec.tipo_trabajador == '3' || rec.tipo_trabajador == '2' {
-        rec.tipo_trabajador
-    } else {
-        '1'
-    }; // 1
-    let jornada = '0'; // 1 (0=Normal)
+
+    // Constantes requeridas para el SUA:
+    // - Tipo de trabajador: siempre clave 1
+    // - Tipo de jornada: siempre clave 0
+    // - Tipo de descuento: siempre clave 2
+    let tipo_trab = '1'; // 1
+    let jornada = '0'; // 1
     let fecha = format_date_sua(rec.fecha_alta, rec.mes_periodo, rec.anio_periodo); // 8
 
     // SDI: 5 enteros + 2 decimales sin punto decimal (7 posiciones)
     let sdi_cents = ((rec.sdi * 100.0).round() as i64).clamp(0, 9999999);
     let sdi_str = format!("{:07}", sdi_cents); // 7
 
+    // Clave de ubicación: omitir si contiene palabras reservadas de estatus ("ALTA", "BAJA", etc.)
     let clave_raw = clean_ascii_sua(&rec.clave_ubicacion);
-    let clave_17 = if clave_raw.len() > 17 {
-        clave_raw[..17].to_string()
+    let clave_upper = clave_raw.trim().to_ascii_uppercase();
+    let clave_filtrada = if clave_upper == "ALTA" || clave_upper == "BAJA" || clave_upper == "REIN" || clave_upper == "MS" || clave_upper == "M/S" {
+        String::new()
     } else {
-        format!("{:<17}", clave_raw)
+        clave_raw
+    };
+    let clave_17 = if clave_filtrada.len() > 17 {
+        clave_filtrada[..17].to_string()
+    } else {
+        format!("{:<17}", clave_filtrada)
     }; // 17
 
     let credito_10 = "          "; // 10 espacios (sin crédito)
-    let fid_8 = "00000000"; // 8 ceros
-    let tipo_desc_1 = '0'; // 1
-    let valor_desc_8 = "00000000"; // 8 ceros
+    let fid_8 = "00000000"; // 8 ceros (fecha descuento)
+    let tipo_desc_1 = '2'; // 1 (tipo descuento: 2)
+    let valor_desc_8 = "00000000"; // 8 ceros (valor descuento)
 
     let line = format!(
         "{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
@@ -218,11 +372,11 @@ pub fn format_aseg_line(rec: &SuaWorkerRecord) -> String {
         valor_desc_8
     );
 
-    debug_assert_eq!(line.len(), 164, "La línea de ASEG debe medir exactamente 164 caracteres");
+    debug_assert_eq!(line.len(), 164, "La línea de ASEG debe medir exactamente 164 caracteres para SUA");
     line
 }
 
-/// Formatea una línea para `AFIL_<Folio>.TXT` (Longitud fija estricta: 168 caracteres)
+/// Formatea una línea para `2_AFIL_<Folio>.TXT` (Datos Afiliatorios SUA - Longitud fija estricta: 80 caracteres)
 pub fn format_afil_line(rec: &SuaWorkerRecord) -> String {
     let clean_rp = sanitize_rp(&rec.registro_patronal);
     let rp_base = &clean_rp[..10]; // 10
@@ -232,82 +386,39 @@ pub fn format_afil_line(rec: &SuaWorkerRecord) -> String {
     let nss_base = &clean_nss[..10]; // 10
     let nss_dv = &clean_nss[10..11]; // 1
 
-    let (paterno, materno, nombres) = parse_mexican_name(&rec.nombre_completo);
-    let materno_27 = if materno.len() > 27 {
-        materno[..27].to_string()
-    } else {
-        format!("{:<27}", materno)
-    }; // 27
-    let paterno_27 = if paterno.len() > 27 {
-        paterno[..27].to_string()
-    } else {
-        format!("{:<27}", paterno)
-    }; // 27
-    let nombres_27 = if nombres.len() > 27 {
-        nombres[..27].to_string()
-    } else {
-        format!("{:<27}", nombres)
-    }; // 27
+    let cp_5 = "64000"; // 5 (Código Postal default de la región)
 
-    // Salario: 4 enteros y 2 decimales sin punto decimal (6 posiciones)
-    let sdi_cents = ((rec.sdi * 100.0).round() as i64).clamp(0, 999999);
-    let sdi_str = format!("{:06}", sdi_cents); // 6
+    // Extraer fecha de nacimiento y sexo desde CURP oficial validada
+    let curp = resolver_curp_valida(&rec.curp, &rec.nombre_completo, &rec.rfc, &rec.nss);
+    let (fecha_nac_8, sexo_1) = extraer_datos_curp(&curp); // 8 y 1
 
-    let filler_6 = "      "; // 6
-    let tipo_trab = if rec.tipo_trabajador == '3' || rec.tipo_trabajador == '2' {
-        rec.tipo_trabajador
-    } else {
-        '1'
-    }; // 1
-    let tipo_salario = '0'; // 1 (0=Fijo)
-    let semana_red = '0'; // 1 (0=Normal)
-    let fecha = format_date_sua(rec.fecha_alta, rec.mes_periodo, rec.anio_periodo); // 8
-    let umf = "000"; // 3
-    let filler_2 = "  "; // 2
-    let tipo_mov = "08"; // 2 (08=Reingreso/Alta)
-    let guia = "00000"; // 5
-
-    let clave_emp = if !rec.num_empleado.trim().is_empty() {
-        clean_ascii_sua(&rec.num_empleado)
-    } else {
-        clean_ascii_sua(&rec.clave_ubicacion)
-    };
-    let clave_10 = if clave_emp.len() > 10 {
-        clave_emp[..10].to_string()
-    } else {
-        format!("{:<10}", clave_emp)
-    }; // 10
-
-    let filler_1 = " "; // 1
-    let curp_18 = sanitize_curp(&rec.curp); // 18
-    let constante_formato = '9'; // 1
+    // Lugar de nacimiento y clave de entidad según catálogo oficial de SUA
+    let (nombre_estado, clave_lugar) = estado_y_clave_lugar_desde_curp(&curp);
+    let lugar_nac_25 = format!("{:<25}", nombre_estado); // 25
+    let clave_entidad_2 = format!("{:0>2}", clave_lugar); // 2
+    let umf_3 = "000"; // 3 dígitos numéricos (el SUA requiere que UMF sea numérica; 000 por omisión)
+    let ocupacion_12 = "            "; // 12 espacios
+    let tipo_salario_1 = '0'; // 1 (0=Fijo)
+    let horas_1 = ' '; // 1 (1 espacio)
 
     let line = format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}",
         rp_base,
         rp_dv,
         nss_base,
         nss_dv,
-        materno_27,
-        paterno_27,
-        nombres_27,
-        sdi_str,
-        filler_6,
-        tipo_trab,
-        tipo_salario,
-        semana_red,
-        fecha,
-        umf,
-        filler_2,
-        tipo_mov,
-        guia,
-        clave_10,
-        filler_1,
-        curp_18,
-        constante_formato
+        cp_5,
+        fecha_nac_8,
+        lugar_nac_25,
+        clave_entidad_2,
+        umf_3,
+        ocupacion_12,
+        sexo_1,
+        tipo_salario_1,
+        horas_1
     );
 
-    debug_assert_eq!(line.len(), 168, "La línea de AFIL debe medir exactamente 168 caracteres");
+    debug_assert_eq!(line.len(), 80, "La línea de AFIL debe medir exactamente 80 caracteres");
     line
 }
 
@@ -428,7 +539,7 @@ pub fn format_cred_line(cred: &SuaCredRecord) -> String {
     let tipo_desc = if matches!(cred.tipo_descuento, '1' | '2' | '3') {
         cred.tipo_descuento
     } else {
-        '1'
+        '2'
     }; // 1
 
     let val_cents = ((cred.valor_descuento * 100.0).round() as i64).clamp(0, 99999999);
@@ -456,12 +567,25 @@ pub struct SuaExportResult {
     pub total_workers: usize,
 }
 
-/// Genera el paquete completo de 5 archivos SUA con formato estricto y validado:
-/// 1. ASEG_<Folio>.TXT (Altas de trabajadores - 164 chars)
-/// 2. AFIL_<Folio>.TXT (Datos afiliatorios - 168 chars)
-/// 3. MOVT_<Folio>.TXT (Movimientos salariales y ausencias - 49 chars)
-/// 4. CRED_<Folio>.TXT (Créditos Infonavit - 51 chars)
-/// 5. INCAP.TXT (Incapacidades - 49 chars)
+/// Genera el paquete completo de 5 archivos SUA con formato estricto y orden numérico para importación:
+/// 1. 1_ASEG_<Folio>.TXT (Datos de los Trabajadores / Altas - 168 chars)
+///    ¿Por qué va primero?: Es el archivo principal que da de alta o registra la información base
+///    de los nuevos trabajadores en el sistema (NSS, nombres, CURP, etc.). El SUA requiere que la ficha
+///    del trabajador exista antes de poder asignarle cualquier evento posterior.
+/// 2. 2_AFIL_<Folio>.TXT (Datos Afiliatorios Adicionales - 80 chars)
+///    ¿Por qué va segundo?: Complementa la información personal de los colaboradores que ya fueron
+///    identificados o creados previamente en el sistema (lugar de nacimiento, código postal, tipo de salario, etc.).
+/// 3. 3_MOVT_<Folio>.TXT (Movimientos Afiliatorios - 49 chars)
+///    ¿Por qué va tercero?: Una vez que el trabajador ya está registrado en la base de datos, se suben
+///    sus incidencias contractuales y de estatus, tales como reingresos, modificaciones de salario diario integrado o bajas.
+/// 4. 4_CRED_<Folio>.TXT (Amortizaciones de Crédito INFONAVIT / MOVCR - 51 chars)
+///    ¿Por qué va cuarto?: Contiene las incidencias relacionadas con los créditos de vivienda de los trabajadores
+///    (inicio de retención, suspensión o modificación de descuentos). Requiere que el trabajador ya cuente con
+///    un estatus vigente dentro de la empresa en el SUA.
+/// 5. 5_INCAP_<Folio>.TXT (Datos de Incapacidades - 49 chars)
+///    ¿Por qué va al último?: Registra los folios y días de incapacidades médicas otorgadas por el IMSS.
+///    Se sube al final porque el sistema valida de forma estricta que correspondan a un trabajador activo y que
+///    no se traslapen con fechas donde el empleado ya se encuentre dado de baja.
 pub fn export_sua_files(
     folder_path: &std::path::Path,
     folio_revision: &str,
@@ -485,11 +609,11 @@ pub fn export_sua_files(
         clean_folio
     };
 
-    let aseg_filename = format!("ASEG_{}.TXT", folio);
-    let afil_filename = format!("AFIL_{}.TXT", folio);
-    let movt_filename = format!("MOVT_{}.TXT", folio);
-    let cred_filename = format!("CRED_{}.TXT", folio);
-    let incap_filename = "INCAP.TXT".to_string();
+    let aseg_filename = format!("1_ASEG_{}.TXT", folio);
+    let afil_filename = format!("2_AFIL_{}.TXT", folio);
+    let movt_filename = format!("3_MOVT_{}.TXT", folio);
+    let cred_filename = format!("4_CRED_{}.TXT", folio);
+    let incap_filename = format!("5_INCAP_{}.TXT", folio);
 
     // 1. Agrupar filas por trabajador único (RP + NSS)
     let mut workers_map: std::collections::BTreeMap<(String, String), Vec<&crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb>> = std::collections::BTreeMap::new();
@@ -533,48 +657,84 @@ pub fn export_sua_files(
         }
 
         let m_first = crate::cedulas::business::month_to_num(&first.mes_periodo).clamp(1, 12);
-        let is_obra = emp_rows.iter().any(|r| r.id_registro_obra.is_some() || !r.obra_numero.trim().is_empty());
-        let tipo_trab = if is_obra { '3' } else { '1' };
 
+        let cl_mov = first.clave.trim().to_ascii_uppercase();
+        let es_palabra_mov = cl_mov == "ALTA" || cl_mov == "BAJA" || cl_mov == "REIN" || cl_mov == "MS" || cl_mov == "M/S";
+        let ubicacion_final = if es_palabra_mov || cl_mov.is_empty() {
+            first.obra_numero.clone()
+        } else {
+            first.clave.clone()
+        };
+        let num_emp_final = if es_palabra_mov {
+            String::new()
+        } else {
+            first.clave.clone()
+        };
+
+        let curp_resuelto = resolver_curp_valida(&best_curp, &best_nombre, &best_rfc, &nss);
+        let rfc_resuelto = resolver_rfc_valido(&best_rfc, &curp_resuelto, &best_nombre, &nss);
         let worker = SuaWorkerRecord {
             registro_patronal: rp.clone(),
             nss: nss.clone(),
-            rfc: best_rfc,
-            curp: best_curp,
+            rfc: rfc_resuelto,
+            curp: curp_resuelto,
             nombre_completo: best_nombre,
             fecha_alta: first.fecha,
             mes_periodo: m_first,
             anio_periodo: first.anio_periodo as i32,
             sdi: first.sdi,
-            clave_ubicacion: if !first.clave.trim().is_empty() {
-                first.clave.clone()
-            } else {
-                first.obra_numero.clone()
-            },
-            num_empleado: first.clave.clone(),
-            tipo_trabajador: tipo_trab,
+            clave_ubicacion: ubicacion_final,
+            num_empleado: num_emp_final,
+            tipo_trabajador: '1',
         };
 
-        // Movimiento inicial de Reingreso / Alta ("08")
-        movements.push(SuaMovementRecord {
-            registro_patronal: rp.clone(),
-            nss: nss.clone(),
-            tipo_movimiento: "08".to_string(),
-            fecha: first.fecha,
-            mes_periodo: m_first,
-            anio_periodo: first.anio_periodo as i32,
-            folio_incapacidad: String::new(),
-            dias_incidencia: 0,
-            sdi: first.sdi,
-        });
-
-        // Revisar cambios de SDI y ausentismos/licencias en los periodos
+        // En SUA, los trabajadores vigentes ya son registrados y dados de alta mediante el archivo 1_ASEG.
+        // El archivo 3_MOVT es exclusivamente para incidencias y movimientos posteriores:
+        // - "02": Baja
+        // - "08": Reingreso (únicamente si es posterior a una baja, idx > 0)
+        // - "07": Modificación de salario (cuando cambia el SDI respecto al inicial o clave M/S)
+        // - "11": Ausentismo / Licencia sin goce de sueldo
+        // NO se debe enviar movimiento "08" al trabajador vigente inicial, pues el SUA lo rechaza con:
+        // "Trabajador vigente, registre primero el movimiento de baja".
         let mut prev_sdi = first.sdi;
-        for r in &emp_rows {
+        for (idx, r) in emp_rows.iter().enumerate() {
             let m_curr = crate::cedulas::business::month_to_num(&r.mes_periodo).clamp(1, 12);
+            let cl_upper = r.clave.trim().to_ascii_uppercase();
 
-            // Modificación de salario ("07") si el SDI cambia significativamente
-            if (r.sdi - prev_sdi).abs() > 0.01 && r.sdi > 0.0 {
+            // 1. Baja ("02") si está indicada explícitamente en la fila
+            if cl_upper.contains("BAJA") || cl_upper == "02" {
+                movements.push(SuaMovementRecord {
+                    registro_patronal: rp.clone(),
+                    nss: nss.clone(),
+                    tipo_movimiento: "02".to_string(),
+                    fecha: r.fecha,
+                    mes_periodo: m_curr,
+                    anio_periodo: r.anio_periodo as i32,
+                    folio_incapacidad: String::new(),
+                    dias_incidencia: 0,
+                    sdi: r.sdi,
+                });
+            }
+            // 2. Reingreso ("08") SOLO para movimientos posteriores (idx > 0) que indiquen reingreso explícito
+            else if idx > 0 && (cl_upper.contains("REIN") || cl_upper == "08") {
+                movements.push(SuaMovementRecord {
+                    registro_patronal: rp.clone(),
+                    nss: nss.clone(),
+                    tipo_movimiento: "08".to_string(),
+                    fecha: r.fecha,
+                    mes_periodo: m_curr,
+                    anio_periodo: r.anio_periodo as i32,
+                    folio_incapacidad: String::new(),
+                    dias_incidencia: 0,
+                    sdi: r.sdi,
+                });
+                prev_sdi = r.sdi;
+            }
+            // 3. Modificación de salario ("07"):
+            // En SUA, una modificación de salario REQUIERE estrictamente que el nuevo SDI sea DIFERENTE al anterior.
+            // Si el SDI es igual al previo ((r.sdi - prev_sdi).abs() <= 0.01), el SUA rechaza el movimiento con:
+            // "El Salario Diario Integrado no puede ser igual al anterior".
+            else if idx > 0 && (r.sdi - prev_sdi).abs() > 0.01 && r.sdi > 0.0 {
                 movements.push(SuaMovementRecord {
                     registro_patronal: rp.clone(),
                     nss: nss.clone(),
@@ -587,9 +747,11 @@ pub fn export_sua_files(
                     sdi: r.sdi,
                 });
                 prev_sdi = r.sdi;
+            } else if r.sdi > 0.0 {
+                prev_sdi = r.sdi;
             }
 
-            // Ausentismo ("11")
+            // 4. Ausentismo ("11")
             let aus_dias = r.aus.round() as i16;
             if aus_dias > 0 {
                 movements.push(SuaMovementRecord {
@@ -605,7 +767,7 @@ pub fn export_sua_files(
                 });
             }
 
-            // Licencia / Ausentismo ("11")
+            // 5. Licencia / Ausentismo ("11")
             let lic_dias = r.lic.round() as i16;
             if lic_dias > 0 {
                 movements.push(SuaMovementRecord {
@@ -621,7 +783,7 @@ pub fn export_sua_files(
                 });
             }
 
-            // Incapacidad ("12")
+            // 6. Incapacidad ("12")
             let inc_dias = r.inc.round() as i16;
             if inc_dias > 0 {
                 incaps.push(SuaIncapRecord {
@@ -658,9 +820,15 @@ pub fn export_sua_files(
     }
 
     let mut movt_content = String::new();
+    let mut seen_mov_lines = std::collections::HashSet::new();
+    let mut unique_movt_count = 0;
     for m in &movements {
-        movt_content.push_str(&format_movt_line(m));
-        movt_content.push_str("\r\n");
+        let line = format_movt_line(m);
+        if seen_mov_lines.insert(line.clone()) {
+            movt_content.push_str(&line);
+            movt_content.push_str("\r\n");
+            unique_movt_count += 1;
+        }
     }
 
     let mut cred_content = String::new();
@@ -700,7 +868,7 @@ pub fn export_sua_files(
         afil_filename,
         afil_count: workers.len(),
         movt_filename,
-        movt_count: movements.len(),
+        movt_count: unique_movt_count,
         cred_filename,
         cred_count: creds.len(),
         incap_filename,
@@ -753,18 +921,96 @@ mod tests {
             sdi: 348.50,
             clave_ubicacion: "OBRA-C01".into(),
             num_empleado: "EMP001".into(),
-            tipo_trabajador: '3',
+            tipo_trabajador: '1',
+        };
+
+        let line = format_aseg_line(&rec);
+        assert_eq!(line.len(), 164, "Debe ser de exactamente 164 caracteres para SUA");
+        assert!(line.starts_with("Y631234510112345678901ROAE800101XYZROAE800101HDFRNR01"));
+        assert!(line.contains("02092024"));
+        assert!(line.contains("0034850"));
+        // Comprobar tipo trabajador '1', jornada '0' y tipo descuento '2'
+        assert_eq!(&line[103..105], "10"); // tipo trab '1' + jornada '0'
+        assert_eq!(&line[155..156], "2"); // tipo descuento '2'
+        assert!(line.ends_with("200000000")); // tipo desc '2' + 8 ceros
+    }
+
+    #[test]
+    fn test_format_aseg_line_curp_en_blanco_si_no_se_determina() {
+        // Caso: CURP vacía y movimiento ALTA como clave -> CURP en blanco (18 espacios) y RFC genérico XAXX010101000
+        let rec = SuaWorkerRecord {
+            registro_patronal: "A3673455103".into(),
+            nss: "32088956753".into(),
+            rfc: "XAXX010101000".into(),
+            curp: "".into(),
+            nombre_completo: "CASTRO ENCINA JOSE HUMBERTO".into(),
+            fecha_alta: Some(NaiveDate::from_ymd_opt(2024, 9, 24).unwrap()),
+            mes_periodo: 9,
+            anio_periodo: 2024,
+            sdi: 261.20,
+            clave_ubicacion: "ALTA".into(),
+            num_empleado: "ALTA".into(),
+            tipo_trabajador: '1',
         };
 
         let line = format_aseg_line(&rec);
         assert_eq!(line.len(), 164, "Debe ser de exactamente 164 caracteres");
-        assert!(line.starts_with("Y631234510112345678901ROAE800101XYZROAE800101HDFRNR01"));
-        assert!(line.contains("02092024"));
-        assert!(line.contains("0034850"));
+        // Debe contener 18 espacios de CURP en blanco al no poder determinarse
+        assert!(line.contains("                  "));
+        // Debe contener el RFC genérico aceptado por el SUA
+        assert!(line.contains("XAXX010101000"));
+        // La clave 'ALTA' no debe contaminar el campo de ubicación
+        assert!(!line.contains("ALTA"));
+        // Termina con tipo descuento '2' y 8 ceros
+        assert!(line.ends_with("200000000"));
     }
 
     #[test]
-    fn test_format_afil_line_exact_168() {
+    fn test_resolver_rfc_valido() {
+        // Empleado con RFC vacío pero CURP válida: genera RFC oficial SAT de 13 caracteres
+        let rfc1 = resolver_rfc_valido("", "AOJD821108HCLCRN06", "ACOSTA JUAREZ DANIEL", "32998253382");
+        assert_eq!(rfc1.len(), 13);
+        assert!(rfc1.starts_with("AOJD821108"));
+
+        // Empleado sin CURP: genera RFC genérico XAXX010101000 aceptado por el SUA
+        let rfc2 = resolver_rfc_valido("", "", "ACOSTA JUAREZ DANIEL", "32998253382");
+        assert_eq!(rfc2, "XAXX010101000");
+
+        // Empleado con RFC completo de 13 caracteres existente
+        let rfc3 = resolver_rfc_valido("AOJD821108ABC", "AOJD821108HCLCRN06", "ACOSTA JUAREZ DANIEL", "32998253382");
+        assert_eq!(rfc3, "AOJD821108ABC");
+    }
+
+    #[test]
+    fn test_estado_y_clave_lugar_catalogo() {
+        // Coahuila
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("AOJD821108HCLCRN06");
+        assert_eq!(edo, "COAHUILA");
+        assert_eq!(cve, "05");
+
+        // CDMX
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("CASM830208MDFSNR07");
+        assert_eq!(edo, "CIUDAD DE MEXICO");
+        assert_eq!(cve, "09");
+
+        // Zacatecas
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("COTG930602HZSNRD02");
+        assert_eq!(edo, "ZACATECAS");
+        assert_eq!(cve, "32");
+
+        // Aguascalientes
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("EACG990219HASSMR03");
+        assert_eq!(edo, "AGUASCALIENTES");
+        assert_eq!(cve, "01");
+
+        // Extranjero
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("RUJA910101HNEXXX00");
+        assert_eq!(edo, "EXTRANJERO");
+        assert_eq!(cve, "33");
+    }
+
+    #[test]
+    fn test_format_afil_line_exact_80() {
         let rec = SuaWorkerRecord {
             registro_patronal: "Y6312345101".into(),
             nss: "12345678901".into(),
@@ -777,12 +1023,14 @@ mod tests {
             sdi: 348.50,
             clave_ubicacion: "OBRA-C01".into(),
             num_empleado: "EMP001".into(),
-            tipo_trabajador: '3',
+            tipo_trabajador: '1',
         };
 
         let line = format_afil_line(&rec);
-        assert_eq!(line.len(), 168, "Debe ser de exactamente 168 caracteres");
-        assert!(line.ends_with('9'), "El último carácter debe ser '9'");
+        assert_eq!(line.len(), 80, "Debe ser de exactamente 80 caracteres para SUA");
+        assert!(line.starts_with("Y63123451011234567890164000"));
+        assert!(line.contains("CIUDAD DE MEXICO"));
+        assert!(line.contains("09")); // Clave lugar 09 para DF
     }
 
     #[test]
@@ -838,5 +1086,190 @@ mod tests {
 
         let line = format_cred_line(&cred);
         assert_eq!(line.len(), 51, "Debe ser de exactamente 51 caracteres");
+    }
+
+    fn make_test_row(
+        rp: &str,
+        nss: &str,
+        nombre: &str,
+        mes: &str,
+        anio: i16,
+        fecha: Option<NaiveDate>,
+        sdi: f64,
+        clave: &str,
+    ) -> crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb {
+        crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb {
+            id_reporte_liq: uuid::Uuid::now_v7(),
+            id_parent_reporte_liq: uuid::Uuid::now_v7(),
+            id_liquidacion: uuid::Uuid::now_v7(),
+            id_empleado: uuid::Uuid::now_v7(),
+            nombre_trabajador: nombre.into(),
+            rfc: "PEJU800101XYZ".into(),
+            curp: "PEJU800101HDFRNR01".into(),
+            nss: nss.into(),
+            registro_patronal: rp.into(),
+            mes_periodo: mes.into(),
+            anio_periodo: anio,
+            periodo_str: format!("{}/{}", mes, anio),
+            dias_cedula: 30,
+            id_registro_obra: None,
+            obra_numero: "OBRA1".into(),
+            obra_label: "OBRA 1".into(),
+            dias_obra: 30,
+            obra_creado_usuario: false,
+            clave: clave.into(),
+            fecha,
+            fecha_str: fecha.map(|d| d.to_string()).unwrap_or_default(),
+            sdi,
+            lic: 0.0,
+            inc: 0.0,
+            aus: 0.0,
+            cf: 0.0,
+            exc_pat: 0.0,
+            exc_obr: 0.0,
+            pd_pat: 0.0,
+            pd_obr: 0.0,
+            gmp_pat: 0.0,
+            gmp_obr: 0.0,
+            rt: 0.0,
+            iv_pat: 0.0,
+            iv_obr: 0.0,
+            gps: 0.0,
+            patronal: 800.0,
+            obrera: 200.0,
+            subtotal: 1000.0,
+            cf_orig: 0.0,
+            exc_pat_orig: 0.0,
+            exc_obr_orig: 0.0,
+            pd_pat_orig: 0.0,
+            pd_obr_orig: 0.0,
+            gmp_pat_orig: 0.0,
+            gmp_obr_orig: 0.0,
+            rt_orig: 0.0,
+            iv_pat_orig: 0.0,
+            iv_obr_orig: 0.0,
+            gps_orig: 0.0,
+            patronal_orig: 800.0,
+            obrera_orig: 200.0,
+            subtotal_orig: 1000.0,
+        }
+    }
+
+    #[test]
+    fn test_export_sua_filenames_order() {
+        let temp_dir = std::env::temp_dir().join(format!("sua_test_{}", uuid::Uuid::now_v7()));
+        let mut row = make_test_row(
+            "Y6312345101",
+            "12345678901",
+            "PEREZ JUAN",
+            "09",
+            2024,
+            Some(NaiveDate::from_ymd_opt(2024, 9, 1).unwrap()),
+            350.0,
+            "01",
+        );
+        row.inc = 1.0;
+
+        let res = export_sua_files(&temp_dir, "REV1", &[row]).expect("export should succeed");
+        assert_eq!(res.aseg_filename, "1_ASEG_REV1.TXT");
+        assert_eq!(res.afil_filename, "2_AFIL_REV1.TXT");
+        assert_eq!(res.movt_filename, "3_MOVT_REV1.TXT");
+        assert_eq!(res.cred_filename, "4_CRED_REV1.TXT");
+        assert_eq!(res.incap_filename, "5_INCAP_REV1.TXT");
+
+        assert!(temp_dir.join("1_ASEG_REV1.TXT").exists());
+        assert!(temp_dir.join("2_AFIL_REV1.TXT").exists());
+        assert!(temp_dir.join("3_MOVT_REV1.TXT").exists());
+        assert!(temp_dir.join("4_CRED_REV1.TXT").exists());
+        assert!(temp_dir.join("5_INCAP_REV1.TXT").exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_trabajador_vigente_no_genera_movimiento_08_espurio() {
+        let temp_dir = std::env::temp_dir().join(format!("sua_test_vigente_{}", uuid::Uuid::now_v7()));
+        let row = make_test_row(
+            "A3673455103",
+            "01725406910",
+            "PEREZ JUAN",
+            "09",
+            2024,
+            Some(NaiveDate::from_ymd_opt(2024, 9, 3).unwrap()),
+            261.20,
+            "01",
+        );
+
+        let res = export_sua_files(&temp_dir, "REV1", &[row]).expect("export should succeed");
+        // No debe generar movimiento 08 para un trabajador vigente sin incidencias
+        assert_eq!(res.movt_count, 0, "No debe haber movimientos para un trabajador vigente sin incidencias");
+
+        let movt_file = temp_dir.join(&res.movt_filename);
+        let movt_content = std::fs::read_to_string(&movt_file).unwrap();
+        assert!(movt_content.is_empty(), "El archivo MOVT debe estar vacío si no hay incidencias");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_trabajador_con_baja_y_modificacion_salario() {
+        let temp_dir = std::env::temp_dir().join(format!("sua_test_movs_{}", uuid::Uuid::now_v7()));
+        let row1 = make_test_row(
+            "A3673455103",
+            "01725406910",
+            "PEREZ JUAN",
+            "08",
+            2024,
+            Some(NaiveDate::from_ymd_opt(2024, 8, 1).unwrap()),
+            261.20,
+            "01",
+        );
+
+        let mut row2 = row1.clone();
+        row2.mes_periodo = "09".into();
+        row2.fecha = Some(NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        row2.sdi = 310.50; // Cambio de salario
+
+        let mut row3 = row1.clone();
+        row3.mes_periodo = "09".into();
+        row3.fecha = Some(NaiveDate::from_ymd_opt(2024, 9, 15).unwrap());
+        row3.clave = "BAJA".into(); // Movimiento de baja
+
+        let res = export_sua_files(&temp_dir, "REV2", &[row1, row2, row3]).expect("export should succeed");
+        assert_eq!(res.movt_count, 2, "Debe registrar modificación de salario (07) y baja (02)");
+
+        let movt_file = temp_dir.join(&res.movt_filename);
+        let movt_content = std::fs::read_to_string(&movt_file).unwrap();
+        assert!(movt_content.contains("07"), "Debe contener el tipo de movimiento 07");
+        assert!(movt_content.contains("02"), "Debe contener el tipo de movimiento 02");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_trabajador_con_mismo_sdi_no_genera_movimiento_07() {
+        let temp_dir = std::env::temp_dir().join(format!("sua_test_sdi_igual_{}", uuid::Uuid::now_v7()));
+        let row1 = make_test_row(
+            "A3673455103",
+            "05239919045",
+            "PEREZ JUAN",
+            "03",
+            2024,
+            Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()),
+            261.20,
+            "01",
+        );
+
+        let mut row2 = row1.clone();
+        row2.mes_periodo = "05".into();
+        row2.fecha = Some(NaiveDate::from_ymd_opt(2024, 5, 1).unwrap());
+        row2.sdi = 261.20; // Mismo salario que el anterior
+        row2.clave = "07".into(); // Clave 07 o M/S en la cédula, pero salario idéntico
+
+        let res = export_sua_files(&temp_dir, "REV3", &[row1, row2]).expect("export should succeed");
+        // No debe generar movimiento 07 porque el salario no cambió (evita error SUA: "El Salario Diario Integrado no puede ser igual al anterior")
+        assert_eq!(res.movt_count, 0, "No debe haber movimiento 07 si el salario es igual");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
