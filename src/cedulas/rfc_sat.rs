@@ -21,7 +21,8 @@ pub fn clean_ascii_rfc(text: &str) -> String {
 /// Separa un nombre completo en (Paterno, Materno, Nombres).
 /// Reconoce prefijos compuestos típicos ("DE", "DEL", "DE LA", "LOS", "SAN", etc.).
 pub fn parse_apellidos_nombre(full_name: &str) -> (String, String, String) {
-    let clean = clean_ascii_rfc(full_name);
+    let (cleaned, _) = crate::cedulas::employees::clean_name_and_extract_pension(full_name);
+    let clean = clean_ascii_rfc(&cleaned);
     let words: Vec<&str> = clean.split_whitespace().collect();
     if words.is_empty() {
         return (String::new(), String::new(), String::new());

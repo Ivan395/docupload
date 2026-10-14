@@ -291,6 +291,25 @@ component ReporteSelectedCombobox inherits Rectangle {
                                             horizontal-stretch: 1;
                                         }
 
+                                        if item.pensionado != "": Rectangle {
+                                            height: 16px;
+                                            border-radius: 3px;
+                                            background: #fef3c7;
+                                            border-width: 1px;
+                                            border-color: #f59e0b;
+                                            HorizontalLayout {
+                                                padding-left: 4px;
+                                                padding-right: 4px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: item.pensionado;
+                                                    font-size: 10px;
+                                                    font-weight: 700;
+                                                    color: #b45309;
+                                                }
+                                            }
+                                        }
+
                                         Rectangle {
                                             height: 16px;
                                             border-radius: 3px;
@@ -1188,7 +1207,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                     Rectangle {
                         x: table_scroll.content-x;
-                        width: 3250px;
+                        width: 3445px;
                         height: 40px;
 
                         HorizontalLayout {
@@ -1222,11 +1241,11 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             }
 
                             Text { width: 35px; text: "#"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
-                            Text { width: 105px; text: "Mes / Año"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { width: 135px; text: "Mes / Año"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
                             Text { width: 105px; text: "NSS"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
-                            Text { width: 165px; text: "RFC / CURP"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
-                            Text { width: 220px; text: "Nombre del Trabajador"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
-                            Text { width: 105px; text: "Reg. Patronal"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                            Text { width: 175px; text: "RFC / CURP"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                            Text { width: 330px; text: "Nombre del Trabajador"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                            Text { width: 110px; text: "Reg. Patronal"; font-size: 12px; font-weight: 800; color: #475569; vertical-alignment: center; }
                             Text { width: 210px; text: "✏️ Registro de Obra"; font-size: 12px; font-weight: 800; color: #1e40af; vertical-alignment: center; }
                             Text { width: 65px; text: "Días Céd."; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
                             Text { width: 65px; text: "Días Obra"; font-size: 12px; font-weight: 800; color: #1e40af; horizontal-alignment: center; vertical-alignment: center; }
@@ -1250,7 +1269,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             Text { width: 95px; text: "Suma Patronal"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
                             Text { width: 95px; text: "Suma Obrera"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: right; vertical-alignment: center; }
                             Text { width: 105px; text: "Subtotal"; font-size: 12px; font-weight: 800; color: #166534; horizontal-alignment: right; vertical-alignment: center; }
-                            Text { width: 55px; text: "Acción"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { width: 90px; text: "Acciones"; font-size: 12px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -1261,11 +1280,11 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 // Cuerpo de la tabla con scroll vertical y horizontal
                 table_scroll := ScrollView {
                     vertical-stretch: 1;
-                    content-width: 3250px;
+                    content-width: 3405px;
                     content-height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + 20px) : 180px;
 
                     Rectangle {
-                        width: 3250px;
+                        width: 3405px;
                         height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + 20px) : 180px;
 
                         VerticalLayout {
@@ -1331,7 +1350,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                                 // 3. Periodo
                                 TextInput {
-                                    width: 105px;
+                                    width: 135px;
                                     text: item.periodo;
                                     read-only: true;
                                     single-line: true;
@@ -1356,7 +1375,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                                 // 5. RFC / CURP
                                 TextInput {
-                                    width: 165px;
+                                    width: 175px;
                                     text: item.rfc_curp;
                                     read-only: true;
                                     single-line: true;
@@ -1367,20 +1386,50 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                 }
 
                                 // 6. Nombre del Trabajador
-                                TextInput {
-                                    width: 220px;
-                                    text: item.nombre_trabajador;
-                                    read-only: true;
-                                    single-line: true;
-                                    font-size: 12.5px;
-                                    font-weight: 600;
-                                    color: #0f172a;
-                                    vertical-alignment: center;
+                                Rectangle {
+                                    width: 330px;
+                                    clip: true;
+                                    HorizontalLayout {
+                                        padding-left: 2px;
+                                        padding-right: 2px;
+                                        spacing: 6px;
+                                        alignment: start;
+                                        cross-axis-alignment: center;
+                                        TextInput {
+                                            horizontal-stretch: 1;
+                                            text: item.nombre_trabajador;
+                                            read-only: true;
+                                            single-line: true;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: #0f172a;
+                                            vertical-alignment: center;
+                                        }
+                                        if item.pensionado != "": Rectangle {
+                                            height: 18px;
+                                            border-radius: 3px;
+                                            background: #fef3c7;
+                                            border-width: 1px;
+                                            border-color: #f59e0b;
+                                            HorizontalLayout {
+                                                padding-left: 5px;
+                                                padding-right: 5px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: item.pensionado;
+                                                    font-size: 10px;
+                                                    font-weight: 700;
+                                                    color: #b45309;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
 
                                 // 7. Reg. Patronal
                                 TextInput {
-                                    width: 105px;
+                                    width: 110px;
                                     text: item.registro_patronal;
                                     read-only: true;
                                     single-line: true;
@@ -1681,18 +1730,19 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                                 // 26. Acciones
                                 HorizontalLayout {
-                                    width: 55px;
+                                    width: 90px;
                                     spacing: 4px;
                                     alignment: center;
                                     cross-axis-alignment: center;
 
+                                    // Editar obra / días
                                     Rectangle {
                                         width: 26px;
                                         height: 26px;
                                         border-radius: 4px;
                                         background: (!item.is_baja && btn_act_obra.has-hover) ? #e2e8f0 : transparent;
 
-                                        Text { text: item.is_baja ? "🔒" : "✏️"; font-size: item.is_baja ? 11px : 14px; horizontal-alignment: center; vertical-alignment: center; color: item.is_baja ? #94a3b8 : #0f172a; }
+                                        Text { text: item.is_baja ? "🔒" : "✏️"; font-size: item.is_baja ? 11px : 13px; horizontal-alignment: center; vertical-alignment: center; color: item.is_baja ? #94a3b8 : #0f172a; }
                                         btn_act_obra := TouchArea {
                                             enabled: !item.is_baja;
                                             mouse-cursor: !item.is_baja ? pointer : default;
@@ -1700,6 +1750,38 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                                 if !item.is_baja {
                                                     AppLogic.reporte_open_unified_modal(item.id_reporte_liq);
                                                 }
+                                            }
+                                        }
+                                    }
+
+                                    // Vincular a otra obra adicional
+                                    if !item.is_baja : Rectangle {
+                                        width: 26px;
+                                        height: 26px;
+                                        border-radius: 4px;
+                                        background: btn_act_add.has-hover ? #dbeafe : transparent;
+
+                                        Text { text: "➕"; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                                        btn_act_add := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.reporte_open_add_obra_modal(item.id_reporte_liq);
+                                            }
+                                        }
+                                    }
+
+                                    // Eliminar vinculación adicional (si el empleado tiene más de una obra)
+                                    if !item.is_baja && item.can_delete_split : Rectangle {
+                                        width: 26px;
+                                        height: 26px;
+                                        border-radius: 4px;
+                                        background: btn_act_del.has-hover ? #fee2e2 : transparent;
+
+                                        Text { text: "🗑️"; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                                        btn_act_del := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.reporte_delete_split_row(item.id_reporte_liq);
                                             }
                                         }
                                     }
@@ -1747,7 +1829,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                 Rectangle {
                     x: table_scroll.content-x;
-                    width: 3250px;
+                    width: 3405px;
                     height: 40px;
 
                     HorizontalLayout {
@@ -1757,9 +1839,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         alignment: start;
                         cross-axis-alignment: center;
 
-                        // Bloque de Título / Etiqueta de Totales alineado con las columnas no numéricas (30+35+105+105+165+220+105+210 + 7*8 = 1031px)
+                        // Bloque de Título / Etiqueta de Totales alineado con las columnas no numéricas (30+35+135+105+175+330+110+210 + 7*8 = 1186px)
                         Rectangle {
-                            width: 1031px;
+                            width: 1186px;
                             height: 40px;
 
                             HorizontalLayout {
@@ -2601,6 +2683,30 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     spacing: 12px;
                     alignment: end;
 
+                    // Botón para vincular a otra obra adicional
+                    Rectangle {
+                        height: 38px;
+                        width: 175px;
+                        border-radius: 6px;
+                        background: btn_add_extra_obra.has-hover ? #dbeafe : #eff6ff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "➕"; font-size: 12px; vertical-alignment: center; }
+                            Text { text: "Vincular a otra obra"; font-size: 12.5px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                        }
+
+                        btn_add_extra_obra := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_open_add_obra_modal(AppData.reporte_edit_row_id);
+                            }
+                        }
+                    }
+
                     Rectangle {
                         height: 38px;
                         width: 105px;
@@ -2637,6 +2743,417 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     AppData.reporte_edit_selected_obra_id,
                                     AppData.reporte_edit_dias_cedula_val,
                                     AppData.reporte_edit_dias_obra_val
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal para Vincular Trabajador a Otra Obra Adicional
+    if AppData.show_reporte_add_obra_modal : Rectangle {
+        background: #00000088;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {}
+
+        Rectangle {
+            width: 580px;
+            height: (AppData.reporte_add_dropdown_open ? 590px : 480px) + (AppData.reporte_add_alert_show ? 54px : 0px);
+            border-radius: 12px;
+            background: #ffffff;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+            animate height { duration: 150ms; easing: ease-out; }
+
+            VerticalLayout {
+                padding: 22px;
+                spacing: 14px;
+                alignment: space-between;
+
+                // 1. Título y Cabecera
+                HorizontalLayout {
+                    alignment: space-between;
+                    VerticalLayout {
+                        spacing: 3px;
+                        Text {
+                            text: "Vincular Trabajador a Otra Obra";
+                            font-size: 18px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: "Trabajador: " + AppData.reporte_add_worker_name + (AppData.reporte_add_periodo != "" ? " • " + AppData.reporte_add_periodo : "");
+                            font-size: 13.5px;
+                            font-weight: 600;
+                            color: #2563eb;
+                            overflow: elide;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: btn_close_add_obra.has-hover ? #fee2e2 : #f1f5f9;
+                        Text { text: "✕"; font-size: 14px; font-weight: 800; color: #ef4444; horizontal-alignment: center; vertical-alignment: center; }
+                        btn_close_add_obra := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_close_add_obra_modal(); }
+                        }
+                    }
+                }
+
+                // Resumen de Días del Trabajador (Cédula vs Asignados vs Disponibles)
+                Rectangle {
+                    border-radius: 8px;
+                    background: #f0fdf4;
+                    border-width: 1px;
+                    border-color: #bbf7d0;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 6px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "📊 Balance de Días en el Periodo:";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #166534;
+                            }
+                            Text {
+                                text: "Disponibles para asignar: " + AppData.reporte_add_dias_available + " días";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: AppData.reporte_add_dias_available > 0 ? #15803d : #b91c1c;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+
+                            Rectangle {
+                                height: 26px;
+                                border-radius: 4px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: #bbf7d0;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text { text: "Días Cédula: " + AppData.reporte_add_dias_cedula; font-size: 11.5px; font-weight: 700; color: #166534; vertical-alignment: center; }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 26px;
+                                border-radius: 4px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: #bbf7d0;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text { text: "Ya Asignados: " + AppData.reporte_add_dias_used; font-size: 11.5px; font-weight: 700; color: #1e40af; vertical-alignment: center; }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 26px;
+                                border-radius: 4px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: AppData.reporte_add_dias_available > 0 ? #bbf7d0 : #fecdd3;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Restantes: " + AppData.reporte_add_dias_available;
+                                        font-size: 11.5px;
+                                        font-weight: 700;
+                                        color: AppData.reporte_add_dias_available > 0 ? #15803d : #be123c;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ALERTA TEMPORAL EN EL MODAL (Visible ante errores/restricciones)
+                if AppData.reporte_add_alert_show : Rectangle {
+                    border-radius: 8px;
+                    background: AppData.reporte_add_alert_type == "error" ? #fef2f2 : (AppData.reporte_add_alert_type == "warning" ? #fffbeb : #eff6ff);
+                    border-width: 1.5px;
+                    border-color: AppData.reporte_add_alert_type == "error" ? #f87171 : (AppData.reporte_add_alert_type == "warning" ? #fde68a : #93c5fd);
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 10px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 10px;
+                        cross-axis-alignment: center;
+
+                        Text {
+                            text: AppData.reporte_add_alert_type == "error" ? "⛔" : (AppData.reporte_add_alert_type == "warning" ? "⚠️" : "ℹ");
+                            font-size: 16px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: AppData.reporte_add_alert_text;
+                            font-size: 12.5px;
+                            font-weight: 700;
+                            color: AppData.reporte_add_alert_type == "error" ? #991b1b : (AppData.reporte_add_alert_type == "warning" ? #92400e : #1e40af);
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: btn_dismiss_add_alert.has-hover ? #fecaca : transparent;
+                            Text {
+                                text: "✕";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #991b1b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            btn_dismiss_add_alert := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppData.reporte_add_alert_show = false; }
+                            }
+                        }
+                    }
+                }
+
+                // Campo Seleccionar Obra Adicional (Combobox con filtro)
+                VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "Seleccionar Obra Adicional (SIROC):";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #334155;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: AppData.reporte_add_selected_obra_id != "" ? "Obra Seleccionada" : "Selecciona una obra...";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: AppData.reporte_add_selected_obra_id != "" ? #166534 : #64748b;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 6px;
+                        background: #ffffff;
+                        border-width: 1.5px;
+                        border-color: AppData.reporte_add_dropdown_open ? #3b82f6 : #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 6px;
+                            spacing: 8px;
+                            alignment: space-between;
+
+                            add_search_input := LineEdit {
+                                horizontal-stretch: 1;
+                                placeholder-text: "Escribe para buscar obra...";
+                                text <=> AppData.reporte_add_search_query;
+                                edited(text) => {
+                                    AppData.reporte_add_dropdown_open = true;
+                                    AppLogic.reporte_filter_add_obras(text);
+                                }
+                            }
+
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 4px;
+                                background: btn_add_drop_toggle.has-hover ? #e2e8f0 : transparent;
+                                y: (parent.height - self.height) / 2;
+
+                                Text {
+                                    text: AppData.reporte_add_dropdown_open ? "▴" : "▾";
+                                    font-size: 14px;
+                                    font-weight: 800;
+                                    color: #2563eb;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                btn_add_drop_toggle := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        AppData.reporte_add_dropdown_open = !AppData.reporte_add_dropdown_open;
+                                        if AppData.reporte_add_dropdown_open {
+                                            AppLogic.reporte_filter_add_obras("");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Menú desplegable Combobox
+                    if AppData.reporte_add_dropdown_open : Rectangle {
+                        height: 135px;
+                        border-radius: 6px;
+                        background: #ffffff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+                        drop-shadow-blur: 10px;
+                        drop-shadow-color: #00000020;
+                        clip: true;
+
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 4px;
+
+                                for o in AppData.reporte_add_filtered_obras : Rectangle {
+                                    height: 34px;
+                                    border-radius: 4px;
+                                    background: btn_add_pick_item.has-hover ? #dbeafe : (AppData.reporte_add_selected_obra_id == o.id ? #eff6ff : #ffffff);
+                                    border-width: 1px;
+                                    border-color: AppData.reporte_add_selected_obra_id == o.id ? #93c5fd : #f1f5f9;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Text { text: "🏗"; font-size: 12px; vertical-alignment: center; }
+                                        Text {
+                                            text: o.label;
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #1e3a8a;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    btn_add_pick_item := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            add_search_input.text = o.label;
+                                            AppData.reporte_add_search_query = o.label;
+                                            AppData.reporte_add_dropdown_open = false;
+                                            AppLogic.reporte_select_add_obra(o.id, o.label);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Info de vigencia de obra seleccionada
+                if AppData.reporte_add_obra_vigencia_info != "" : Rectangle {
+                    border-radius: 6px;
+                    background: #eff6ff;
+                    border-width: 1px;
+                    border-color: #bfdbfe;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        Text {
+                            text: AppData.reporte_add_obra_vigencia_info;
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #1e40af;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Campo Días para la nueva obra
+                VerticalLayout {
+                    spacing: 6px;
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text { text: "Días para esta obra:"; font-size: 13px; font-weight: 700; color: #1e40af; }
+                        Text { text: "(Máx. disponibles: " + AppData.reporte_add_dias_available + " días)"; font-size: 12px; font-weight: 700; color: #64748b; }
+                    }
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 6px;
+                        background: #ffffff;
+                        border-width: 1.5px;
+                        border-color: #93c5fd;
+
+                        LineEdit {
+                            text <=> AppData.reporte_add_dias_obra_val;
+                            placeholder-text: "Ej: " + AppData.reporte_add_dias_available;
+                        }
+                    }
+                }
+
+                // Botones Cancelar y Vincular
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+
+                    Rectangle {
+                        height: 38px;
+                        width: 105px;
+                        border-radius: 6px;
+                        background: btn_cancel_add_obra.has-hover ? #e2e8f0 : #f1f5f9;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        Text { text: "Cancelar"; font-size: 13px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                        btn_cancel_add_obra := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_close_add_obra_modal(); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 38px;
+                        width: 180px;
+                        border-radius: 6px;
+                        background: btn_submit_add_obra.has-hover ? #15803d : #16a34a;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "➕"; font-size: 12px; vertical-alignment: center; }
+                            Text { text: "Vincular a Obra"; font-size: 13px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                        }
+
+                        btn_submit_add_obra := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_submit_add_obra(
+                                    AppData.reporte_add_row_id,
+                                    AppData.reporte_add_selected_obra_id,
+                                    AppData.reporte_add_dias_obra_val
                                 );
                             }
                         }

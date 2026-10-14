@@ -1462,8 +1462,19 @@ pub fn delete_all_cedulas_for_revision(
         let n = client
             .execute("DELETE FROM public.liquidaciones", &[])
             .map_err(|e| format!("Error al borrar todas las liquidaciones: {}", e))?;
-        let _ = client.execute("DELETE FROM public.reportes_vinculaciones_obras_liquidaciones", &[]);
-        let _ = client.execute("DELETE FROM public.reportes_liquidaciones", &[]);
+        crate::app_logger::log_db_op(
+            "DELETE",
+            &[
+                "public.vinculaciones_obras_liquidaciones",
+                "public.detalles_liquidaciones",
+                "public.liquidaciones",
+                "public.reportes_vinculaciones_obras_liquidaciones",
+                "public.reportes_liquidaciones",
+            ],
+            "DELETE FROM liquidaciones... (todas las revisiones)",
+            "Eliminación total de liquidaciones",
+            Some(n as usize),
+        );
         Ok(n)
     } else {
         let rev_uuid = Uuid::parse_str(id_revision).map_err(|e| format!("UUID de revisión inválido: {}", e))?;
@@ -1483,6 +1494,20 @@ pub fn delete_all_cedulas_for_revision(
             &[&rev_uuid],
         );
         let _ = client.execute("DELETE FROM public.reportes_liquidaciones WHERE id_revision = $1", &[&rev_uuid]);
+
+        crate::app_logger::log_db_op(
+            "DELETE",
+            &[
+                "public.vinculaciones_obras_liquidaciones",
+                "public.detalles_liquidaciones",
+                "public.liquidaciones",
+                "public.reportes_vinculaciones_obras_liquidaciones",
+                "public.reportes_liquidaciones",
+            ],
+            "DELETE FROM liquidaciones... WHERE id_revision = $1",
+            &format!("id_revision={}", id_revision),
+            Some(n as usize),
+        );
         Ok(n)
     }
 }

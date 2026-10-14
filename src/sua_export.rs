@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 
 /// Limpia y normaliza texto para formato ASCII estricto requerido por SUA IMSS.
 /// - Convierte vocales con acento/diéresis a mayúsculas ASCII sin acento.
@@ -29,7 +29,8 @@ pub fn clean_ascii_sua(text: &str) -> String {
 /// Divide un nombre completo en (Primer Apellido / Paterno, Segundo Apellido / Materno, Nombres)
 /// reconociendo prefijos compuestos típicos en apellidos hispanos ("DE", "DEL", "DE LA", etc.).
 pub fn parse_mexican_name(full: &str) -> (String, String, String) {
-    let clean = clean_ascii_sua(full);
+    let (clean_full, _) = crate::cedulas::employees::clean_name_and_extract_pension(full);
+    let clean = clean_ascii_sua(&clean_full);
     let words: Vec<&str> = clean.split_whitespace().collect();
     if words.is_empty() {
         return (String::new(), String::new(), String::new());
@@ -133,6 +134,8 @@ pub fn resolver_rfc_valido(rfc: &str, curp: &str, nombre: &str, nss: &str) -> St
     let clean_rfc: String = rfc.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let upper_rfc = clean_rfc.to_ascii_uppercase();
 
+    let is_corrupted_pension_rfc = upper_rfc.starts_with("PCV") || upper_rfc.starts_with("PIV") || upper_rfc.starts_with("P/");
+
     if (upper_rfc.len() == 13 || upper_rfc.len() == 12)
         && upper_rfc != "0000000000000"
         && upper_rfc != "XAXX010101000"
@@ -140,6 +143,7 @@ pub fn resolver_rfc_valido(rfc: &str, curp: &str, nombre: &str, nss: &str) -> St
         && upper_rfc != "PEGI800101XYZ"
         && upper_rfc != "CAEH890101C10"
         && upper_rfc != "RASF970101R39"
+        && !is_corrupted_pension_rfc
     {
         let l = if upper_rfc.len() == 13 { &upper_rfc[..4] } else { &upper_rfc[..3] };
         let d = if upper_rfc.len() == 13 { &upper_rfc[4..10] } else { &upper_rfc[3..9] };
@@ -148,9 +152,10 @@ pub fn resolver_rfc_valido(rfc: &str, curp: &str, nombre: &str, nss: &str) -> St
         }
     }
 
-    let clean_nom = nombre.trim();
+    let (clean_nom, _) = crate::cedulas::employees::clean_name_and_extract_pension(nombre);
+    let clean_nom = clean_nom.trim();
     if !clean_nom.is_empty() && !clean_nom.eq_ignore_ascii_case("NONE") && clean_nom.chars().any(|c| c.is_alphabetic()) {
-        let calc = crate::cedulas::rfc_sat::calcular_rfc_sat(nombre, Some(curp), Some(nss));
+        let calc = crate::cedulas::rfc_sat::calcular_rfc_sat(clean_nom, Some(curp), Some(nss));
         if calc.len() == 13 && calc != "0000000000000" && calc != "XAXX010101000" {
             return calc;
         }
@@ -226,13 +231,20 @@ pub fn sanitize_curp(curp: &str) -> String {
 pub fn resolver_curp_valida(curp: &str, nombre: &str, rfc: &str, nss: &str) -> String {
     let clean: String = curp.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let upper = clean.to_ascii_uppercase();
-    if upper.len() == 18 && crate::cedulas::curp_renapo::validar_curp_formato(&upper) {
+
+    let (clean_nom, _) = crate::cedulas::employees::clean_name_and_extract_pension(nombre);
+    let clean_nom = clean_nom.trim();
+
+    let is_corrupted_pension_curp = (upper.starts_with("PCV") || upper.starts_with("PIV"))
+        && !clean_nom.is_empty()
+        && !clean_nom.starts_with('P');
+
+    if !is_corrupted_pension_curp && upper.len() == 18 && crate::cedulas::curp_renapo::validar_curp_formato(&upper) {
         return upper;
     }
 
-    let clean_nom = nombre.trim();
     if !clean_nom.is_empty() && !clean_nom.eq_ignore_ascii_case("NONE") && clean_nom.chars().any(|c| c.is_alphabetic()) {
-        let calc = crate::cedulas::curp_renapo::calcular_curp_oficial(nombre, Some(rfc), Some(nss), None, None);
+        let calc = crate::cedulas::curp_renapo::calcular_curp_oficial(clean_nom, Some(rfc), Some(nss), None, None);
         if calc.len() == 18 && crate::cedulas::curp_renapo::validar_curp_formato(&calc) {
             return calc;
         }
@@ -296,6 +308,7 @@ pub struct SuaWorkerRecord {
     pub rfc: String,
     pub curp: String,
     pub nombre_completo: String,
+    pub pensionado: String,
     pub fecha_alta: Option<NaiveDate>,
     pub mes_periodo: u32,
     pub anio_periodo: i32,
@@ -335,10 +348,10 @@ pub fn format_aseg_line(rec: &SuaWorkerRecord) -> String {
     let sdi_cents = ((rec.sdi * 100.0).round() as i64).clamp(0, 9999999);
     let sdi_str = format!("{:07}", sdi_cents); // 7
 
-    // Clave de ubicación: omitir si contiene palabras reservadas de estatus ("ALTA", "BAJA", etc.)
+    // Clave de ubicación: omitir si contiene palabras reservadas de estatus ("ALTA", "BAJA", "P/CV", etc.)
     let clave_raw = clean_ascii_sua(&rec.clave_ubicacion);
     let clave_upper = clave_raw.trim().to_ascii_uppercase();
-    let clave_filtrada = if clave_upper == "ALTA" || clave_upper == "BAJA" || clave_upper == "REIN" || clave_upper == "MS" || clave_upper == "M/S" {
+    let clave_filtrada = if clave_upper == "ALTA" || clave_upper == "BAJA" || clave_upper == "REIN" || clave_upper == "MS" || clave_upper == "M/S" || clave_upper == "P/CV" || clave_upper == "P/IV" || clave_upper == "P" {
         String::new()
     } else {
         clave_raw
@@ -550,6 +563,36 @@ pub fn format_cred_line(cred: &SuaCredRecord) -> String {
     line
 }
 
+/// Registro de Movimiento de Personal a Obra (MovObra.txt - 48 chars)
+/// Layout oficial del SUA IMSS: Registro de Obra -> Importar Datos de Registro -> Movimientos de Obra
+#[derive(Debug, Clone)]
+pub struct SuaMovObraRecord {
+    pub registro_patronal: String,
+    pub nss: String,
+    pub fecha_inicio: NaiveDate,
+    pub fecha_fin: NaiveDate,
+    pub folio_obra: String,
+}
+
+pub fn format_movobra_line(rec: &SuaMovObraRecord) -> String {
+    let rp = sanitize_rp(&rec.registro_patronal); // 11
+    let nss = sanitize_nss(&rec.nss);             // 11
+    let tipo_mov = "30";                          // 2 (Asignación de Personal a Obra)
+    let f_ini_str = format!("{:02}{:02}{:04}", rec.fecha_inicio.day(), rec.fecha_inicio.month(), rec.fecha_inicio.year()); // 8 (DDMMAAAA)
+    let f_fin_str = format!("{:02}{:02}{:04}", rec.fecha_fin.day(), rec.fecha_fin.month(), rec.fecha_fin.year());       // 8 (DDMMAAAA)
+    let clean_obra = clean_ascii_sua(&rec.folio_obra);
+    let folio_obra_clean: String = clean_obra.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let folio_obra_fmt = if folio_obra_clean.len() >= 8 {
+        folio_obra_clean[..8].to_string()
+    } else {
+        format!("{:<8}", folio_obra_clean)
+    }; // 8
+
+    let line = format!("{}{}{}{}{}{}", rp, nss, tipo_mov, f_ini_str, f_fin_str, folio_obra_fmt);
+    debug_assert_eq!(line.len(), 48, "La línea de MovObra debe medir exactamente 48 caracteres");
+    line
+}
+
 /// Resultado del proceso de exportación a archivos SUA IMSS
 #[derive(Debug, Clone)]
 pub struct SuaExportResult {
@@ -564,32 +607,23 @@ pub struct SuaExportResult {
     pub cred_count: usize,
     pub incap_filename: String,
     pub incap_count: usize,
+    pub mov_obra_filename: String,
+    pub mov_obra_count: usize,
     pub total_workers: usize,
 }
 
-/// Genera el paquete completo de 5 archivos SUA con formato estricto y orden numérico para importación:
+/// Genera el paquete completo de 6 archivos SUA con formato estricto y orden numérico para importación:
 /// 1. 1_ASEG_<Folio>.TXT (Datos de los Trabajadores / Altas - 168 chars)
-///    ¿Por qué va primero?: Es el archivo principal que da de alta o registra la información base
-///    de los nuevos trabajadores en el sistema (NSS, nombres, CURP, etc.). El SUA requiere que la ficha
-///    del trabajador exista antes de poder asignarle cualquier evento posterior.
 /// 2. 2_AFIL_<Folio>.TXT (Datos Afiliatorios Adicionales - 80 chars)
-///    ¿Por qué va segundo?: Complementa la información personal de los colaboradores que ya fueron
-///    identificados o creados previamente en el sistema (lugar de nacimiento, código postal, tipo de salario, etc.).
-/// 3. 3_MOVT_<Folio>.TXT (Movimientos Afiliatorios - 49 chars)
-///    ¿Por qué va tercero?: Una vez que el trabajador ya está registrado en la base de datos, se suben
-///    sus incidencias contractuales y de estatus, tales como reingresos, modificaciones de salario diario integrado o bajas.
-/// 4. 4_CRED_<Folio>.TXT (Amortizaciones de Crédito INFONAVIT / MOVCR - 51 chars)
-///    ¿Por qué va cuarto?: Contiene las incidencias relacionadas con los créditos de vivienda de los trabajadores
-///    (inicio de retención, suspensión o modificación de descuentos). Requiere que el trabajador ya cuente con
-///    un estatus vigente dentro de la empresa en el SUA.
-/// 5. 5_INCAP_<Folio>.TXT (Datos de Incapacidades - 49 chars)
-///    ¿Por qué va al último?: Registra los folios y días de incapacidades médicas otorgadas por el IMSS.
-///    Se sube al final porque el sistema valida de forma estricta que correspondan a un trabajador activo y que
-///    no se traslapen con fechas donde el empleado ya se encuentre dado de baja.
+/// 3. 3_MOVOBRA_<Folio>.TXT (Movimiento de Personal a Obra - 48 chars)
+/// 4. 4_MOVT_<Folio>.TXT (Movimientos Afiliatorios / Bajas, Reingresos, Modificaciones - 49 chars)
+/// 5. 5_CRED_<Folio>.TXT (Amortizaciones de Crédito INFONAVIT / MOVCR - 51 chars)
+/// 6. 6_INCAP_<Folio>.TXT (Datos de Incapacidades - 49 chars)
 pub fn export_sua_files(
     folder_path: &std::path::Path,
     folio_revision: &str,
     rows: &[crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb],
+    obras: &[crate::db::reporte_liquidaciones::ObraOptionDb],
 ) -> Result<SuaExportResult, String> {
     if rows.is_empty() {
         return Err("No hay registros disponibles para exportar al SUA.".to_string());
@@ -611,9 +645,15 @@ pub fn export_sua_files(
 
     let aseg_filename = format!("1_ASEG_{}.TXT", folio);
     let afil_filename = format!("2_AFIL_{}.TXT", folio);
-    let movt_filename = format!("3_MOVT_{}.TXT", folio);
-    let cred_filename = format!("4_CRED_{}.TXT", folio);
-    let incap_filename = format!("5_INCAP_{}.TXT", folio);
+    let mov_obra_filename = format!("3_MOVOBRA_{}.TXT", folio);
+    let movt_filename = format!("4_MOVT_{}.TXT", folio);
+    let cred_filename = format!("5_CRED_{}.TXT", folio);
+    let incap_filename = format!("6_INCAP_{}.TXT", folio);
+
+    let obras_by_id: std::collections::HashMap<uuid::Uuid, &crate::db::reporte_liquidaciones::ObraOptionDb> =
+        obras.iter().map(|o| (o.id, o)).collect();
+    let obras_by_num: std::collections::HashMap<String, &crate::db::reporte_liquidaciones::ObraOptionDb> =
+        obras.iter().map(|o| (o.numero.trim().to_string(), o)).collect();
 
     // 1. Agrupar filas por trabajador único (RP + NSS)
     let mut workers_map: std::collections::BTreeMap<(String, String), Vec<&crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb>> = std::collections::BTreeMap::new();
@@ -626,6 +666,7 @@ pub fn export_sua_files(
     let mut workers: Vec<SuaWorkerRecord> = Vec::with_capacity(workers_map.len());
     let mut movements: Vec<SuaMovementRecord> = Vec::new();
     let mut incaps: Vec<SuaIncapRecord> = Vec::new();
+    let mut mov_obras: Vec<SuaMovObraRecord> = Vec::new();
     let creds: Vec<SuaCredRecord> = Vec::new();
 
     let mut incap_counter = 1;
@@ -639,10 +680,11 @@ pub fn export_sua_files(
 
         let first = emp_rows[0];
 
-        // Tomar el mejor nombre, RFC y CURP disponibles
+        // Tomar el mejor nombre, RFC, CURP y estatus de pensión disponibles
         let mut best_nombre = first.nombre_trabajador.clone();
         let mut best_rfc = first.rfc.clone();
         let mut best_curp = first.curp.clone();
+        let mut best_pensionado = first.pensionado.clone();
 
         for r in &emp_rows {
             if best_nombre.trim().is_empty() && !r.nombre_trabajador.trim().is_empty() {
@@ -654,12 +696,25 @@ pub fn export_sua_files(
             if best_curp.trim().is_empty() && !r.curp.trim().is_empty() {
                 best_curp = r.curp.clone();
             }
+            if best_pensionado.trim().is_empty() && !r.pensionado.trim().is_empty() {
+                best_pensionado = r.pensionado.clone();
+            }
+        }
+
+        // Si el nombre aún contiene marcadores de pensión (p. ej. "P/CV FLORES RUIZ GUILLERMO"),
+        // limpiarlo completamente y extraer el estatus de pensión
+        let (clean_nombre, pension_from_name) = crate::cedulas::employees::clean_name_and_extract_pension(&best_nombre);
+        best_nombre = clean_nombre;
+        if best_pensionado.trim().is_empty() {
+            if let Some(p) = pension_from_name {
+                best_pensionado = p;
+            }
         }
 
         let m_first = crate::cedulas::business::month_to_num(&first.mes_periodo).clamp(1, 12);
 
         let cl_mov = first.clave.trim().to_ascii_uppercase();
-        let es_palabra_mov = cl_mov == "ALTA" || cl_mov == "BAJA" || cl_mov == "REIN" || cl_mov == "MS" || cl_mov == "M/S";
+        let es_palabra_mov = cl_mov == "ALTA" || cl_mov == "BAJA" || cl_mov == "REIN" || cl_mov == "MS" || cl_mov == "M/S" || cl_mov == "P/CV" || cl_mov == "P/IV" || cl_mov == "P";
         let ubicacion_final = if es_palabra_mov || cl_mov.is_empty() {
             first.obra_numero.clone()
         } else {
@@ -679,6 +734,7 @@ pub fn export_sua_files(
             rfc: rfc_resuelto,
             curp: curp_resuelto,
             nombre_completo: best_nombre,
+            pensionado: best_pensionado,
             fecha_alta: first.fecha,
             mes_periodo: m_first,
             anio_periodo: first.anio_periodo as i32,
@@ -688,116 +744,244 @@ pub fn export_sua_files(
             tipo_trabajador: '1',
         };
 
-        // En SUA, los trabajadores vigentes ya son registrados y dados de alta mediante el archivo 1_ASEG.
-        // El archivo 3_MOVT es exclusivamente para incidencias y movimientos posteriores:
-        // - "02": Baja
-        // - "08": Reingreso (únicamente si es posterior a una baja, idx > 0)
-        // - "07": Modificación de salario (cuando cambia el SDI respecto al inicial o clave M/S)
-        // - "11": Ausentismo / Licencia sin goce de sueldo
-        // NO se debe enviar movimiento "08" al trabajador vigente inicial, pues el SUA lo rechaza con:
-        // "Trabajador vigente, registre primero el movimiento de baja".
-        let mut prev_sdi = first.sdi;
-        for (idx, r) in emp_rows.iter().enumerate() {
+        // Agrupar filas del empleado cronológicamente por mes
+        let mut emp_months: Vec<((i32, u32), Vec<&crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb>)> = Vec::new();
+        for r in &emp_rows {
             let m_curr = crate::cedulas::business::month_to_num(&r.mes_periodo).clamp(1, 12);
-            let cl_upper = r.clave.trim().to_ascii_uppercase();
+            let y_curr = r.anio_periodo as i32;
+            if let Some((last_key, list)) = emp_months.last_mut() {
+                if *last_key == (y_curr, m_curr) {
+                    list.push(r);
+                    continue;
+                }
+            }
+            emp_months.push(((y_curr, m_curr), vec![r]));
+        }
 
-            // 1. Baja ("02") si está indicada explícitamente en la fila
-            if cl_upper.contains("BAJA") || cl_upper == "02" {
-                movements.push(SuaMovementRecord {
-                    registro_patronal: rp.clone(),
-                    nss: nss.clone(),
-                    tipo_movimiento: "02".to_string(),
-                    fecha: r.fecha,
-                    mes_periodo: m_curr,
-                    anio_periodo: r.anio_periodo as i32,
-                    folio_incapacidad: String::new(),
-                    dias_incidencia: 0,
-                    sdi: r.sdi,
+        let mut prev_sdi = first.sdi;
+        let mut is_on_baja = false;
+        let mut is_first_month = true;
+
+        for ((y_curr, m_curr), month_rows) in emp_months {
+            let (m_start, m_end, _) = crate::db::reporte_liquidaciones::get_month_date_range(m_curr, y_curr)
+                .unwrap_or_else(|| {
+                    let s = NaiveDate::from_ymd_opt(y_curr, m_curr, 1).unwrap();
+                    (s, s, 30)
                 });
-            }
-            // 2. Reingreso ("08") SOLO para movimientos posteriores (idx > 0) que indiquen reingreso explícito
-            else if idx > 0 && (cl_upper.contains("REIN") || cl_upper == "08") {
-                movements.push(SuaMovementRecord {
-                    registro_patronal: rp.clone(),
-                    nss: nss.clone(),
-                    tipo_movimiento: "08".to_string(),
-                    fecha: r.fecha,
-                    mes_periodo: m_curr,
-                    anio_periodo: r.anio_periodo as i32,
-                    folio_incapacidad: String::new(),
-                    dias_incidencia: 0,
-                    sdi: r.sdi,
-                });
-                prev_sdi = r.sdi;
-            }
-            // 3. Modificación de salario ("07"):
-            // En SUA, una modificación de salario REQUIERE estrictamente que el nuevo SDI sea DIFERENTE al anterior.
-            // Si el SDI es igual al previo ((r.sdi - prev_sdi).abs() <= 0.01), el SUA rechaza el movimiento con:
-            // "El Salario Diario Integrado no puede ser igual al anterior".
-            else if idx > 0 && (r.sdi - prev_sdi).abs() > 0.01 && r.sdi > 0.0 {
-                movements.push(SuaMovementRecord {
-                    registro_patronal: rp.clone(),
-                    nss: nss.clone(),
-                    tipo_movimiento: "07".to_string(),
-                    fecha: r.fecha,
-                    mes_periodo: m_curr,
-                    anio_periodo: r.anio_periodo as i32,
-                    folio_incapacidad: String::new(),
-                    dias_incidencia: 0,
-                    sdi: r.sdi,
-                });
-                prev_sdi = r.sdi;
-            } else if r.sdi > 0.0 {
-                prev_sdi = r.sdi;
+
+            // Identificar fecha de baja en el mes si existe
+            let month_baja_date = month_rows.iter()
+                .filter(|r| {
+                    let cl = r.clave.trim().to_ascii_uppercase();
+                    (cl.contains("BAJA") || cl == "02") && r.fecha.is_some()
+                })
+                .filter_map(|r| r.fecha)
+                .filter(|f| *f >= m_start && *f <= m_end)
+                .min();
+
+            // Identificar fecha de alta o reingreso en el mes si existe
+            let month_alta_date = month_rows.iter()
+                .filter(|r| {
+                    let cl = r.clave.trim().to_ascii_uppercase();
+                    (cl.contains("ALTA") || cl.contains("REIN") || cl == "08" || cl == "01") && r.fecha.is_some()
+                })
+                .filter_map(|r| r.fecha)
+                .filter(|f| *f >= m_start && *f <= m_end)
+                .max();
+
+            // 1. Procesar incidencias y movimientos de afiliación (3_MOVT, 5_INCAP)
+            for (idx_in_month, r) in month_rows.iter().enumerate() {
+                let cl_upper = r.clave.trim().to_ascii_uppercase();
+                let is_baja_row = cl_upper.contains("BAJA") || cl_upper == "02";
+                let is_rein_row = cl_upper.contains("REIN") || cl_upper == "08";
+
+                // Baja ("02")
+                if is_baja_row {
+                    let baja_sdi = if r.sdi > 0.0 { r.sdi } else { prev_sdi };
+                    movements.push(SuaMovementRecord {
+                        registro_patronal: rp.clone(),
+                        nss: nss.clone(),
+                        tipo_movimiento: "02".to_string(),
+                        fecha: r.fecha,
+                        mes_periodo: m_curr,
+                        anio_periodo: y_curr,
+                        folio_incapacidad: String::new(),
+                        dias_incidencia: 0,
+                        sdi: baja_sdi,
+                    });
+                    is_on_baja = true;
+                    prev_sdi = baja_sdi;
+                }
+                // Reingreso explícito ("08") posterior a una baja o posterior al mes inicial
+                else if is_rein_row && (!is_first_month || idx_in_month > 0) {
+                    movements.push(SuaMovementRecord {
+                        registro_patronal: rp.clone(),
+                        nss: nss.clone(),
+                        tipo_movimiento: "08".to_string(),
+                        fecha: r.fecha,
+                        mes_periodo: m_curr,
+                        anio_periodo: y_curr,
+                        folio_incapacidad: String::new(),
+                        dias_incidencia: 0,
+                        sdi: r.sdi,
+                    });
+                    is_on_baja = false;
+                    prev_sdi = r.sdi;
+                }
+                // Reingreso implícito ("08"): Si el trabajador causó BAJA en un periodo previo (is_on_baja == true)
+                // y ahora en este mes tiene actividad (días > 0 o SDI > 0 sin ser fila de baja),
+                // el SUA requiere obligatoriamente registrar su reingreso antes de permitir asignaciones a obra.
+                else if is_on_baja && (r.dias_cedula > 0 || r.dias_obra > 0 || r.sdi > 0.0) {
+                    let rein_fecha = month_alta_date
+                        .or(r.fecha)
+                        .unwrap_or(m_start);
+                    let rein_sdi = if r.sdi > 0.0 { r.sdi } else { prev_sdi };
+                    movements.push(SuaMovementRecord {
+                        registro_patronal: rp.clone(),
+                        nss: nss.clone(),
+                        tipo_movimiento: "08".to_string(),
+                        fecha: Some(rein_fecha),
+                        mes_periodo: m_curr,
+                        anio_periodo: y_curr,
+                        folio_incapacidad: String::new(),
+                        dias_incidencia: 0,
+                        sdi: rein_sdi,
+                    });
+                    is_on_baja = false;
+                    prev_sdi = rein_sdi;
+                }
+                // Modificación de salario ("07"): En SUA requiere que el SDI sea diferente al anterior.
+                else if !is_on_baja && (!is_first_month || idx_in_month > 0) && (r.sdi - prev_sdi).abs() > 0.01 && r.sdi > 0.0 {
+                    movements.push(SuaMovementRecord {
+                        registro_patronal: rp.clone(),
+                        nss: nss.clone(),
+                        tipo_movimiento: "07".to_string(),
+                        fecha: r.fecha,
+                        mes_periodo: m_curr,
+                        anio_periodo: y_curr,
+                        folio_incapacidad: String::new(),
+                        dias_incidencia: 0,
+                        sdi: r.sdi,
+                    });
+                    prev_sdi = r.sdi;
+                } else if r.sdi > 0.0 {
+                    prev_sdi = r.sdi;
+                }
+
+                // Ausentismo ("11")
+                let aus_dias = r.aus.round() as i16;
+                if aus_dias > 0 {
+                    movements.push(SuaMovementRecord {
+                        registro_patronal: rp.clone(),
+                        nss: nss.clone(),
+                        tipo_movimiento: "11".to_string(),
+                        fecha: r.fecha,
+                        mes_periodo: m_curr,
+                        anio_periodo: y_curr,
+                        folio_incapacidad: String::new(),
+                        dias_incidencia: aus_dias,
+                        sdi: r.sdi,
+                    });
+                }
+
+                // Licencia ("11")
+                let lic_dias = r.lic.round() as i16;
+                if lic_dias > 0 {
+                    movements.push(SuaMovementRecord {
+                        registro_patronal: rp.clone(),
+                        nss: nss.clone(),
+                        tipo_movimiento: "11".to_string(),
+                        fecha: r.fecha,
+                        mes_periodo: m_curr,
+                        anio_periodo: y_curr,
+                        folio_incapacidad: String::new(),
+                        dias_incidencia: lic_dias,
+                        sdi: r.sdi,
+                    });
+                }
+
+                // Incapacidad ("12")
+                let inc_dias = r.inc.round() as i16;
+                if inc_dias > 0 {
+                    incaps.push(SuaIncapRecord {
+                        registro_patronal: rp.clone(),
+                        nss: nss.clone(),
+                        fecha: r.fecha,
+                        mes_periodo: m_curr,
+                        anio_periodo: y_curr,
+                        folio: format!("IN{:06}", incap_counter),
+                        dias: inc_dias,
+                        sdi: r.sdi,
+                    });
+                    incap_counter += 1;
+                }
             }
 
-            // 4. Ausentismo ("11")
-            let aus_dias = r.aus.round() as i16;
-            if aus_dias > 0 {
-                movements.push(SuaMovementRecord {
-                    registro_patronal: rp.clone(),
-                    nss: nss.clone(),
-                    tipo_movimiento: "11".to_string(),
-                    fecha: r.fecha,
-                    mes_periodo: m_curr,
-                    anio_periodo: r.anio_periodo as i32,
-                    folio_incapacidad: String::new(),
-                    dias_incidencia: aus_dias,
-                    sdi: r.sdi,
-                });
+            // 2. Movimiento de Personal a Obra (MovObra.txt / 6_MOVOBRA_ / tipo 30)
+            for r in &month_rows {
+                if r.id_registro_obra.is_some() && r.dias_obra > 0 && !r.obra_numero.trim().is_empty() {
+                    // Ventana activa del trabajador en el mes:
+                    let worker_start = if let Some(fa) = month_alta_date {
+                        fa.max(m_start)
+                    } else {
+                        m_start
+                    };
+
+                    // En SUA, si un trabajador causa BAJA en fecha D, su estatus en el SUA pasa a ser BAJA a partir de D.
+                    // Para evitar el error "El Trabajador no se encuentra vigente en el periodo", la fecha final
+                    // de asignación a obra no debe tocar ni rebasar la fecha de baja (debe ser D - 1 día).
+                    let worker_end = if let Some(fb) = month_baja_date {
+                        (fb - chrono::Duration::days(1)).min(m_end)
+                    } else {
+                        m_end
+                    };
+
+                    if worker_start <= worker_end {
+                        // Fechas de vigencia de la obra
+                        let obra_opt = r.id_registro_obra
+                            .and_then(|id| obras_by_id.get(&id).copied())
+                            .or_else(|| obras_by_num.get(r.obra_numero.trim()).copied());
+
+                        let obra_start = obra_opt.and_then(|o| o.fecha_inicio).unwrap_or(m_start).max(m_start);
+                        let obra_end = obra_opt.and_then(|o| o.fecha_fin).unwrap_or(m_end).min(m_end);
+
+                        // Intersección válida entre trabajador y obra
+                        let valid_start = worker_start.max(obra_start);
+                        let valid_end = worker_end.min(obra_end);
+
+                        if valid_start <= valid_end {
+                            let d_obra = r.dias_obra as i64;
+                            let max_avail_days = (valid_end - valid_start).num_days() + 1;
+                            let days_to_use = d_obra.clamp(1, max_avail_days);
+                            let span = (days_to_use - 1).max(0);
+
+                            // Si hubo baja en el mes, el trabajador laboró hasta su último día activo (valid_end).
+                            // De lo contrario, se asigna desde valid_start en adelante.
+                            let (f_ini, f_fin) = if month_baja_date.is_some() {
+                                let fin = valid_end;
+                                let ini = (fin - chrono::Duration::days(span)).max(valid_start);
+                                (ini, fin)
+                            } else {
+                                let ini = valid_start;
+                                let fin = (ini + chrono::Duration::days(span)).min(valid_end);
+                                (ini, fin)
+                            };
+
+                            if f_ini <= f_fin {
+                                mov_obras.push(SuaMovObraRecord {
+                                    registro_patronal: rp.clone(),
+                                    nss: nss.clone(),
+                                    fecha_inicio: f_ini,
+                                    fecha_fin: f_fin,
+                                    folio_obra: r.obra_numero.trim().to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
 
-            // 5. Licencia / Ausentismo ("11")
-            let lic_dias = r.lic.round() as i16;
-            if lic_dias > 0 {
-                movements.push(SuaMovementRecord {
-                    registro_patronal: rp.clone(),
-                    nss: nss.clone(),
-                    tipo_movimiento: "11".to_string(),
-                    fecha: r.fecha,
-                    mes_periodo: m_curr,
-                    anio_periodo: r.anio_periodo as i32,
-                    folio_incapacidad: String::new(),
-                    dias_incidencia: lic_dias,
-                    sdi: r.sdi,
-                });
-            }
-
-            // 6. Incapacidad ("12")
-            let inc_dias = r.inc.round() as i16;
-            if inc_dias > 0 {
-                incaps.push(SuaIncapRecord {
-                    registro_patronal: rp.clone(),
-                    nss: nss.clone(),
-                    fecha: r.fecha,
-                    mes_periodo: m_curr,
-                    anio_periodo: r.anio_periodo as i32,
-                    folio: format!("IN{:06}", incap_counter),
-                    dias: inc_dias,
-                    sdi: r.sdi,
-                });
-                incap_counter += 1;
-            }
+            is_first_month = false;
         }
 
         workers.push(worker);
@@ -843,9 +1027,22 @@ pub fn export_sua_files(
         incap_content.push_str("\r\n");
     }
 
+    let mut mov_obra_content = String::new();
+    let mut seen_mov_obra_lines = std::collections::HashSet::new();
+    let mut unique_mov_obra_count = 0;
+    for mo in &mov_obras {
+        let line = format_movobra_line(mo);
+        if seen_mov_obra_lines.insert(line.clone()) {
+            mov_obra_content.push_str(&line);
+            mov_obra_content.push_str("\r\n");
+            unique_mov_obra_count += 1;
+        }
+    }
+
     // 3. Escribir archivos al disco
     let aseg_path = folder_path.join(&aseg_filename);
     let afil_path = folder_path.join(&afil_filename);
+    let mov_obra_path = folder_path.join(&mov_obra_filename);
     let movt_path = folder_path.join(&movt_filename);
     let cred_path = folder_path.join(&cred_filename);
     let incap_path = folder_path.join(&incap_filename);
@@ -854,6 +1051,8 @@ pub fn export_sua_files(
         .map_err(|e| format!("Error guardando {}: {}", aseg_filename, e))?;
     std::fs::write(&afil_path, afil_content.as_bytes())
         .map_err(|e| format!("Error guardando {}: {}", afil_filename, e))?;
+    std::fs::write(&mov_obra_path, mov_obra_content.as_bytes())
+        .map_err(|e| format!("Error guardando {}: {}", mov_obra_filename, e))?;
     std::fs::write(&movt_path, movt_content.as_bytes())
         .map_err(|e| format!("Error guardando {}: {}", movt_filename, e))?;
     std::fs::write(&cred_path, cred_content.as_bytes())
@@ -873,6 +1072,8 @@ pub fn export_sua_files(
         cred_count: creds.len(),
         incap_filename,
         incap_count: incaps.len(),
+        mov_obra_filename,
+        mov_obra_count: unique_mov_obra_count,
         total_workers: workers.len(),
     })
 }
@@ -905,6 +1106,28 @@ mod tests {
         assert_eq!(p, "PEREZ");
         assert_eq!(m, "");
         assert_eq!(n, "JUAN");
+
+        // Casos con identificadores de pensión:
+        let (p, m, n) = parse_mexican_name("P/CV FLORES RUIZ GUILLERMO");
+        assert_eq!(p, "FLORES");
+        assert_eq!(m, "RUIZ");
+        assert_eq!(n, "GUILLERMO");
+        assert_eq!(format_sua_name_delimited("P/CV FLORES RUIZ GUILLERMO"), "FLORES$RUIZ$GUILLERMO");
+
+        let (p, m, n) = parse_mexican_name("P/IV LAZARIN ALONZO RAMON MANUEL EPIGMENIO");
+        assert_eq!(p, "LAZARIN");
+        assert_eq!(m, "ALONZO");
+        assert_eq!(n, "RAMON MANUEL EPIGMENIO");
+
+        let (p, m, n) = parse_mexican_name("P/CV MARIN LOPEZ ANDRES");
+        assert_eq!(p, "MARIN");
+        assert_eq!(m, "LOPEZ");
+        assert_eq!(n, "ANDRES");
+
+        let (p, m, n) = parse_mexican_name("FLORES RUIZ GUILLERMO P/CV");
+        assert_eq!(p, "FLORES");
+        assert_eq!(m, "RUIZ");
+        assert_eq!(n, "GUILLERMO");
     }
 
     #[test]
@@ -915,6 +1138,7 @@ mod tests {
             rfc: "ROAE800101XYZ".into(),
             curp: "ROAE800101HDFRNR01".into(),
             nombre_completo: "RODRIGUEZ ALVAREZ ENRIQUE".into(),
+            pensionado: String::new(),
             fecha_alta: Some(NaiveDate::from_ymd_opt(2024, 9, 2).unwrap()),
             mes_periodo: 9,
             anio_periodo: 2024,
@@ -944,6 +1168,7 @@ mod tests {
             rfc: "XAXX010101000".into(),
             curp: "".into(),
             nombre_completo: "CASTRO ENCINA JOSE HUMBERTO".into(),
+            pensionado: String::new(),
             fecha_alta: Some(NaiveDate::from_ymd_opt(2024, 9, 24).unwrap()),
             mes_periodo: 9,
             anio_periodo: 2024,
@@ -1017,6 +1242,7 @@ mod tests {
             rfc: "ROAE800101XYZ".into(),
             curp: "ROAE800101HDFRNR01".into(),
             nombre_completo: "RODRIGUEZ ALVAREZ ENRIQUE".into(),
+            pensionado: String::new(),
             fecha_alta: Some(NaiveDate::from_ymd_opt(2024, 9, 2).unwrap()),
             mes_periodo: 9,
             anio_periodo: 2024,
@@ -1107,6 +1333,7 @@ mod tests {
             rfc: "PEJU800101XYZ".into(),
             curp: "PEJU800101HDFRNR01".into(),
             nss: nss.into(),
+            pensionado: String::new(),
             registro_patronal: rp.into(),
             mes_periodo: mes.into(),
             anio_periodo: anio,
@@ -1169,21 +1396,51 @@ mod tests {
             "01",
         );
         row.inc = 1.0;
+        row.id_registro_obra = Some(uuid::Uuid::now_v7());
+        row.obra_numero = "C0896231".into();
+        row.dias_obra = 30;
 
-        let res = export_sua_files(&temp_dir, "REV1", &[row]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV1", &[row], &[]).expect("export should succeed");
         assert_eq!(res.aseg_filename, "1_ASEG_REV1.TXT");
         assert_eq!(res.afil_filename, "2_AFIL_REV1.TXT");
-        assert_eq!(res.movt_filename, "3_MOVT_REV1.TXT");
-        assert_eq!(res.cred_filename, "4_CRED_REV1.TXT");
-        assert_eq!(res.incap_filename, "5_INCAP_REV1.TXT");
+        assert_eq!(res.mov_obra_filename, "3_MOVOBRA_REV1.TXT");
+        assert_eq!(res.movt_filename, "4_MOVT_REV1.TXT");
+        assert_eq!(res.cred_filename, "5_CRED_REV1.TXT");
+        assert_eq!(res.incap_filename, "6_INCAP_REV1.TXT");
+        assert_eq!(res.mov_obra_count, 1);
 
         assert!(temp_dir.join("1_ASEG_REV1.TXT").exists());
         assert!(temp_dir.join("2_AFIL_REV1.TXT").exists());
-        assert!(temp_dir.join("3_MOVT_REV1.TXT").exists());
-        assert!(temp_dir.join("4_CRED_REV1.TXT").exists());
-        assert!(temp_dir.join("5_INCAP_REV1.TXT").exists());
+        assert!(temp_dir.join("3_MOVOBRA_REV1.TXT").exists());
+        assert!(temp_dir.join("4_MOVT_REV1.TXT").exists());
+        assert!(temp_dir.join("5_CRED_REV1.TXT").exists());
+        assert!(temp_dir.join("6_INCAP_REV1.TXT").exists());
+        assert!(!temp_dir.join("MovObra.txt").exists(), "No debe generarse MovObra.txt sin numeración");
+        assert!(!temp_dir.join("6_MOVOBRA_REV1.TXT").exists(), "El orden de MovObra ahora es 3_MOVOBRA");
+
+        let mov_content = std::fs::read_to_string(temp_dir.join(&res.mov_obra_filename)).unwrap();
+        assert_eq!(mov_content.trim().len(), 48, "Línea de 3_MOVOBRA debe medir 48 caracteres");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_format_movobra_line() {
+        let rec = SuaMovObraRecord {
+            registro_patronal: "Y6312345101".into(),
+            nss: "12345678901".into(),
+            fecha_inicio: NaiveDate::from_ymd_opt(2024, 3, 18).unwrap(),
+            fecha_fin: NaiveDate::from_ymd_opt(2024, 5, 15).unwrap(),
+            folio_obra: "C0896231".into(),
+        };
+        let line = format_movobra_line(&rec);
+        assert_eq!(line.len(), 48);
+        assert_eq!(&line[0..11], "Y6312345101");
+        assert_eq!(&line[11..22], "12345678901");
+        assert_eq!(&line[22..24], "30");
+        assert_eq!(&line[24..32], "18032024");
+        assert_eq!(&line[32..40], "15052024");
+        assert_eq!(&line[40..48], "C0896231");
     }
 
     #[test]
@@ -1200,7 +1457,7 @@ mod tests {
             "01",
         );
 
-        let res = export_sua_files(&temp_dir, "REV1", &[row]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV1", &[row], &[]).expect("export should succeed");
         // No debe generar movimiento 08 para un trabajador vigente sin incidencias
         assert_eq!(res.movt_count, 0, "No debe haber movimientos para un trabajador vigente sin incidencias");
 
@@ -1235,7 +1492,7 @@ mod tests {
         row3.fecha = Some(NaiveDate::from_ymd_opt(2024, 9, 15).unwrap());
         row3.clave = "BAJA".into(); // Movimiento de baja
 
-        let res = export_sua_files(&temp_dir, "REV2", &[row1, row2, row3]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV2", &[row1, row2, row3], &[]).expect("export should succeed");
         assert_eq!(res.movt_count, 2, "Debe registrar modificación de salario (07) y baja (02)");
 
         let movt_file = temp_dir.join(&res.movt_filename);
@@ -1266,9 +1523,215 @@ mod tests {
         row2.sdi = 261.20; // Mismo salario que el anterior
         row2.clave = "07".into(); // Clave 07 o M/S en la cédula, pero salario idéntico
 
-        let res = export_sua_files(&temp_dir, "REV3", &[row1, row2]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV3", &[row1, row2], &[]).expect("export should succeed");
         // No debe generar movimiento 07 porque el salario no cambió (evita error SUA: "El Salario Diario Integrado no puede ser igual al anterior")
         assert_eq!(res.movt_count, 0, "No debe haber movimiento 07 si el salario es igual");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_export_sua_trabajadores_pensionados_y_no_pensionados() {
+        let temp_dir = std::env::temp_dir().join(format!("sua_test_pensionados_{}", uuid::Uuid::now_v7()));
+
+        // Empleado pensionado activo en la obra
+        let mut row_pensionado_activo = make_test_row(
+            "Y6312345101",
+            "32856401234",
+            "P/CV MARIN LOPEZ ANDRES",
+            "09",
+            2026,
+            Some(NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()),
+            450.0,
+            "01",
+        );
+        row_pensionado_activo.rfc = "".into();
+        row_pensionado_activo.curp = "".into();
+        row_pensionado_activo.pensionado = "P/CV".into();
+        row_pensionado_activo.id_registro_obra = Some(uuid::Uuid::now_v7());
+        row_pensionado_activo.obra_numero = "OBRA-NORTE".into();
+        row_pensionado_activo.dias_obra = 30;
+
+        // Empleado pensionado que trabajó y luego fue dado de baja (ej. FLORES RUIZ GUILLERMO)
+        let mut row_pensionado_alta = make_test_row(
+            "Y6312345101",
+            "12846509871",
+            "P/CV FLORES RUIZ GUILLERMO",
+            "09",
+            2026,
+            Some(NaiveDate::from_ymd_opt(2026, 9, 13).unwrap()),
+            462.60,
+            "01",
+        );
+        row_pensionado_alta.rfc = "".into();
+        row_pensionado_alta.curp = "".into();
+        row_pensionado_alta.pensionado = "P/CV".into();
+
+        let mut row_pensionado_baja = row_pensionado_alta.clone();
+        row_pensionado_baja.fecha = Some(NaiveDate::from_ymd_opt(2026, 9, 27).unwrap());
+        row_pensionado_baja.clave = "BAJA".into();
+        row_pensionado_baja.sdi = 0.0; // En cédula el renglón de baja viene con 0 SDI
+
+        // Empleado normal (no pensionado)
+        let row_normal = make_test_row(
+            "Y6312345101",
+            "56987412301",
+            "GONZALEZ PEREZ JUAN CARLOS",
+            "09",
+            2026,
+            Some(NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()),
+            380.0,
+            "01",
+        );
+
+        let res = export_sua_files(
+            &temp_dir,
+            "REV_PENS",
+            &[row_pensionado_activo, row_pensionado_alta, row_pensionado_baja, row_normal],
+            &[],
+        )
+        .expect("export should succeed");
+
+        assert_eq!(res.total_workers, 3, "Debe haber 3 trabajadores únicos");
+
+        // 1. Verificar 1_ASEG
+        let aseg_content = std::fs::read_to_string(temp_dir.join(&res.aseg_filename)).unwrap();
+        let lines: Vec<&str> = aseg_content.lines().collect();
+        assert_eq!(lines.len(), 3);
+
+        for line in &lines {
+            assert_eq!(line.len(), 164, "Cada línea de 1_ASEG debe medir exactamente 164 caracteres");
+            assert!(!line.contains("P/CV"), "El archivo 1_ASEG no debe contener el prefijo P/CV en el nombre ni en la ubicación");
+            assert!(!line.starts_with("P/"), "El registro patronal o NSS no debe contener P/");
+        }
+
+        // Verificar que los nombres están delimitados correctamente para que el SUA los reconozca e indexe por apellido:
+        assert!(aseg_content.contains("FLORES$RUIZ$GUILLERMO"), "FLORES RUIZ GUILLERMO debe aparecer con su apellido paterno");
+        assert!(aseg_content.contains("MARIN$LOPEZ$ANDRES"), "MARIN LOPEZ ANDRES debe aparecer con su apellido paterno");
+        assert!(aseg_content.contains("GONZALEZ$PEREZ$JUAN CARLOS"), "GONZALEZ PEREZ JUAN CARLOS debe aparecer con su apellido paterno");
+
+        // 2. Verificar 2_AFIL
+        let afil_content = std::fs::read_to_string(temp_dir.join(&res.afil_filename)).unwrap();
+        for line in afil_content.lines() {
+            assert_eq!(line.len(), 80, "Cada línea de 2_AFIL debe medir exactamente 80 caracteres");
+        }
+
+        // 3. Verificar 3_MOVT
+        let movt_content = std::fs::read_to_string(temp_dir.join(&res.movt_filename)).unwrap();
+        // El empleado con baja debe tener movimiento 02 y su SDI debe ser 0046260 (heredado de su alta)
+        assert!(movt_content.contains("02"), "Debe contener el movimiento de baja 02");
+        assert!(movt_content.contains("27092026"), "Debe contener la fecha de baja 27/09/2026");
+        assert!(movt_content.contains("0046260"), "El SDI de la baja debe ser 462.60 recuperado del alta");
+
+        // 3. Verificar 3_MOVOBRA
+        let movobra_content = std::fs::read_to_string(temp_dir.join(&res.mov_obra_filename)).unwrap();
+        assert!(movobra_content.contains("32856401234"), "Debe contener al empleado asignado a obra");
+        assert!(movobra_content.contains("OBRA-NOR"), "Debe contener el folio de la obra");
+        assert!(!temp_dir.join("MovObra.txt").exists(), "No debe generarse MovObra.txt sin numeración");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_movobra_evita_error_vigencia_sua_baja_y_reingreso() {
+        let temp_dir = std::env::temp_dir().join(format!("sua_test_vigencia_{}", uuid::Uuid::now_v7()));
+
+        let obra_id = uuid::Uuid::now_v7();
+        let mock_obra = crate::db::reporte_liquidaciones::ObraOptionDb {
+            id: obra_id,
+            numero: "C0971944".into(),
+            tipo_obra: "EDIFICACION".into(),
+            fecha_inicio: Some(NaiveDate::from_ymd_opt(2024, 9, 2).unwrap()), // Inicia el 02/09/2024
+            fecha_fin: Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()),
+            label: "C0971944 - EDIFICACION".into(),
+            creado_usuario: true,
+            monto: 500000.0,
+        };
+
+        // Caso 1: Trabajadora con BAJA en el mes (ej. Adriana Valeria el 23/04/2024)
+        // En MovObra, la fecha fin NO debe ser 23/04/2024 sino 22/04/2024 para no chocar con el estatus BAJA de SUA.
+        let mut row_adriana_dias = make_test_row(
+            "A3673455103",
+            "32028347675",
+            "PEDROZA ALDAMA ADRIANA VALERIA",
+            "04",
+            2024,
+            None,
+            300.0,
+            "",
+        );
+        row_adriana_dias.id_registro_obra = Some(uuid::Uuid::now_v7());
+        row_adriana_dias.obra_numero = "C0944829".into();
+        row_adriana_dias.dias_obra = 23;
+
+        let mut row_adriana_baja = row_adriana_dias.clone();
+        row_adriana_baja.fecha = Some(NaiveDate::from_ymd_opt(2024, 4, 23).unwrap());
+        row_adriana_baja.clave = "BAJA".into();
+        row_adriana_baja.dias_obra = 0;
+
+        // Caso 2: Trabajador que causó BAJA en marzo y reingresa en septiembre (ej. Ruiz Oyervides Rigoberto)
+        // Sin clave explícita de "REIN" en septiembre, el sistema debe emitir automáticamente el movimiento 08
+        // y en MovObra respetar la fecha de inicio de la obra (02/09/2024, no 01/09/2024).
+        let mut row_ruiz_baja = make_test_row(
+            "A3673455103",
+            "32139657624",
+            "RUIZ OYERVIDES RIGOBERTO",
+            "03",
+            2024,
+            Some(NaiveDate::from_ymd_opt(2024, 3, 12).unwrap()),
+            320.0,
+            "BAJA",
+        );
+        row_ruiz_baja.dias_obra = 0;
+
+        let mut row_ruiz_sept = make_test_row(
+            "A3673455103",
+            "32139657624",
+            "RUIZ OYERVIDES RIGOBERTO",
+            "09",
+            2024,
+            None,
+            320.0,
+            "",
+        );
+        row_ruiz_sept.id_registro_obra = Some(obra_id);
+        row_ruiz_sept.obra_numero = "C0971944".into();
+        row_ruiz_sept.dias_obra = 29;
+
+        let res = export_sua_files(
+            &temp_dir,
+            "REV_VIG",
+            &[row_adriana_dias, row_adriana_baja, row_ruiz_baja, row_ruiz_sept],
+            &[mock_obra],
+        )
+        .expect("export should succeed");
+
+        // 1. Verificar 3_MOVOBRA
+        let movobra_content = std::fs::read_to_string(temp_dir.join(&res.mov_obra_filename)).unwrap();
+        assert!(!temp_dir.join("MovObra.txt").exists(), "No debe generarse MovObra.txt sin numeración");
+
+        // Para Adriana: Fecha fin debe ser 22042024 (un día antes de su baja del 23/04/2024)
+        assert!(
+            movobra_content.contains("32028347675300104202422042024C0944829"),
+            "Adriana debe tener fecha fin 22/04/2024 (día previo a baja) y no 23/04/2024. Contenido:\n{}",
+            movobra_content
+        );
+
+        // Para Ruiz: Fecha inicio debe ser 02092024 (inicio de la obra) y no 01092024
+        assert!(
+            movobra_content.contains("32139657624300209202430092024C0971944"),
+            "Ruiz debe tener fecha inicio 02/09/2024 acorde al inicio de la obra. Contenido:\n{}",
+            movobra_content
+        );
+
+        // 2. Verificar 3_MOVT
+        let movt_content = std::fs::read_to_string(temp_dir.join(&res.movt_filename)).unwrap();
+        // Ruiz debe tener movimiento de Reingreso 08 en septiembre para reactivarse en SUA
+        assert!(
+            movt_content.contains("321396576240801092024"),
+            "Ruiz debe tener movimiento 08 de reingreso en septiembre en MOVT. Contenido:\n{}",
+            movt_content
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

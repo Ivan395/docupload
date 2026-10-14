@@ -74,10 +74,10 @@ fn update_cliente_and_rp_from_biz(
     biz: &Business,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 1. Actualizar Registro Patronal con la información obtenida de las cédulas
-    let act_upper = biz.actividad.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
-    let dom_upper = biz.domicilio.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let act_upper = biz.actividad.as_deref().map(|s| crate::cedulas::business::clean_actividad(s)).filter(|s| !s.is_empty());
+    let dom_upper = biz.domicilio.as_deref().map(|s| crate::cedulas::business::clean_domicilio(s)).filter(|s| !s.is_empty());
     let cp_upper = biz.codigo_postal.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
-    let ent_upper = biz.entidad.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let ent_upper = biz.entidad.as_deref().map(|s| crate::cedulas::business::clean_entidad(s)).filter(|s| !s.is_empty());
     let area_upper = biz.area_geografica.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
     let del_upper = biz.delegacion.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
     let subdel_upper = biz.subdelegacion.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
@@ -369,10 +369,10 @@ pub fn resolve_business_context_for_revision(
         &[&id_cliente, &reg_11],
     )?;
 
-    let act_upper = biz.actividad.as_deref().map(|s| s.trim().to_uppercase());
-    let dom_upper = biz.domicilio.as_deref().map(|s| s.trim().to_uppercase());
+    let act_upper = biz.actividad.as_deref().map(|s| crate::cedulas::business::clean_actividad(s));
+    let dom_upper = biz.domicilio.as_deref().map(|s| crate::cedulas::business::clean_domicilio(s));
     let cp_upper = biz.codigo_postal.as_deref().map(|s| s.trim().to_uppercase());
-    let ent_upper = biz.entidad.as_deref().map(|s| s.trim().to_uppercase());
+    let ent_upper = biz.entidad.as_deref().map(|s| crate::cedulas::business::clean_entidad(s));
     let area_upper = biz.area_geografica.as_deref().map(|s| s.trim().to_uppercase());
     let del_upper = biz.delegacion.as_deref().map(|s| s.trim().to_uppercase());
     let subdel_upper = biz.subdelegacion.as_deref().map(|s| s.trim().to_uppercase());
@@ -472,7 +472,20 @@ pub fn save_single_cedula_employee_tx(
     let mut registros_obras_count = 0;
     let mut vinculaciones_count = 0;
 
-    let emp_nombre = emp.nombre.as_deref().map(|s| s.trim().to_uppercase());
+    let (cleaned_nombre, extracted_pension) = match emp.nombre.as_deref() {
+        Some(nom) => {
+            let (cn, ep) = crate::cedulas::employees::clean_name_and_extract_pension(nom);
+            (Some(cn.to_uppercase()), ep)
+        }
+        None => (None, None),
+    };
+    let emp_nombre = cleaned_nombre;
+    let emp_pensionado = emp
+        .pensionado
+        .clone()
+        .or(extracted_pension)
+        .map(|p| p.trim().to_uppercase())
+        .filter(|p| !p.is_empty());
     let mut emp_rfc = emp.rfc.as_deref().map(|s| {
         s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()
     }).filter(|s| !s.is_empty() && (s.len() == 13 || s.len() == 12));
@@ -588,7 +601,11 @@ pub fn save_single_cedula_employee_tx(
             tx.execute(
                 r#"
                 UPDATE public.empleados
-                SET nombre = COALESCE(NULLIF(TRIM(public.empleados.nombre), ''), $2),
+                SET nombre = CASE
+                        WHEN public.empleados.nombre ~* '^\s*P\s*[/ -]' THEN COALESCE($2, public.empleados.nombre)
+                        WHEN $2 IS NOT NULL AND TRIM(public.empleados.nombre) = '' THEN $2
+                        ELSE COALESCE(NULLIF(TRIM(public.empleados.nombre), ''), $2)
+                    END,
                     rfc = CASE
                         WHEN public.empleados.rfc IS NOT NULL
                              AND TRIM(public.empleados.rfc) <> ''
@@ -606,7 +623,8 @@ pub fn save_single_cedula_employee_tx(
                         ELSE $4
                     END,
                     nss = COALESCE(NULLIF(TRIM(public.empleados.nss), ''), $5),
-                    clave_ubicacion = COALESCE(public.empleados.clave_ubicacion, $6)
+                    clave_ubicacion = COALESCE(public.empleados.clave_ubicacion, $6),
+                    pensionado = COALESCE($7, public.empleados.pensionado)
                 WHERE id = $1
                 "#,
                 &[
@@ -616,6 +634,7 @@ pub fn save_single_cedula_employee_tx(
                     &truncate_str(emp_curp.as_deref(), 18),
                     &truncate_str(emp_nss.as_deref(), 11),
                     &emp_clave_ubicacion,
+                    &truncate_str(emp_pensionado.as_deref(), 10),
                 ],
             )?;
             id
@@ -624,8 +643,8 @@ pub fn save_single_cedula_employee_tx(
             let new_id = Uuid::now_v7();
             let row = tx.query_one(
                 r#"
-                INSERT INTO public.empleados (id, id_cliente, nombre, rfc, curp, nss, clave_ubicacion)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO public.empleados (id, id_cliente, nombre, rfc, curp, nss, clave_ubicacion, pensionado)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING id
                 "#,
                 &[
@@ -636,6 +655,7 @@ pub fn save_single_cedula_employee_tx(
                     &truncate_str(emp_curp.as_deref(), 18),
                     &truncate_str(emp_nss.as_deref(), 11),
                     &emp_clave_ubicacion,
+                    &truncate_str(emp_pensionado.as_deref(), 10),
                 ],
             )?;
             empleados_count += 1;
@@ -1167,6 +1187,24 @@ pub fn save_cedulas_concurrent(
         registros_obras_guardados: registros_obras_count.load(Ordering::Relaxed),
         errores: errores.into_inner().unwrap(),
     };
+
+    crate::app_logger::log_db_op(
+        "INSERT/UPDATE_CONCURRENT",
+        &[
+            "public.empleados",
+            "public.liquidaciones",
+            "public.detalles_liquidaciones",
+            "public.registros_obras",
+            "public.vinculaciones_obras_liquidaciones",
+        ],
+        "save_cedulas_concurrent",
+        &format!(
+            "empleados={}, liquidaciones={}, detalles={}, obras={}, vinculaciones={}, errores={}",
+            stats.empleados_guardados, stats.liquidaciones_guardadas, stats.detalles_guardados,
+            stats.registros_obras_guardados, stats.vinculaciones_guardadas, stats.errores.len()
+        ),
+        Some(stats.detalles_guardados),
+    );
 
     Ok(stats)
 }

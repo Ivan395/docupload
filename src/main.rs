@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub mod app_logger;
 pub mod archives;
 pub mod calendario_view_logic;
 pub mod cedulas;
@@ -702,6 +703,7 @@ fn load_empleados_ui(ui: &MainWindow, pool: &DbPool, client_id: &str) {
                 nss: emp.nss.into(),
                 registro_patronal: emp.registro_patronal.into(),
                 sbc_diario_str: sbc_str.into(),
+                pensionado: emp.pensionado.into(),
                 esta_activo: emp.esta_activo,
             }
         })
@@ -2578,6 +2580,7 @@ fn ensure_linux_desktop_integration() {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    crate::app_logger::init_app_logger();
     let _ = slint::set_xdg_app_id("docu_ffacd");
     let main_window = MainWindow::new()?;
     let _ = slint::set_xdg_app_id("docu_ffacd");
@@ -2639,7 +2642,10 @@ fn main() -> Result<(), slint::PlatformError> {
         Ok(pool) => {
             let mut inhabiles_set = HashSet::new();
             if let Ok(mut client) = pool.get() {
-                let _ = ensure_schema(&mut client);
+                if let Err(e) = ensure_schema(&mut client) {
+                    eprintln!("Error inicializando esquema de BD: {}", e);
+                    log::error!("Error inicializando esquema de BD: {}", e);
+                }
                 if let Ok(set) = fetch_imss_inhabiles(&mut client) {
                     inhabiles_set = set;
                 }
@@ -2666,6 +2672,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let nominas_list_clone = nominas_list.clone();
         app_logic.on_select_nominas_files(move || {
+            crate::app_logger::log_ui_event(
+                "Carga Nóminas",
+                "Sección Archivos",
+                "Abrir Diálogo Seleccionar Nóminas",
+                "Mostrando selector de archivos (XML, ZIP, RAR)",
+            );
             let files = rfd::FileDialog::new()
                 .set_title("Seleccionar Nóminas (XML, ZIP o RAR)")
                 .add_filter("Nóminas y Archivos Comprimidos", &["xml", "zip", "rar"])
@@ -2674,6 +2686,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 .pick_files();
 
             if let Some(paths) = files {
+                crate::app_logger::log_ui_event(
+                    "Carga Nóminas",
+                    "Selector de Archivos",
+                    "Archivos Seleccionados",
+                    &format!("{} archivos elegidos", paths.len()),
+                );
                 let mut list = nominas_list_clone.borrow_mut();
                 for p in paths {
                     if !list.iter().any(|existing| existing.path == p) {
@@ -2692,6 +2710,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let nominas_list_clone = nominas_list.clone();
         app_logic.on_select_nominas_folder(move || {
+            crate::app_logger::log_ui_event(
+                "Carga Nóminas",
+                "Sección Carpetas",
+                "Abrir Diálogo Seleccionar Carpeta",
+                "Mostrando selector de carpetas para búsqueda recursiva",
+            );
             let folder = rfd::FileDialog::new()
                 .set_title("Seleccionar Carpeta con Nóminas (Búsqueda Recursiva XML, ZIP, RAR)")
                 .pick_folder();
@@ -2717,6 +2741,12 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
                 let added = list.len() - initial_len;
+                crate::app_logger::log_ui_event(
+                    "Carga Nóminas",
+                    "Selector de Carpetas",
+                    "Resultado Búsqueda Recursiva",
+                    &format!("Carpeta='{}', archivos agregados={}", folder_path.display(), added),
+                );
                 if let Some(ui) = ui_weak.upgrade() {
                     update_nominas_ui(&ui, &list);
                     if added > 0 {
@@ -2734,6 +2764,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let cedulas_list_clone = cedulas_list.clone();
         app_logic.on_select_cedulas_files(move || {
+            crate::app_logger::log_ui_event(
+                "Carga Cédulas",
+                "Sección Archivos",
+                "Abrir Diálogo Seleccionar Cédulas",
+                "Mostrando selector de archivos (PDF, ZIP, RAR)",
+            );
             let files = rfd::FileDialog::new()
                 .set_title("Seleccionar Cédulas SUA (PDF, ZIP o RAR)")
                 .add_filter("Cédulas SUA", &["pdf", "zip", "rar"])
@@ -2742,6 +2778,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 .pick_files();
 
             if let Some(paths) = files {
+                crate::app_logger::log_ui_event(
+                    "Carga Cédulas",
+                    "Selector de Archivos",
+                    "Archivos Cédula Seleccionados",
+                    &format!("{} archivos elegidos", paths.len()),
+                );
                 let mut list = cedulas_list_clone.borrow_mut();
                 for p in paths {
                     if !list.iter().any(|existing| existing.path == p) {
@@ -2760,6 +2802,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let cedulas_list_clone = cedulas_list.clone();
         app_logic.on_select_cedulas_folder(move || {
+            crate::app_logger::log_ui_event(
+                "Carga Cédulas",
+                "Sección Carpetas",
+                "Abrir Diálogo Seleccionar Carpeta Cédulas",
+                "Mostrando selector de carpetas para búsqueda recursiva",
+            );
             let folder = rfd::FileDialog::new()
                 .set_title("Seleccionar Carpeta con Cédulas SUA (Búsqueda Recursiva PDF, ZIP, RAR)")
                 .pick_folder();
@@ -2785,6 +2833,12 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
                 let added = list.len() - initial_len;
+                crate::app_logger::log_ui_event(
+                    "Carga Cédulas",
+                    "Selector de Carpetas",
+                    "Resultado Búsqueda Recursiva Cédulas",
+                    &format!("Carpeta='{}', archivos agregados={}", folder_path.display(), added),
+                );
                 if let Some(ui) = ui_weak.upgrade() {
                     update_cedulas_ui(&ui, &list);
                     if added > 0 {
@@ -2802,6 +2856,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let nominas_list_clone = nominas_list.clone();
         app_logic.on_remove_nomina_file(move |file_id| {
+            crate::app_logger::log_ui_event(
+                "Carga Nóminas",
+                "Lista de Archivos",
+                "Eliminar Archivo Nómina",
+                &format!("file_id={}", file_id),
+            );
             let mut list = nominas_list_clone.borrow_mut();
             list.retain(|item| item.id != file_id);
             if let Some(ui) = ui_weak.upgrade() {
@@ -2815,6 +2875,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let cedulas_list_clone = cedulas_list.clone();
         app_logic.on_remove_cedula_file(move |file_id| {
+            crate::app_logger::log_ui_event(
+                "Carga Cédulas",
+                "Lista de Archivos",
+                "Eliminar Archivo Cédula",
+                &format!("file_id={}", file_id),
+            );
             let mut list = cedulas_list_clone.borrow_mut();
             list.retain(|item| item.id != file_id);
             if let Some(ui) = ui_weak.upgrade() {
@@ -2830,6 +2896,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let last_nom_clone = last_nominas_excel.clone();
         let last_nom_dir_clone = last_nominas_download_dir.clone();
         app_logic.on_clear_nominas(move || {
+            crate::app_logger::log_ui_event(
+                "Carga Nóminas",
+                "Barra Acciones",
+                "Click Botón Limpiar Nóminas",
+                "Eliminando todas las nóminas de la lista de procesamiento",
+            );
             let mut list = nominas_list_clone.borrow_mut();
             list.clear();
             if let Ok(mut g) = last_nom_clone.lock() { *g = None; }
@@ -2871,6 +2943,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let last_ced_clone = last_cedulas_excel.clone();
         let last_ced_dir_clone = last_cedulas_download_dir.clone();
         app_logic.on_clear_cedulas(move || {
+            crate::app_logger::log_ui_event(
+                "Carga Cédulas",
+                "Barra Acciones",
+                "Click Botón Limpiar Cédulas",
+                "Eliminando todas las cédulas de la lista de procesamiento",
+            );
             let mut list = cedulas_list_clone.borrow_mut();
             list.clear();
             if let Ok(mut g) = last_ced_clone.lock() { *g = None; }
@@ -2956,6 +3034,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 .iter()
                 .map(|e| e.path.clone())
                 .collect();
+            crate::app_logger::log_ui_event(
+                "Carga Nóminas",
+                "Barra Acciones",
+                "Click Procesar Nóminas",
+                &format!("Iniciando procesamiento de {} archivos de nómina", paths.len()),
+            );
             spawn_nominas_worker(ui_weak.clone(), paths, last_nom_clone.clone(), pool_clone.clone());
         });
     }
@@ -2972,6 +3056,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 .iter()
                 .map(|e| e.path.clone())
                 .collect();
+            crate::app_logger::log_ui_event(
+                "Carga Cédulas",
+                "Barra Acciones",
+                "Click Procesar Cédulas",
+                &format!("Iniciando procesamiento de {} archivos de cédula", paths.len()),
+            );
             spawn_cedulas_worker(ui_weak.clone(), paths, last_ced_clone.clone(), pool_clone.clone());
         });
     }
@@ -2997,7 +3087,20 @@ fn main() -> Result<(), slint::PlatformError> {
                 .map(|e| e.path.clone())
                 .collect();
 
+            crate::app_logger::log_ui_event(
+                "Inicio / Procesamiento",
+                "Barra Acciones",
+                "Click Procesar Todos los Archivos",
+                &format!("Nóminas: {}, Cédulas: {}", nom_paths.len(), ced_paths.len()),
+            );
+
             if nom_paths.is_empty() && ced_paths.is_empty() {
+                crate::app_logger::log_ui_error(
+                    "Inicio / Procesamiento",
+                    "Barra Acciones",
+                    "Validación Sin Archivos",
+                    "El usuario intentó procesar sin tener archivos agregados",
+                );
                 if let Some(ui) = ui_weak.upgrade() {
                     show_toast_message(&ui, "Por favor agrega al menos un archivo para procesar.");
                 }
@@ -3019,6 +3122,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let last_nom_clone = last_nominas_excel.clone();
         let last_nom_dir_clone = last_nominas_download_dir.clone();
         app_logic.on_download_nominas_excel(move || {
+            crate::app_logger::log_ui_event(
+                "Carga Nóminas",
+                "Resultados",
+                "Click Descargar Excel Nóminas",
+                "Abriendo cuadro de diálogo para guardar reporte Excel",
+            );
             let src_opt = last_nom_clone.lock().ok().and_then(|g| g.clone());
             if let Some(source) = src_opt {
                 if let Some(dest) = rfd::FileDialog::new()
@@ -3028,10 +3137,22 @@ fn main() -> Result<(), slint::PlatformError> {
                     .save_file()
                 {
                     if let Err(e) = fs::copy(&source, &dest) {
+                        crate::app_logger::log_ui_error(
+                            "Carga Nóminas",
+                            "Guardar Archivo",
+                            "Error Copiando Archivo Excel",
+                            &e.to_string(),
+                        );
                         if let Some(ui) = ui_weak.upgrade() {
                             show_toast_message(&ui, &format!("Error al guardar Excel: {}", e));
                         }
                     } else {
+                        crate::app_logger::log_ui_event(
+                            "Carga Nóminas",
+                            "Guardar Archivo",
+                            "Excel Guardado Exitosamente",
+                            &format!("Ruta destino: {}", dest.display()),
+                        );
                         if let Some(parent) = dest.parent() {
                             if let Ok(mut g) = last_nom_dir_clone.lock() {
                                 *g = Some(parent.to_path_buf());
@@ -3044,6 +3165,12 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             } else if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_error(
+                    "Carga Nóminas",
+                    "Guardar Archivo",
+                    "Reporte Inexistente",
+                    "Aún no se ha generado el reporte de Nóminas",
+                );
                 show_toast_message(&ui, "Aún no se ha generado el reporte de Nóminas.");
             }
         });
@@ -3055,6 +3182,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let last_ced_clone = last_cedulas_excel.clone();
         let last_ced_dir_clone = last_cedulas_download_dir.clone();
         app_logic.on_download_cedulas_excel(move || {
+            crate::app_logger::log_ui_event(
+                "Carga Cédulas",
+                "Resultados",
+                "Click Descargar Excel Cédulas",
+                "Abriendo cuadro de diálogo para guardar reporte Excel",
+            );
             let src_opt = last_ced_clone.lock().ok().and_then(|g| g.clone());
             if let Some(source) = src_opt {
                 if let Some(dest) = rfd::FileDialog::new()
@@ -3064,10 +3197,22 @@ fn main() -> Result<(), slint::PlatformError> {
                     .save_file()
                 {
                     if let Err(e) = fs::copy(&source, &dest) {
+                        crate::app_logger::log_ui_error(
+                            "Carga Cédulas",
+                            "Guardar Archivo",
+                            "Error Copiando Archivo Excel",
+                            &e.to_string(),
+                        );
                         if let Some(ui) = ui_weak.upgrade() {
                             show_toast_message(&ui, &format!("Error al guardar Excel: {}", e));
                         }
                     } else {
+                        crate::app_logger::log_ui_event(
+                            "Carga Cédulas",
+                            "Guardar Archivo",
+                            "Excel Guardado Exitosamente",
+                            &format!("Ruta destino: {}", dest.display()),
+                        );
                         if let Some(parent) = dest.parent() {
                             if let Ok(mut g) = last_ced_dir_clone.lock() {
                                 *g = Some(parent.to_path_buf());
@@ -3080,6 +3225,12 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             } else if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_error(
+                    "Carga Cédulas",
+                    "Guardar Archivo",
+                    "Reporte Inexistente",
+                    "Aún no se ha generado el reporte de Cédulas",
+                );
                 show_toast_message(&ui, "Aún no se ha generado el reporte de Cédulas.");
             }
         });
@@ -3193,34 +3344,92 @@ fn main() -> Result<(), slint::PlatformError> {
                 let rp_id = app_data.get_selected_rp_id().to_string();
                 let rev_id = app_data.get_selected_revision_id().to_string();
 
+                let view_name = match view_idx {
+                    0 => "Inicio / Procesamiento",
+                    1 => "Clientes",
+                    2 => "Registros Patronales",
+                    3 => "Revisiones",
+                    4 => "Registros de Obras",
+                    5 => "Empleados",
+                    6 => "Cédulas de Cuotas",
+                    7 => "Reporte Liquidaciones",
+                    8 => "Calendario",
+                    9 => "Reporte Nóminas",
+                    10 => "Carga Nóminas",
+                    _ => "Vista Desconocida",
+                };
+
+                crate::app_logger::log_ui_event(
+                    "Navegación",
+                    "Sidebar / Menú",
+                    "Cambio de Vista",
+                    &format!("Destino: {} (ID {}), Cliente='{}', RP='{}', Rev='{}'", view_name, view_idx, client_id, rp_id, rev_id),
+                );
+
                 // Validación estricta de deshabilitación:
                 // View 2 (RP) y View 5 (Empleados) requieren cliente seleccionado
                 if (view_idx == 2 || view_idx == 5) && client_id.is_empty() {
+                    crate::app_logger::log_ui_error(
+                        "Navegación",
+                        "Sidebar / Menú",
+                        "Acceso Denegado a Vista",
+                        &format!("No se puede acceder a {} (ID {}): requiere cliente seleccionado", view_name, view_idx),
+                    );
                     app_data.set_current_view(1);
                     return;
                 }
                 // View 3 (Revisiones) deshabilitada hasta acceder desde RP ("Ver")
                 if view_idx == 3 && rp_id.is_empty() {
+                    crate::app_logger::log_ui_error(
+                        "Navegación",
+                        "Sidebar / Menú",
+                        "Acceso Denegado a Vista",
+                        &format!("No se puede acceder a {} (ID {}): requiere registro patronal seleccionado", view_name, view_idx),
+                    );
                     app_data.set_current_view(if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
                 // View 4 (Registros de Obras) deshabilitada hasta acceder desde Revisiones ("Ver Registros de Obras")
                 if view_idx == 4 && rev_id.is_empty() {
+                    crate::app_logger::log_ui_error(
+                        "Navegación",
+                        "Sidebar / Menú",
+                        "Acceso Denegado a Vista",
+                        &format!("No se puede acceder a {} (ID {}): requiere revisión seleccionada", view_name, view_idx),
+                    );
                     app_data.set_current_view(if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
                 // View 6 (Cédula de Cuotas) deshabilitada hasta acceder desde Registros de Obras ("Cargar Cédulas de Cuotas")
                 if view_idx == 6 && !app_data.get_cedulas_access_allowed() {
+                    crate::app_logger::log_ui_error(
+                        "Navegación",
+                        "Sidebar / Menú",
+                        "Acceso Denegado a Vista",
+                        &format!("No se puede acceder a {} (ID {}): acceso a cédulas no permitido", view_name, view_idx),
+                    );
                     app_data.set_current_view(if !rev_id.is_empty() { 4 } else if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
                 // View 7 (Reporte Liquidaciones) deshabilitada hasta tener revisión seleccionada
                 if view_idx == 7 && rev_id.is_empty() {
+                    crate::app_logger::log_ui_error(
+                        "Navegación",
+                        "Sidebar / Menú",
+                        "Acceso Denegado a Vista",
+                        &format!("No se puede acceder a {} (ID {}): requiere revisión seleccionada", view_name, view_idx),
+                    );
                     app_data.set_current_view(if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
                 // View 9 (Reporte Nóminas) requiere que existan nóminas cargadas
                 if view_idx == 9 && !app_data.get_nominas_access_allowed() {
+                    crate::app_logger::log_ui_error(
+                        "Navegación",
+                        "Sidebar / Menú",
+                        "Acceso Denegado a Vista",
+                        &format!("No se puede acceder a {} (ID {}): acceso a nóminas no permitido", view_name, view_idx),
+                    );
                     app_data.set_current_view(0);
                     return;
                 }
@@ -3344,6 +3553,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let pool_clone = db_pool.clone();
         app_logic.on_select_cliente_for_rp(move |id, nombre, rfc, has_data| {
             if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_event(
+                    "Catálogo Clientes",
+                    "Tabla Clientes",
+                    "Click Ver Registros Patronales",
+                    &format!("Cliente: '{}' (ID: {}, RFC: {}, has_data: {})", nombre, id, rfc, has_data),
+                );
                 let app_data = ui.global::<AppData>();
                 app_data.set_selected_cliente_id(id.clone());
                 app_data.set_selected_cliente_nombre(nombre);
@@ -3365,6 +3580,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let pool_clone = db_pool.clone();
         app_logic.on_select_rp_for_revisiones(move |rp_id, rp_registro, subdelegacion, delegacion| {
             if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_event(
+                    "Catálogo Registros Patronales",
+                    "Tabla RP",
+                    "Click Ver Revisiones",
+                    &format!("RP: '{}' (ID: {}, Delegación: {}, Subdelegación: {})", rp_registro, rp_id, delegacion, subdelegacion),
+                );
                 let app_data = ui.global::<AppData>();
                 let is_valid = validate_registro_patronal(&rp_registro).is_ok();
                 app_data.set_selected_rp_id(rp_id.clone());
@@ -3388,6 +3609,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let cedulas_session_clone = cedulas_session.clone();
         app_logic.on_select_revision_for_obras(move |rev_id, rev_nombre, rev_folio| {
             if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_event(
+                    "Catálogo Revisiones",
+                    "Tabla Revisiones",
+                    "Click Ver Registros de Obras",
+                    &format!("Revisión: '{}' (ID: {}, Folio: {})", rev_nombre, rev_id, rev_folio),
+                );
                 let app_data = ui.global::<AppData>();
                 let prev_rev_id = app_data.get_selected_revision_id().to_string();
                 if prev_rev_id != rev_id.as_str() {
@@ -3429,6 +3656,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let pool_clone = db_pool.clone();
         app_logic.on_select_cliente_for_empleados(move |id, nombre, rfc| {
             if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_event(
+                    "Catálogo Clientes",
+                    "Tabla Clientes",
+                    "Click Ver Empleados",
+                    &format!("Cliente: '{}' (ID: {}, RFC: {})", nombre, id, rfc),
+                );
                 let app_data = ui.global::<AppData>();
                 app_data.set_selected_cliente_id(id.clone());
                 app_data.set_selected_cliente_nombre(nombre);
@@ -3517,7 +3750,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_revision_form_is_editing(true);
                                 app_data.set_rev_form_id(r.id.into());
                                 app_data.set_rev_form_nombre(r.nombre.into());
-                                app_data.set_rev_form_folio(r.folio.into());
+                                let folio_edit = if r.folio.trim() == "S/F" { "" } else { r.folio.trim() };
+                                app_data.set_rev_form_folio(folio_edit.into());
 
                                 let concepto_selected = if let Some(ref conc_id) = r.id_concepto_diferencia {
                                     if !conc_id.trim().is_empty()
@@ -3621,10 +3855,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 if nombre.trim().is_empty() {
                     show_toast_message(&ui, "El nombre de la revisión es obligatorio.");
-                    return;
-                }
-                if folio.trim().is_empty() {
-                    show_toast_message(&ui, "El folio IMSS es obligatorio.");
                     return;
                 }
                 if let Some(ref pool) = pool_clone {
@@ -6015,6 +6245,7 @@ mod tests_ui {
                 rfc: format!("TEST{:04}0101", i),
                 curp: format!("TEST{:04}0101HDF00", i),
                 nss: format!("123456{:05}", i),
+                pensionado: String::new(),
                 registro_patronal: "Y54-10204-10-8".into(),
                 mes_periodo: if i <= 100 { "enero".into() } else if i <= 200 { "febrero".into() } else { "marzo".into() },
                 anio_periodo: 2026,

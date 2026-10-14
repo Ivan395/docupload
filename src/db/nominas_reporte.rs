@@ -228,13 +228,15 @@ pub fn fetch_nominas_reporte(
             SELECT rl.id_empleado,
                    rl.anio_periodo::int AS anio,
                    UPPER(TRIM(rl.mes_periodo)) AS mes,
-                   SUM(COALESCE(rv.dias_registro_obra, 0))::float8 AS dias_cedula
+                   SUM(COALESCE(rdl.dias_registro_obra, rv.dias_registro_obra, 0))::float8 AS dias_cedula
             FROM public.reportes_liquidaciones rl
-            JOIN public.reportes_vinculaciones_obras_liquidaciones rv
+            LEFT JOIN public.reportes_detalles_liquidaciones rdl
+                 ON rdl.id_reporte_liquidacion = rl.id
+            LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rv
                  ON rv.id_reporte_liquidacion = rl.id
-            JOIN public.registros_obras ro
-                 ON ro.id = rv.id_registro_obra
-            WHERE COALESCE(ro.creado_usuario, false) = true
+            LEFT JOIN public.registros_obras ro
+                 ON ro.id = COALESCE(rdl.id_registro_obra, rv.id_registro_obra)
+            WHERE ro.id IS NOT NULL
             GROUP BY rl.id_empleado, rl.anio_periodo, UPPER(TRIM(rl.mes_periodo))
         ),
         base AS (
@@ -446,15 +448,28 @@ pub fn copy_nominas_a_reportes(
             FROM public.nominas n
             WHERE EXISTS (
                 SELECT 1
+                FROM public.registros_obras ro
+                WHERE ro.id_revision = n.id_revision
+                  AND (ro.fecha_inicio IS NULL OR COALESCE(n.fecha_final_pago, n.fecha_pago, n.fecha_inicial_pago) >= ro.fecha_inicio)
+                  AND (ro.fecha_fin IS NULL OR COALESCE(n.fecha_inicial_pago, n.fecha_pago, n.fecha_final_pago) <= ro.fecha_fin)
+            )
+            OR EXISTS (
+                SELECT 1
                 FROM public.reportes_liquidaciones rl
-                JOIN public.reportes_vinculaciones_obras_liquidaciones rv
-                     ON rv.id_reporte_liquidacion = rl.id
-                JOIN public.registros_obras ro
-                     ON ro.id = rv.id_registro_obra
+                LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
+                LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rv ON rv.id_reporte_liquidacion = rl.id
+                LEFT JOIN public.registros_obras ro ON ro.id = COALESCE(rdl.id_registro_obra, rv.id_registro_obra)
                 WHERE rl.id_empleado = n.id_empleado
-                  AND COALESCE(ro.creado_usuario, false) = true
-                  AND COALESCE(n.fecha_final_pago, n.fecha_pago, n.fecha_inicial_pago) >= ro.fecha_inicio
-                  AND COALESCE(n.fecha_inicial_pago, n.fecha_pago, n.fecha_final_pago) <= ro.fecha_fin
+                  AND (
+                      ro.id IS NULL
+                      OR (
+                          (ro.fecha_inicio IS NULL OR COALESCE(n.fecha_final_pago, n.fecha_pago, n.fecha_inicial_pago) >= ro.fecha_inicio)
+                          AND (ro.fecha_fin IS NULL OR COALESCE(n.fecha_inicial_pago, n.fecha_pago, n.fecha_final_pago) <= ro.fecha_fin)
+                      )
+                  )
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM public.registros_obras ro WHERE ro.id_revision = n.id_revision
             )
             "#,
             &[],

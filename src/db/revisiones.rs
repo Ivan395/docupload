@@ -365,6 +365,11 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
 
     let clean_nombre = item.nombre.trim().to_uppercase();
     let clean_folio = item.folio.trim().to_uppercase();
+    let folio_opt = if clean_folio.is_empty() || clean_folio == "S/F" {
+        None
+    } else {
+        Some(clean_folio.clone())
+    };
 
     let row = client
         .query_one(
@@ -375,7 +380,7 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
                 &estatus_imss_uuid,
                 &estatus_uuid,
                 &clean_nombre,
-                &clean_folio,
+                &folio_opt,
                 &item.fecha_entrega_imss,
                 &item.fecha_aprobacion_imss,
                 &item.fecha_maxima_aprobacion_imss,
@@ -387,10 +392,20 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
                 &item.pidio_prorroga,
             ],
         )
-        .map_err(|e| format!("Error al crear revisión: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.revisiones", "INSERT", &e.to_string());
+            format!("Error al crear revisión: {}", e)
+        })?;
 
     let new_id: Uuid = row.get(0);
     let created_at: String = row.get(1);
+
+    crate::app_logger::log_db_write(
+        "public.revisiones",
+        "INSERT",
+        &format!("id={}, id_registro_patronal={}, nombre='{}', folio='{:?}'", new_id, rp_uuid, clean_nombre, folio_opt),
+        query,
+    );
 
     let mut res = item.clone();
     res.id = new_id.to_string();
@@ -398,7 +413,7 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
     res.id_estatus_imss = estatus_imss_uuid.map(|u| u.to_string());
     res.id_estatus = estatus_uuid.map(|u| u.to_string());
     res.nombre = clean_nombre;
-    res.folio = clean_folio;
+    res.folio = folio_opt.unwrap_or_else(|| "S/F".to_string());
     res.created_at = created_at;
     Ok(res)
 }
@@ -432,6 +447,11 @@ pub fn update_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
 
     let clean_nombre = item.nombre.trim().to_uppercase();
     let clean_folio = item.folio.trim().to_uppercase();
+    let folio_opt = if clean_folio.is_empty() || clean_folio == "S/F" {
+        None
+    } else {
+        Some(clean_folio.clone())
+    };
 
     client
         .execute(
@@ -442,7 +462,7 @@ pub fn update_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
                 &estatus_imss_uuid,
                 &estatus_uuid,
                 &clean_nombre,
-                &clean_folio,
+                &folio_opt,
                 &item.fecha_entrega_imss,
                 &item.fecha_aprobacion_imss,
                 &item.fecha_maxima_aprobacion_imss,
@@ -454,14 +474,24 @@ pub fn update_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
                 &item.pidio_prorroga,
             ],
         )
-        .map_err(|e| format!("Error al actualizar revisión: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.revisiones", "UPDATE", &e.to_string());
+            format!("Error al actualizar revisión: {}", e)
+        })?;
+
+    crate::app_logger::log_db_write(
+        "public.revisiones",
+        "UPDATE",
+        &format!("id={}, nombre='{}', folio='{:?}'", rev_uuid, clean_nombre, folio_opt),
+        query,
+    );
 
     let mut res = item.clone();
     res.id_concepto_diferencia = conc_uuid.map(|u| u.to_string());
     res.id_estatus_imss = estatus_imss_uuid.map(|u| u.to_string());
     res.id_estatus = estatus_uuid.map(|u| u.to_string());
     res.nombre = clean_nombre;
-    res.folio = clean_folio;
+    res.folio = folio_opt.unwrap_or_else(|| "S/F".to_string());
     Ok(res)
 }
 
@@ -482,14 +512,38 @@ pub fn delete_revision(client: &mut Client, id: &str) -> Result<(), String> {
         );
     "#;
     tx.execute(delete_cfdis_query, &[&rev_uuid])
-        .map_err(|e| format!("Error eliminando comprobantes fiscales de la revisión: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.cfdis", "DELETE", &e.to_string());
+            format!("Error eliminando comprobantes fiscales de la revisión: {}", e)
+        })?;
+    crate::app_logger::log_db_write(
+        "public.cfdis",
+        "DELETE",
+        &format!("id_revision={}", rev_uuid),
+        delete_cfdis_query,
+    );
 
     // 2. Eliminar la revisión en sí (por ON DELETE CASCADE se eliminan liquidaciones, registros_obras, nominas, etc.)
     tx.execute("DELETE FROM public.revisiones WHERE id = $1", &[&rev_uuid])
-        .map_err(|e| format!("Error al eliminar revisión: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.revisiones", "DELETE", &e.to_string());
+            format!("Error al eliminar revisión: {}", e)
+        })?;
+    crate::app_logger::log_db_write(
+        "public.revisiones",
+        "DELETE",
+        &format!("id={}", rev_uuid),
+        "DELETE FROM public.revisiones WHERE id = $1",
+    );
 
     tx.commit()
         .map_err(|e| format!("Error confirmando eliminación de revisión: {}", e))?;
+    crate::app_logger::log_db_write(
+        "public.revisiones_tx",
+        "COMMIT",
+        &format!("Eliminación de revisión {} confirmada", rev_uuid),
+        "tx.commit()",
+    );
     Ok(())
 }
 
@@ -560,10 +614,20 @@ pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
                 &clean_subdelegacion,
             ],
         )
-        .map_err(|e| format!("Error al crear registro de obra: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.registros_obras", "INSERT/UPSERT", &e.to_string());
+            format!("Error al crear registro de obra: {}", e)
+        })?;
 
     let new_id: Uuid = row.get(0);
     let created_at: String = row.get(1);
+
+    crate::app_logger::log_db_write(
+        "public.registros_obras",
+        "INSERT",
+        &format!("id={}, id_revision={}, numero='{}', clase='{}', tipo='{}', monto={:?}", new_id, rev_uuid, clean_numero, clean_clase, clean_tipo_obra, item.monto),
+        query,
+    );
 
     let mut res = item.clone();
     res.id = new_id.to_string();
@@ -630,7 +694,17 @@ pub fn update_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
                 &clean_subdelegacion,
             ],
         )
-        .map_err(|e| format!("Error al actualizar registro de obra: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.registros_obras", "UPDATE", &e.to_string());
+            format!("Error al actualizar registro de obra: {}", e)
+        })?;
+
+    crate::app_logger::log_db_write(
+        "public.registros_obras",
+        "UPDATE",
+        &format!("id={}, numero='{}', clase='{}', tipo='{}', monto={:?}", obra_uuid, clean_numero, clean_clase, clean_tipo_obra, item.monto),
+        query,
+    );
 
     let mut res = item.clone();
     res.numero = clean_numero;
@@ -649,7 +723,16 @@ pub fn delete_obra(client: &mut Client, id: &str) -> Result<(), String> {
     let obra_uuid = Uuid::parse_str(id).map_err(|e| format!("ID de Obra inválido: {}", e))?;
     client
         .execute("DELETE FROM public.registros_obras WHERE id = $1", &[&obra_uuid])
-        .map_err(|e| format!("Error al eliminar registro de obra: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.registros_obras", "DELETE", &e.to_string());
+            format!("Error al eliminar registro de obra: {}", e)
+        })?;
+    crate::app_logger::log_db_write(
+        "public.registros_obras",
+        "DELETE",
+        &format!("id={}", obra_uuid),
+        "DELETE FROM public.registros_obras WHERE id = $1",
+    );
     Ok(())
 }
 
@@ -754,6 +837,34 @@ mod tests {
         // Sin monto total se alerta para el límite del 18%
         let necesita_aviso_monto = item.monto <= 0.0;
         assert!(necesita_aviso_monto, "Sin monto capturado debe emitir aviso para cálculo del 18%");
+    }
+
+    #[test]
+    fn test_revision_folio_opcional() {
+        // Folio vacío o "S/F" debe normalizarse a None para permitir NULL en Postgres sin chocar con UNIQUE constraint
+        let folio_vacio = "";
+        let opt_vacio = if folio_vacio.trim().is_empty() || folio_vacio.trim() == "S/F" {
+            None
+        } else {
+            Some(folio_vacio.trim().to_uppercase())
+        };
+        assert!(opt_vacio.is_none());
+
+        let folio_sf = "S/F";
+        let opt_sf = if folio_sf.trim().is_empty() || folio_sf.trim() == "S/F" {
+            None
+        } else {
+            Some(folio_sf.trim().to_uppercase())
+        };
+        assert!(opt_sf.is_none());
+
+        let folio_capturado = "0503/CCE/2026/0153S";
+        let opt_capturado = if folio_capturado.trim().is_empty() || folio_capturado.trim() == "S/F" {
+            None
+        } else {
+            Some(folio_capturado.trim().to_uppercase())
+        };
+        assert_eq!(opt_capturado, Some("0503/CCE/2026/0153S".to_string()));
     }
 }
 

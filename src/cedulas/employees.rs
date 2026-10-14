@@ -104,6 +104,7 @@ pub struct Employee {
     pub rfc: Option<String>,
     pub curp: Option<String>,
     pub clave_ubicacion: Option<String>,
+    pub pensionado: Option<String>,
     pub mes_periodo: Option<String>,
     pub anio_periodo: Option<String>,
     pub data_employee: Vec<DataEmployee>,
@@ -117,6 +118,7 @@ pub struct EmployeeFlatRow {
     pub rfc: Option<String>,
     pub curp: Option<String>,
     pub clave_ubicacion: Option<String>,
+    pub pensionado: Option<String>,
     pub registro_obras: String,
     pub mes_periodo: Option<String>,
     pub anio_periodo: Option<String>,
@@ -175,6 +177,111 @@ pub struct EncabezadoTokens {
     pub rfc: Option<String>,
     pub curp: Option<String>,
     pub clave_ubicacion: Option<String>,
+    pub pensionado: Option<String>,
+}
+
+/// Extrae identificadores de pensionado (P/CV, P/IV, P, etc.) de una lista de tokens.
+/// Devuelve el tipo de pensión normalizado (Option<String>) y los tokens restantes limpios.
+pub fn extract_pension_info<'a>(tokens: &'a [&'a str]) -> (Option<String>, Vec<&'a str>) {
+    if tokens.is_empty() {
+        return (None, Vec::new());
+    }
+
+    let mut pension: Option<String> = None;
+    let mut kept: Vec<&'a str> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+
+    while i < tokens.len() {
+        let t = tokens[i].trim();
+        let upper = t.to_uppercase();
+        let normalized = upper.replace(['.', ' '], "");
+
+        // Secuencia de 3 tokens: "P" + ("/" | "-") + ("CV" | "IV")
+        if (upper == "P" || upper == "P.") && i + 2 < tokens.len() && (tokens[i + 1] == "/" || tokens[i + 1] == "-") {
+            let next2 = tokens[i + 2].trim().to_uppercase().replace(['.', ' '], "");
+            if next2 == "CV" {
+                if pension.is_none() {
+                    pension = Some("P/CV".to_string());
+                }
+                i += 3;
+                continue;
+            } else if next2 == "IV" {
+                if pension.is_none() {
+                    pension = Some("P/IV".to_string());
+                }
+                i += 3;
+                continue;
+            }
+        }
+
+        // Secuencias de 2 tokens:
+        // "P/" o "P-" seguido de "CV" o "IV"
+        // "P" seguido de "/CV", "-CV", "CV", "/IV", "-IV", "IV"
+        if i + 1 < tokens.len() {
+            let next = tokens[i + 1].trim().to_uppercase().replace(['.', ' '], "");
+            if (normalized == "P/" || normalized == "P-") && (next == "CV" || next == "IV") {
+                if pension.is_none() {
+                    pension = Some(format!("P/{}", next));
+                }
+                i += 2;
+                continue;
+            }
+            if normalized == "P" && (next == "/CV" || next == "-CV" || next == "CV") {
+                if pension.is_none() {
+                    pension = Some("P/CV".to_string());
+                }
+                i += 2;
+                continue;
+            }
+            if normalized == "P" && (next == "/IV" || next == "-IV" || next == "IV") {
+                if pension.is_none() {
+                    pension = Some("P/IV".to_string());
+                }
+                i += 2;
+                continue;
+            }
+        }
+
+        // Token único: "P/CV", "P-CV", "PCV", "P/C.V.", "P/IV", "P-IV", "PIV", "P/I.V."
+        if normalized == "P/CV" || normalized == "P-CV" || normalized == "PCV" {
+            if pension.is_none() {
+                pension = Some("P/CV".to_string());
+            }
+            i += 1;
+            continue;
+        }
+        if normalized == "P/IV" || normalized == "P-IV" || normalized == "PIV" {
+            if pension.is_none() {
+                pension = Some("P/IV".to_string());
+            }
+            i += 1;
+            continue;
+        }
+
+        // Standalone "P" o "P." al inicio si va seguido de al menos 2 tokens (apellidos y nombre)
+        if i == 0 && (upper == "P" || upper == "P.") && tokens.len() >= 3 {
+            if pension.is_none() {
+                pension = Some("P".to_string());
+            }
+            i += 1;
+            continue;
+        }
+
+        kept.push(tokens[i]);
+        i += 1;
+    }
+
+    (pension, kept)
+}
+
+/// Limpia un nombre completo extrayendo cualquier indicador de pensión que contenga.
+pub fn clean_name_and_extract_pension(raw_name: &str) -> (String, Option<String>) {
+    let tokens: Vec<&str> = raw_name.split_whitespace().collect();
+    if tokens.is_empty() {
+        return (String::new(), None);
+    }
+    let (pension, clean_tokens) = extract_pension_info(&tokens);
+    (clean_tokens.join(" "), pension)
 }
 
 /// Trocea la parte de la línea que sigue al NSS en tokens y se queda con los
@@ -239,11 +346,14 @@ pub fn parse_encabezado_tokens(resto: &str) -> EncabezadoTokens {
         break;
     }
 
+    let (pensionado, tokens_nombre) = extract_pension_info(&tokens[..fin]);
+
     EncabezadoTokens {
-        nombre: tokens[..fin].join(" "),
+        nombre: tokens_nombre.join(" "),
         rfc,
         curp,
         clave_ubicacion: clave,
+        pensionado,
     }
 }
 
@@ -395,12 +505,17 @@ impl Employee {
                 self.rfc = t.rfc;
                 self.curp = t.curp;
                 self.clave_ubicacion = t.clave_ubicacion;
+                self.pensionado = t.pensionado;
             }
 
             // Si el NSS no se encontró en la línea, se recurre al reparto posicional.
             if self.no_seguro_social.is_none() {
                 if let Some(m) = caps.name("nombre") {
-                    self.nombre = Some(m.as_str().trim().to_string());
+                    let (clean_nom, pens) = clean_name_and_extract_pension(m.as_str());
+                    self.nombre = Some(clean_nom);
+                    if self.pensionado.is_none() {
+                        self.pensionado = pens;
+                    }
                 }
                 self.rfc = caps
                     .name("rfc")
@@ -413,6 +528,15 @@ impl Employee {
                 self.clave_ubicacion = caps
                     .name("clave_ubicacion")
                     .map(|m| m.as_str().trim().to_string());
+            }
+
+            // Garantizar que self.nombre quede siempre limpio y sin prefijos de pensionado
+            if let Some(ref nom) = self.nombre {
+                let (clean_nom, pens) = clean_name_and_extract_pension(nom);
+                self.nombre = Some(clean_nom);
+                if self.pensionado.is_none() {
+                    self.pensionado = pens;
+                }
             }
 
             Self::sanitize_employee_identifiers(
@@ -502,6 +626,7 @@ impl Employee {
                 rfc: self.rfc.clone(),
                 curp: self.curp.clone(),
                 clave_ubicacion: self.clave_ubicacion.clone(),
+                pensionado: self.pensionado.clone(),
                 registro_obras: registro_obras_str.clone(),
                 mes_periodo: de.mes_periodo.clone(),
                 anio_periodo: de.anio_periodo.clone(),
@@ -662,5 +787,48 @@ mod tests {
 
         assert_eq!(emp.nombre.as_deref(), Some("CRUZ LUNA ROBERTO"));
         assert_eq!(emp.rfc.as_deref(), Some("XAXX-010101-000"));
+    }
+
+    #[test]
+    fn test_parse_employee_pensionado_pcv() {
+        let patterns = initialize_patterns().unwrap();
+        // Caso exacto de la cédula de septiembre: FLORES RUIZ GUILLERMO
+        let sample = "32-85-59-4018-8  P/CV  FLORES RUIZ GUILLERMO    FORG590625HCLLZL01\n";
+        let mut emp = Employee::new();
+        emp.set_values(sample, &[], None, &patterns);
+
+        assert_eq!(emp.no_seguro_social.as_deref(), Some("32-85-59-4018-8"));
+        assert_eq!(emp.nombre.as_deref(), Some("FLORES RUIZ GUILLERMO"));
+        assert_eq!(emp.pensionado.as_deref(), Some("P/CV"));
+        assert_eq!(emp.curp.as_deref(), Some("FORG590625HCLLZL01"));
+    }
+
+    #[test]
+    fn test_parse_employee_pensionado_lazarin_and_marin() {
+        let patterns = initialize_patterns().unwrap();
+        // Casos adicionales de la cédula: LAZARIN ALONZO y MARIN LOPEZ
+        let s1 = "32-80-64-1338-4  P/CV  LAZARIN ALONZO RAMON MANUEL EPIGMENIO    LAAR640111HCLZLM00\n";
+        let mut emp1 = Employee::new();
+        emp1.set_values(s1, &[], None, &patterns);
+        assert_eq!(emp1.nombre.as_deref(), Some("LAZARIN ALONZO RAMON MANUEL EPIGMENIO"));
+        assert_eq!(emp1.pensionado.as_deref(), Some("P/CV"));
+        assert_eq!(emp1.curp.as_deref(), Some("LAAR640111HCLZLM00"));
+
+        let s2 = "32-89-66-5891-4  P/CV  MARIN LOPEZ ANDRES    MALA660204HCLRPN09\n";
+        let mut emp2 = Employee::new();
+        emp2.set_values(s2, &[], None, &patterns);
+        assert_eq!(emp2.nombre.as_deref(), Some("MARIN LOPEZ ANDRES"));
+        assert_eq!(emp2.pensionado.as_deref(), Some("P/CV"));
+        assert_eq!(emp2.curp.as_deref(), Some("MALA660204HCLRPN09"));
+    }
+
+    #[test]
+    fn test_parse_employee_pensionado_piv() {
+        let patterns = initialize_patterns().unwrap();
+        let s = "32-11-22-3344-5  P/IV  LOPEZ HERNANDEZ CARLOS    LOHC800101HDF00\n";
+        let mut emp = Employee::new();
+        emp.set_values(s, &[], None, &patterns);
+        assert_eq!(emp.nombre.as_deref(), Some("LOPEZ HERNANDEZ CARLOS"));
+        assert_eq!(emp.pensionado.as_deref(), Some("P/IV"));
     }
 }

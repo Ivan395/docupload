@@ -173,6 +173,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             rfc char(13),
             curp char(18),
             nss char(11),
+            clave_ubicacion varchar(50),
+            pensionado varchar(10),
+            esta_activo boolean DEFAULT true,
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -466,6 +469,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS clave_ubicacion varchar(50);
+        ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS pensionado varchar(10);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS esta_activo boolean DEFAULT true;
         ALTER TABLE public.registros_obras ADD COLUMN IF NOT EXISTS creado_usuario boolean;
         ALTER TABLE IF EXISTS revision_history.registros_obras ADD COLUMN IF NOT EXISTS creado_usuario boolean;
@@ -483,17 +487,8 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_obra uuid;
         ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS dias_registro_obra smallint;
 
-        -- Reparación: Restaurar días originales de detalles_liquidaciones cuando hayan sido corrompidos por el bug de actualización por id_reporte_liquidacion
-        UPDATE public.reportes_detalles_liquidaciones rdl
-        SET dias = dl.dias
-        FROM public.reportes_liquidaciones rl,
-             public.detalles_liquidaciones dl
-        WHERE rdl.id_reporte_liquidacion = rl.id
-          AND dl.id_liquidacion = rl.id_liquidacion
-          AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL))
-          AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL))
-          AND rdl.dias != dl.dias
-          AND dl.dias IS NOT NULL;
+        -- Reparación histórica (deshabilitada para preservar ediciones del usuario en Reporte Liquidaciones)
+        -- UPDATE public.reportes_detalles_liquidaciones rdl SET dias = dl.dias ...
 
         -- Inicializar id_registro_obra y dias_registro_obra en reportes_detalles_liquidaciones desde rvol si aún son nulos
         UPDATE public.reportes_detalles_liquidaciones rdl
@@ -588,6 +583,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             END IF;
             IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'revision_history' AND table_name = 'empleados') THEN
                 ALTER TABLE revision_history.empleados ADD COLUMN IF NOT EXISTS clave_ubicacion varchar(50);
+                ALTER TABLE revision_history.empleados ADD COLUMN IF NOT EXISTS pensionado varchar(10);
                 ALTER TABLE revision_history.empleados ADD COLUMN IF NOT EXISTS esta_activo boolean DEFAULT true;
             END IF;
             IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'revision_history' AND table_name = 'registros_obras') THEN
@@ -682,22 +678,61 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         ALTER TABLE public.registros_obras ALTER COLUMN creado_usuario SET DEFAULT false;
 
         -- Limpiar registros de obra inválidos (RFC/CURP guardados por error o no conformes a SIROC/SATIC).
-        -- `numero` es char(15): PostgreSQL lo rellena con espacios, y un patrón anclado con `$` NUNCA
-        -- coincide contra el valor con relleno. Por eso hay que comparar siempre sobre TRIM(numero):
-        -- sin TRIM esta sentencia borraba TODAS las obras válidas en cada arranque y arrastraba
-        -- en cascada sus vinculaciones.
+        -- Conservar estrictamente cualquier obra creada o vinculada por el usuario (creado_usuario = true).
         DELETE FROM public.registros_obras
-        WHERE TRIM(numero) ~* '^[A-Z]{3,4}[0-9]{6}'
-           OR (TRIM(numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(numero) !~* '^[0-9]{8,10}$');
+        WHERE COALESCE(creado_usuario, false) = false
+          AND (TRIM(numero) ~* '^[A-Z]{3,4}[0-9]{6}'
+           OR (TRIM(numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(numero) !~* '^[0-9]{8,10}$'));
 
         DO $$
         BEGIN
             IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'revision_history' AND table_name = 'registros_obras') THEN
                 DELETE FROM revision_history.registros_obras
-                WHERE TRIM(numero) ~* '^[A-Z]{3,4}[0-9]{6}'
-                   OR (TRIM(numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(numero) !~* '^[0-9]{8,10}$');
+                WHERE COALESCE(creado_usuario, false) = false
+                  AND (TRIM(numero) ~* '^[A-Z]{3,4}[0-9]{6}'
+                   OR (TRIM(numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(numero) !~* '^[0-9]{8,10}$'));
             END IF;
         END $$;
+
+        -- Actualizar restricciones de días de obra para permitir 0 días (desasignación / días en cero)
+        ALTER TABLE public.reportes_vinculaciones_obras_liquidaciones DROP CONSTRAINT IF EXISTS chk_rvol_dias_registro_obra;
+        ALTER TABLE public.reportes_vinculaciones_obras_liquidaciones ADD CONSTRAINT chk_rvol_dias_registro_obra CHECK (dias_registro_obra IS NULL OR (dias_registro_obra >= 0 AND dias_registro_obra <= 31));
+
+        ALTER TABLE public.vinculaciones_obras_liquidaciones DROP CONSTRAINT IF EXISTS chk_vinculaciones_obras_liquidaciones_dias_registro_obra;
+        ALTER TABLE public.vinculaciones_obras_liquidaciones ADD CONSTRAINT chk_vinculaciones_obras_liquidaciones_dias_registro_obra CHECK (dias_registro_obra IS NULL OR (dias_registro_obra >= 0 AND dias_registro_obra <= 31));
+
+        -- Limpiar entidad, domicilio y actividad en registros_patronales que contienen sufijos de encabezado SUA
+        UPDATE public.registros_patronales 
+        SET entidad = TRIM(REGEXP_REPLACE(entidad, '\s*(PRIMA\s+DE\s+R\.?T\.?|V\s*[0-9]|VERSI[OÓ]N).*$', '', 'i')) 
+        WHERE entidad ~* '(PRIMA|V\s*[0-9]|VERSI)';
+
+        UPDATE public.registros_patronales 
+        SET domicilio = TRIM(REGEXP_REPLACE(domicilio, '\s*(POB\.?\s*MUN\.?\s*(/|\s)?\s*ALCALD[IÍ]A|POBLACI[OÓ]N|MUNICIPIO|ALCALD[IÍ]A)\s*:?.*$', '', 'i')) 
+        WHERE domicilio ~* '(POB\.?\s*MUN|POBLACI[OÓ]N|ALCALD[IÍ]A)';
+
+        UPDATE public.registros_patronales 
+        SET actividad = TRIM(REGEXP_REPLACE(actividad, '\s*(SUBDELEGACI[OÓ]N|DELEGACI[OÓ]N)\s*(IMSS)?\s*:?.*$', '', 'i')) 
+        WHERE actividad ~* '(SUBDELEGACI[OÓ]N|DELEGACI[OÓ]N)';
+
+        -- Limpiar nombres de empleados existentes que contengan identificadores de pensionado (P/CV, P/IV, etc.)
+        UPDATE public.empleados
+        SET pensionado = 'P/CV',
+            nombre = TRIM(REGEXP_REPLACE(nombre, '^\s*P\s*[/ -]?\s*C\.?V\.?\s*', '', 'i'))
+        WHERE nombre ~* '^\s*P\s*[/ -]?\s*C\.?V\.?\s*'
+          AND (pensionado IS NULL OR pensionado = '');
+
+        UPDATE public.empleados
+        SET pensionado = 'P/IV',
+            nombre = TRIM(REGEXP_REPLACE(nombre, '^\s*P\s*[/ -]?\s*I\.?V\.?\s*', '', 'i'))
+        WHERE nombre ~* '^\s*P\s*[/ -]?\s*I\.?V\.?\s*'
+          AND (pensionado IS NULL OR pensionado = '');
+
+        UPDATE public.empleados
+        SET pensionado = 'P',
+            nombre = TRIM(REGEXP_REPLACE(nombre, '^\s*P\s+', '', 'i'))
+        WHERE nombre ~* '^\s*P\s+'
+          AND nombre !~* '^\s*P\s*[/ -]'
+          AND (pensionado IS NULL OR pensionado = '');
 
         -- Corregir empleados donde la CURP o RFC se guardó erróneamente en clave_ubicacion
         UPDATE public.empleados
@@ -1026,6 +1061,47 @@ WHERE NOT EXISTS (
                         IF (v_has_movements OR v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL) AND NEW.dias_registro_obra > v_overlap_days THEN
                             RAISE EXCEPTION 'Los días de obra (%) exceden los días máximos permitidos para este periodo según sus movimientos y vigencia de obra (%).', NEW.dias_registro_obra, v_overlap_days;
                         END IF;
+
+                        -- Validar suma total de días entre todas las obras del empleado en este mes y que no se superpongan
+                        DECLARE
+                            v_other_days INT := 0;
+                            r_other RECORD;
+                            v_oth_s DATE;
+                            v_oth_e DATE;
+                        BEGIN
+                            SELECT COALESCE(SUM(rdl_other.dias_registro_obra), 0) INTO v_other_days
+                            FROM public.reportes_detalles_liquidaciones rdl_other
+                            WHERE rdl_other.id_reporte_liquidacion = NEW.id_reporte_liquidacion
+                              AND rdl_other.id != NEW.id
+                              AND rdl_other.id_registro_obra IS NOT NULL;
+
+                            IF (v_other_days + NEW.dias_registro_obra) > NEW.dias THEN
+                                RAISE EXCEPTION 'La suma de días de obra (% + %) no puede superar los días de cédula del empleado (%).',
+                                    v_other_days, NEW.dias_registro_obra, NEW.dias;
+                            END IF;
+
+                            FOR r_other IN
+                                SELECT ro_other.numero, ro_other.fecha_inicio, ro_other.fecha_fin, rdl_other.id_registro_obra
+                                FROM public.reportes_detalles_liquidaciones rdl_other
+                                JOIN public.registros_obras ro_other ON ro_other.id = rdl_other.id_registro_obra
+                                WHERE rdl_other.id_reporte_liquidacion = NEW.id_reporte_liquidacion
+                                  AND rdl_other.id != NEW.id
+                                  AND rdl_other.id_registro_obra IS NOT NULL
+                                  AND rdl_other.dias_registro_obra > 0
+                            LOOP
+                                IF r_other.id_registro_obra = NEW.id_registro_obra THEN
+                                    RAISE EXCEPTION 'El trabajador ya se encuentra vinculado a la obra % en este periodo.', r_other.numero;
+                                END IF;
+
+                                IF (v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL) AND (r_other.fecha_inicio IS NOT NULL OR r_other.fecha_fin IS NOT NULL) THEN
+                                    v_oth_s := GREATEST(v_month_start, COALESCE(r_other.fecha_inicio, v_month_start));
+                                    v_oth_e := LEAST(v_month_end, COALESCE(r_other.fecha_fin, v_month_end));
+                                    IF GREATEST(v_obra_start, v_oth_s) <= LEAST(v_obra_end, v_oth_e) THEN
+                                        RAISE EXCEPTION 'Las fechas de la obra se superponen con la obra % ya vinculada al trabajador en este periodo.', r_other.numero;
+                                    END IF;
+                                END IF;
+                            END LOOP;
+                        END;
                     END IF;
                 END IF;
             END IF;

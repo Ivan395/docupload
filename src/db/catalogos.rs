@@ -92,6 +92,7 @@ pub struct EmpleadoItem {
     pub nss: String,
     pub registro_patronal: String,
     pub sbc_diario: f64,
+    pub pensionado: String,
     pub esta_activo: bool,
 }
 
@@ -432,15 +433,26 @@ pub fn create_cliente(
     let clean_curp = if curp_raw.is_empty() { None } else { Some(curp_raw) };
 
     let id = Uuid::now_v7();
-    client
-        .execute(
-            r#"
+    let query_insert_cliente = r#"
             INSERT INTO public.clientes (id, nombre, rfc, razon_social, curp, id_clasificacion_cliente)
             VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
+    "#;
+    client
+        .execute(
+            query_insert_cliente,
             &[&id, &clean_nombre, &clean_rfc, &r_social, &clean_curp, &id_clasificacion_cliente],
         )
-        .map_err(|e| format!("Error guardando cliente: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.clientes", "INSERT", &e.to_string());
+            format!("Error guardando cliente: {}", e)
+        })?;
+
+    crate::app_logger::log_db_write(
+        "public.clientes",
+        "INSERT",
+        &format!("id={}, nombre='{}', rfc='{}', razon_social={:?}", id, clean_nombre, clean_rfc, r_social),
+        query_insert_cliente,
+    );
 
     Ok(ClienteItem {
         id: id.to_string(),
@@ -543,9 +555,7 @@ pub fn update_cliente(
     let curp_raw = clean_alphanumeric(curp);
     let clean_curp = if curp_raw.is_empty() { None } else { Some(curp_raw) };
 
-    client
-        .execute(
-            r#"
+    let query_update_cliente = r#"
             UPDATE public.clientes
             SET nombre = $2,
                 razon_social = $3,
@@ -553,10 +563,23 @@ pub fn update_cliente(
                 curp = $5,
                 id_clasificacion_cliente = COALESCE($6, id_clasificacion_cliente)
             WHERE id = $1
-            "#,
+    "#;
+    client
+        .execute(
+            query_update_cliente,
             &[&client_uuid, &clean_nombre, &r_social, &clean_rfc, &clean_curp, &id_clasificacion_cliente],
         )
-        .map_err(|e| format!("Error actualizando cliente: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.clientes", "UPDATE", &e.to_string());
+            format!("Error actualizando cliente: {}", e)
+        })?;
+
+    crate::app_logger::log_db_write(
+        "public.clientes",
+        "UPDATE",
+        &format!("id={}, nombre='{}', rfc='{}', razon_social={:?}", client_uuid, clean_nombre, clean_rfc, r_social),
+        query_update_cliente,
+    );
 
     Ok(())
 }
@@ -781,7 +804,17 @@ pub fn create_registro_patronal(
                 &id_crp,
             ],
         )
-        .map_err(|e| format!("Error guardando registro patronal: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.registros_patronales", "INSERT", &e.to_string());
+            format!("Error guardando registro patronal: {}", e)
+        })?;
+
+    crate::app_logger::log_db_write(
+        "public.registros_patronales",
+        "INSERT",
+        &format!("id={}, id_cliente={}, registro='{}', actividad='{}', delegacion={:?}", id, cliente_uuid, clean_reg, clean_act, clean_del),
+        "INSERT INTO public.registros_patronales ...",
+    );
 
     Ok(RegistroPatronalItem {
         id: id.to_string(),
@@ -934,7 +967,17 @@ pub fn update_registro_patronal(
                 &id_crp,
             ],
         )
-        .map_err(|e| format!("Error actualizando registro patronal: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.registros_patronales", "UPDATE", &e.to_string());
+            format!("Error actualizando registro patronal: {}", e)
+        })?;
+
+    crate::app_logger::log_db_write(
+        "public.registros_patronales",
+        "UPDATE",
+        &format!("id={}, registro='{}', actividad='{}', delegacion={:?}", rp_uuid, clean_reg, clean_act, clean_del),
+        "UPDATE public.registros_patronales SET ... WHERE id = $1",
+    );
 
     Ok(())
 }
@@ -972,7 +1015,8 @@ pub fn fetch_empleados_by_cliente(
                     (SELECT n.salario_diario_integrado FROM public.nominas n WHERE n.id_empleado = e.id ORDER BY n.fecha_pago DESC NULLS LAST LIMIT 1),
                     0.0
                 ) AS sbc_diario,
-                COALESCE(e.esta_activo, true) AS esta_activo
+                COALESCE(e.esta_activo, true) AS esta_activo,
+                COALESCE(TRIM(e.pensionado), '') AS pensionado
             FROM public.empleados e
             JOIN public.clientes c ON e.id_cliente = c.id
             WHERE e.id_cliente = $1
@@ -994,6 +1038,7 @@ pub fn fetch_empleados_by_cliente(
         let reg: String = r.get(7);
         let sbc: f64 = r.get(8);
         let activo: bool = r.get(9);
+        let pensionado: String = r.get(10);
 
         list.push(EmpleadoItem {
             id: id.to_string(),
@@ -1005,6 +1050,7 @@ pub fn fetch_empleados_by_cliente(
             nss,
             registro_patronal: reg,
             sbc_diario: sbc,
+            pensionado,
             esta_activo: activo,
         });
     }
@@ -1128,6 +1174,7 @@ pub fn create_empleado(
         nss: clean_nss.unwrap_or_default(),
         registro_patronal: "".to_string(),
         sbc_diario: 0.0,
+        pensionado: "".to_string(),
         esta_activo,
     })
 }
@@ -1152,14 +1199,38 @@ pub fn delete_cliente(client: &mut Client, id: &str) -> Result<(), String> {
         );
     "#;
     tx.execute(delete_cfdis_query, &[&cliente_uuid])
-        .map_err(|e| format!("Error eliminando comprobantes fiscales (CFDIs) del cliente: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.cfdis", "DELETE", &e.to_string());
+            format!("Error eliminando comprobantes fiscales (CFDIs) del cliente: {}", e)
+        })?;
+    crate::app_logger::log_db_write(
+        "public.cfdis",
+        "DELETE",
+        &format!("id_cliente={}", cliente_uuid),
+        delete_cfdis_query,
+    );
 
     // 2. Eliminar el cliente en sí (en cascada elimina registros_patronales, empleados, revisiones, obras, liquidaciones, etc.)
     tx.execute("DELETE FROM public.clientes WHERE id = $1", &[&cliente_uuid])
-        .map_err(|e| format!("Error eliminando cliente de la base de datos: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.clientes", "DELETE", &e.to_string());
+            format!("Error eliminando cliente de la base de datos: {}", e)
+        })?;
+    crate::app_logger::log_db_write(
+        "public.clientes",
+        "DELETE",
+        &format!("id={}", cliente_uuid),
+        "DELETE FROM public.clientes WHERE id = $1",
+    );
 
     tx.commit()
         .map_err(|e| format!("Error confirmando eliminación de cliente: {}", e))?;
+    crate::app_logger::log_db_write(
+        "public.clientes_tx",
+        "COMMIT",
+        &format!("Eliminación de cliente {} confirmada", cliente_uuid),
+        "tx.commit()",
+    );
     Ok(())
 }
 
@@ -1182,14 +1253,38 @@ pub fn delete_registro_patronal(client: &mut Client, id: &str) -> Result<(), Str
         );
     "#;
     tx.execute(delete_cfdis_query, &[&rp_uuid])
-        .map_err(|e| format!("Error eliminando comprobantes fiscales (CFDIs) del registro patronal: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.cfdis", "DELETE", &e.to_string());
+            format!("Error eliminando comprobantes fiscales (CFDIs) del registro patronal: {}", e)
+        })?;
+    crate::app_logger::log_db_write(
+        "public.cfdis",
+        "DELETE",
+        &format!("id_registro_patronal={}", rp_uuid),
+        delete_cfdis_query,
+    );
 
     // 2. Eliminar el registro patronal en sí (en cascada elimina revisiones, obras, liquidaciones, etc.)
     tx.execute("DELETE FROM public.registros_patronales WHERE id = $1", &[&rp_uuid])
-        .map_err(|e| format!("Error eliminando registro patronal: {}", e))?;
+        .map_err(|e| {
+            crate::app_logger::log_db_simple_error("public.registros_patronales", "DELETE", &e.to_string());
+            format!("Error eliminando registro patronal: {}", e)
+        })?;
+    crate::app_logger::log_db_write(
+        "public.registros_patronales",
+        "DELETE",
+        &format!("id={}", rp_uuid),
+        "DELETE FROM public.registros_patronales WHERE id = $1",
+    );
 
     tx.commit()
         .map_err(|e| format!("Error confirmando eliminación de registro patronal: {}", e))?;
+    crate::app_logger::log_db_write(
+        "public.registros_patronales_tx",
+        "COMMIT",
+        &format!("Eliminación de registro patronal {} confirmada", rp_uuid),
+        "tx.commit()",
+    );
     Ok(())
 }
 

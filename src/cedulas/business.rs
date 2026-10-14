@@ -66,6 +66,132 @@ pub fn month_num_to_name(month: u32) -> &'static str {
     }
 }
 
+pub fn clean_entidad(s: &str) -> String {
+    let mut text = s.trim().to_uppercase();
+    let markers = [
+        " PRIMA",
+        " V ",
+        " V3.",
+        " V 3.",
+        " VERSI",
+        " POB.",
+        " POB ",
+        " MUN.",
+        " ALCALD",
+        " RFC",
+    ];
+    for marker in &markers {
+        if let Some(idx) = text.find(marker) {
+            text = text[..idx].trim().to_string();
+        }
+    }
+
+    const ESTADOS: &[&str] = &[
+        "AGUASCALIENTES", "BAJA CALIFORNIA SUR", "BAJA CALIFORNIA", "CAMPECHE", "CHIAPAS",
+        "CHIHUAHUA", "CIUDAD DE MEXICO", "DISTRITO FEDERAL", "CDMX", "COAHUILA DE ZARAGOZA", "COAHUILA",
+        "COLIMA", "DURANGO", "ESTADO DE MEXICO", "MEXICO", "GUANAJUATO", "GUERRERO",
+        "HIDALGO", "JALISCO", "MICHOACAN DE OCAMPO", "MICHOACAN", "MORELOS", "NAYARIT",
+        "NUEVO LEON", "OAXACA", "PUEBLA", "QUERETARO", "QUINTANA ROO", "SAN LUIS POTOSI",
+        "SINALOA", "SONORA", "TABASCO", "TAMAULIPAS", "TLAXCALA", "VERACRUZ DE IGNACIO DE LA LLAVE",
+        "VERACRUZ", "YUCATAN", "ZACATECAS",
+    ];
+
+    let norm_text = text
+        .replace(['Á', 'À', 'Ä'], "A")
+        .replace(['É', 'È', 'Ë'], "E")
+        .replace(['Í', 'Ì', 'Ï'], "I")
+        .replace(['Ó', 'Ò', 'Ö'], "O")
+        .replace(['Ú', 'Ù', 'Ü'], "U");
+
+    for &est in ESTADOS {
+        let est_norm = est
+            .replace(['Á', 'À', 'Ä'], "A")
+            .replace(['É', 'È', 'Ë'], "E")
+            .replace(['Í', 'Ì', 'Ï'], "I")
+            .replace(['Ó', 'Ò', 'Ö'], "O")
+            .replace(['Ú', 'Ù', 'Ü'], "U");
+
+        if norm_text == est_norm
+            || norm_text.starts_with(&format!("{} ", est_norm))
+            || norm_text.starts_with(&format!("{}/", est_norm))
+            || norm_text.starts_with(&format!("{}-", est_norm))
+        {
+            return est.to_string();
+        }
+    }
+
+    text.trim_end_matches([',', '/', '-', ':', ';', '.']).trim().to_string()
+}
+
+pub fn clean_domicilio(s: &str) -> String {
+    let mut text = s.trim().to_string();
+    let markers = [
+        "POB. MUN.",
+        "POB.MUN.",
+        "POB. MUN",
+        "POB MUN",
+        "POBLACION / MUNICIPIO",
+        "POBLACIÓN / MUNICIPIO",
+        "POBLACION/MUNICIPIO",
+        "POBLACION",
+        "POBLACIÓN",
+        "ALCALDÍA:",
+        "ALCALDIA:",
+        "/ ALCALDÍA",
+        "/ ALCALDIA",
+        "ALCALDÍA",
+        "ALCALDIA",
+        "MUNICIPIO:",
+        "CÓDIGO POSTAL",
+        "CODIGO POSTAL",
+        "C.P.:",
+        "ENTIDAD:",
+        "PRIMA DE R.T.",
+    ];
+    let upper = text.to_uppercase();
+    let mut cut_idx = None;
+    for &marker in &markers {
+        if let Some(idx) = upper.find(marker) {
+            cut_idx = Some(match cut_idx {
+                Some(curr) => std::cmp::min(curr, idx),
+                None => idx,
+            });
+        }
+    }
+    if let Some(idx) = cut_idx {
+        text = text[..idx].trim().to_string();
+    }
+    text.trim_end_matches([',', '/', '-', ':', ';', '.']).trim().to_uppercase()
+}
+
+pub fn clean_actividad(s: &str) -> String {
+    let mut text = s.trim().to_string();
+    let markers = [
+        "SUBDELEGACIÓN",
+        "SUBDELEGACION",
+        "DELEGACIÓN",
+        "DELEGACION",
+        "REGISTRO PATRONAL",
+        "DOMICILIO",
+        "CÓDIGO POSTAL",
+        "CODIGO POSTAL",
+    ];
+    let upper = text.to_uppercase();
+    let mut cut_idx = None;
+    for &marker in &markers {
+        if let Some(idx) = upper.find(marker) {
+            cut_idx = Some(match cut_idx {
+                Some(curr) => std::cmp::min(curr, idx),
+                None => idx,
+            });
+        }
+    }
+    if let Some(idx) = cut_idx {
+        text = text[..idx].trim().to_string();
+    }
+    text.trim_end_matches([',', '/', '-', ':', ';', '.']).trim().to_uppercase()
+}
+
 #[derive(Default, Clone)]
 pub struct Business {
     pub registro_patronal: Option<String>,
@@ -201,7 +327,10 @@ impl Business {
         if self.actividad.is_none() {
             if let Ok(Some(caps)) = patterns.business_actividad.captures(page) {
                 if let Some(m) = caps.name("actividad") {
-                    self.actividad = Some(m.as_str().trim().to_uppercase());
+                    let cleaned = clean_actividad(m.as_str());
+                    if !cleaned.is_empty() {
+                        self.actividad = Some(cleaned);
+                    }
                 }
             }
         }
@@ -218,7 +347,10 @@ impl Business {
         if self.domicilio.is_none() {
             if let Ok(Some(caps)) = patterns.business_domicilio.captures(page) {
                 if let Some(m) = caps.name("domicilio") {
-                    self.domicilio = Some(m.as_str().trim().to_uppercase());
+                    let cleaned = clean_domicilio(m.as_str());
+                    if !cleaned.is_empty() {
+                        self.domicilio = Some(cleaned);
+                    }
                 }
             }
         }
@@ -232,7 +364,10 @@ impl Business {
         if self.entidad.is_none() {
             if let Ok(Some(caps)) = patterns.business_entidad.captures(page) {
                 if let Some(m) = caps.name("entidad") {
-                    self.entidad = Some(m.as_str().trim().to_uppercase());
+                    let cleaned = clean_entidad(m.as_str());
+                    if !cleaned.is_empty() {
+                        self.entidad = Some(cleaned);
+                    }
                 }
             }
         }
