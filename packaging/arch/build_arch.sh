@@ -7,6 +7,34 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VERSION="0.5.0"
 PKG_NAME="docu_ffacd-${VERSION}-1-x86_64"
 
+echo "==> [Arch Linux] Verificando dependencias del sistema para la compilación..."
+SUDO_CMD=""
+if [ "$EUID" -ne 0 ]; then
+    if sudo -n true 2>/dev/null; then
+        SUDO_CMD="sudo -n"
+    elif [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+        SUDO_CMD="sudo"
+    fi
+fi
+
+if command -v pacman >/dev/null 2>&1; then
+    ARCH_BUILD_DEPS="base-devel fontconfig freetype2 zlib libx11 zstd"
+    MISSING_DEPS=""
+    for dep in $ARCH_BUILD_DEPS; do
+        if ! pacman -Qi "$dep" >/dev/null 2>&1; then
+            MISSING_DEPS="$MISSING_DEPS $dep"
+        fi
+    done
+    if [ -n "$MISSING_DEPS" ]; then
+        echo "==> [Arch Linux] Descargando e instalando librerías necesarias para compilar:$MISSING_DEPS"
+        if [ -n "$SUDO_CMD" ]; then
+            $SUDO_CMD pacman -Sy --noconfirm --needed $MISSING_DEPS || echo "Aviso: No se pudo completar la instalación con pacman."
+        else
+            echo "Aviso: Ejecuta con sudo o instala manualmente:$MISSING_DEPS"
+        fi
+    fi
+fi
+
 echo "==> [Arch Linux] Compilando binario de lanzamiento..."
 cd "$PROJECT_ROOT"
 cargo build --release
@@ -42,15 +70,22 @@ arch = x86_64
 license = MIT
 depend = fontconfig
 depend = freetype2
+depend = libx11
+depend = libxext
+depend = libxrender
+depend = libxml2
+depend = libpng
+depend = zlib
 EOF
 
 OUTPUT_PKG="$OUT_DIR/${PKG_NAME}.pkg.tar.zst"
+rm -f "$OUTPUT_PKG"
 
 echo "==> [Arch Linux] Creando paquete .pkg.tar.zst..."
 if command -v zstd >/dev/null 2>&1; then
     (
         cd "$BUILD_DIR"
-        tar --owner=0 --group=0 -cf - .PKGINFO usr | zstd -T0 -19 -o "$OUTPUT_PKG"
+        tar --owner=0 --group=0 -cf - .PKGINFO usr | zstd -f -T0 -19 -o "$OUTPUT_PKG"
     )
     echo "==> [Arch Linux] ¡Paquete Arch generado con éxito en:"
     ls -lh "$OUTPUT_PKG"

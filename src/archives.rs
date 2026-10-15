@@ -91,6 +91,15 @@ fn extract_zip(
     temp_dir: &Path,
     progress_callback: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
 ) -> Result<Vec<PathBuf>, String> {
+    extract_zip_with_dest(zip_path, target_extension, temp_dir, progress_callback).map(|(_, files)| files)
+}
+
+pub fn extract_zip_with_dest(
+    zip_path: &Path,
+    target_extension: &str,
+    temp_dir: &Path,
+    progress_callback: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
+) -> Result<(PathBuf, Vec<PathBuf>), String> {
     let zip_filename = zip_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
 
     // 1. First pass: inspect central directory to find all matching entries
@@ -121,7 +130,7 @@ fn extract_zip(
     };
 
     if matching_entries.is_empty() {
-        return Ok(Vec::new());
+        return Ok((temp_dir.to_path_buf(), Vec::new()));
     }
 
     let total_matching = matching_entries.len();
@@ -198,7 +207,7 @@ fn extract_zip(
         .collect();
 
     let all_extracted = extracted_chunks?.into_iter().flatten().collect();
-    Ok(all_extracted)
+    Ok((dest_folder, all_extracted))
 }
 
 fn get_7z_candidates() -> Vec<PathBuf> {
@@ -255,6 +264,14 @@ fn extract_rar(
     target_extension: &str,
     temp_dir: &Path,
 ) -> Result<Vec<PathBuf>, String> {
+    extract_rar_with_dest(rar_path, target_extension, temp_dir).map(|(_, files)| files)
+}
+
+pub fn extract_rar_with_dest(
+    rar_path: &Path,
+    target_extension: &str,
+    temp_dir: &Path,
+) -> Result<(PathBuf, Vec<PathBuf>), String> {
     let archive_stem = rar_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -334,5 +351,125 @@ fn extract_rar(
         }
     }
 
-    Ok(extracted_paths)
+    Ok((dest_folder, extracted_paths))
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedUploadItem {
+    pub local_path: PathBuf,
+    pub rel_path: String,
+}
+
+/// Recorre archivos, carpetas o paquetes ZIP/RAR y extrae los archivos correspondientes (por ej. "pdf"),
+/// preservando la estructura interna de subdirectorios relativa para su carga en RustFS.
+pub fn collect_prepared_upload_items(
+    input_paths: &[PathBuf],
+    target_extension: &str,
+    temp_dir: &Path,
+) -> Result<Vec<PreparedUploadItem>, String> {
+    let mut items = Vec::new();
+    let target_ext_lower = target_extension.to_lowercase();
+
+    for path in input_paths {
+        if !path.exists() {
+            continue;
+        }
+
+        if path.is_dir() {
+            let base_dir = path;
+            for entry in WalkDir::new(base_dir).into_iter().flatten() {
+                if entry.file_type().is_file() {
+                    let p = entry.path();
+                    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                        let ext_lower = ext.to_lowercase();
+                        if ext_lower == target_ext_lower {
+                            let rel = p.strip_prefix(base_dir)
+                                .unwrap_or(p)
+                                .to_string_lossy()
+                                .replace('\\', "/");
+                            items.push(PreparedUploadItem {
+                                local_path: p.to_path_buf(),
+                                rel_path: rel,
+                            });
+                        } else if ext_lower == "zip" {
+                            if let Ok((dest_folder, extracted)) = extract_zip_with_dest(p, &target_ext_lower, temp_dir, None) {
+                                let parent_rel = p.parent()
+                                    .and_then(|pr| pr.strip_prefix(base_dir).ok())
+                                    .map(|pr| pr.to_string_lossy().replace('\\', "/"))
+                                    .filter(|s| !s.is_empty());
+                                for f in extracted {
+                                    if let Ok(internal) = f.strip_prefix(&dest_folder) {
+                                        let internal_str = internal.to_string_lossy().replace('\\', "/");
+                                        let full_rel = match &parent_rel {
+                                            Some(pr) => format!("{}/{}", pr, internal_str),
+                                            None => internal_str,
+                                        };
+                                        items.push(PreparedUploadItem {
+                                            local_path: f,
+                                            rel_path: full_rel,
+                                        });
+                                    }
+                                }
+                            }
+                        } else if ext_lower == "rar" {
+                            if let Ok((dest_folder, extracted)) = extract_rar_with_dest(p, &target_ext_lower, temp_dir) {
+                                let parent_rel = p.parent()
+                                    .and_then(|pr| pr.strip_prefix(base_dir).ok())
+                                    .map(|pr| pr.to_string_lossy().replace('\\', "/"))
+                                    .filter(|s| !s.is_empty());
+                                for f in extracted {
+                                    if let Ok(internal) = f.strip_prefix(&dest_folder) {
+                                        let internal_str = internal.to_string_lossy().replace('\\', "/");
+                                        let full_rel = match &parent_rel {
+                                            Some(pr) => format!("{}/{}", pr, internal_str),
+                                            None => internal_str,
+                                        };
+                                        items.push(PreparedUploadItem {
+                                            local_path: f,
+                                            rel_path: full_rel,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            if ext == target_ext_lower {
+                let rel = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                items.push(PreparedUploadItem {
+                    local_path: path.clone(),
+                    rel_path: rel,
+                });
+            } else if ext == "zip" {
+                if let Ok((dest_folder, extracted)) = extract_zip_with_dest(path, &target_ext_lower, temp_dir, None) {
+                    for f in extracted {
+                        if let Ok(internal) = f.strip_prefix(&dest_folder) {
+                            let rel = internal.to_string_lossy().replace('\\', "/");
+                            items.push(PreparedUploadItem {
+                                local_path: f,
+                                rel_path: rel,
+                            });
+                        }
+                    }
+                }
+            } else if ext == "rar" {
+                if let Ok((dest_folder, extracted)) = extract_rar_with_dest(path, &target_ext_lower, temp_dir) {
+                    for f in extracted {
+                        if let Ok(internal) = f.strip_prefix(&dest_folder) {
+                            let rel = internal.to_string_lossy().replace('\\', "/");
+                            items.push(PreparedUploadItem {
+                                local_path: f,
+                                rel_path: rel,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(items)
 }

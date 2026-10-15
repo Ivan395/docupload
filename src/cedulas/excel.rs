@@ -63,6 +63,68 @@ pub fn make_cedula_sheet_name(
     candidate
 }
 
+/// Detects the operating system's UI language.
+/// Returns "english" if the system language is English, or "spanish" (default for the application domain).
+pub fn detect_system_language() -> &'static str {
+    // 1. Check environment variable override
+    if let Ok(v) = std::env::var("DOCU_LANG").or_else(|_| std::env::var("DOCU_EXCEL_LANG")) {
+        let lower = v.to_lowercase();
+        if lower.starts_with("en") || lower.contains("english") {
+            return "english";
+        }
+        if lower.starts_with("es") || lower.contains("spanish") {
+            return "spanish";
+        }
+    }
+
+    // 2. Check standard POSIX / Unix locale environment variables (Linux, macOS, Cygwin, etc.)
+    for var in ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"] {
+        if let Ok(val) = std::env::var(var) {
+            let lower = val.to_lowercase();
+            if lower.starts_with("en") || lower.contains("english") {
+                return "english";
+            }
+            if lower.starts_with("es") || lower.contains("spanish") {
+                return "spanish";
+            }
+        }
+    }
+
+    // 3. Check Windows UI language on Windows targets
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn GetUserDefaultUILanguage() -> u16;
+            fn GetUserDefaultLocaleName(lpLocaleName: *mut u16, cchLocaleName: i32) -> i32;
+        }
+
+        unsafe {
+            let mut buffer = [0u16; 85];
+            let len = GetUserDefaultLocaleName(buffer.as_mut_ptr(), buffer.len() as i32);
+            if len > 0 {
+                let name = String::from_utf16_lossy(&buffer[..(len as usize - 1)]).to_lowercase();
+                if name.starts_with("en") {
+                    return "english";
+                }
+                if name.starts_with("es") {
+                    return "spanish";
+                }
+            }
+
+            let lang_id = GetUserDefaultUILanguage();
+            let primary_lang = lang_id & 0x03FF;
+            if primary_lang == 0x09 {
+                return "english";
+            }
+            if primary_lang == 0x0A {
+                return "spanish";
+            }
+        }
+    }
+
+    "spanish"
+}
+
 pub struct Excel {
     filename: String,
     workbook: Workbook,
@@ -232,8 +294,22 @@ impl Excel {
             .set_border_color(Color::RGB(0xE2E8F0))
             .set_num_format("$#,##0.00");
 
-        // Title banner
-        worksheet.merge_range(0, 0, 0, 4, "DOCUUPLOAD - RESUMEN EJECUTIVO Y ESTADÍSTICAS CÉDULAS SUA IMSS", &title_format)?;
+        let month_headers = [
+            "REGISTRO PATRONAL",
+            "RAZÓN SOCIAL",
+            "AÑO",
+            "MES",
+            "REGISTRO DE OBRA",
+            "TRABAJADORES (SIN DUPLICAR)",
+            "TOTAL DÍAS",
+            "CUOTA PATRONAL ($)",
+            "CUOTA OBRERA ($)",
+            "TOTAL LIQUIDACIÓN ($)",
+        ];
+        let total_cols = month_headers.len() as u16;
+
+        // Title banner (merged once)
+        worksheet.merge_range(0, 0, 0, total_cols - 1, "DOCUUPLOAD - RESUMEN EJECUTIVO Y ESTADÍSTICAS CÉDULAS SUA IMSS", &title_format)?;
 
         let kpi_data = [
             ("Total de Archivos PDF Analizados", stats.total_files as f64, &kpi_val_format),
@@ -278,6 +354,368 @@ impl Excel {
             worksheet.write_number_with_format(current_row, 3, count as f64, &cell_num_format)?;
             worksheet.write_number_with_format(current_row, 4, total_biz, &cell_curr_format)?;
             current_row += 1;
+        }
+
+        // =========================================================================
+        // Table 2: TOTALES Y SUMATORIAS POR MES, REGISTRO PATRONAL Y REGISTRO DE OBRA
+        // =========================================================================
+        current_row += 2;
+
+        let cell_center_format = Format::new()
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xE2E8F0));
+
+        let month_total_label_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x0F172A))
+            .set_background_color(Color::RGB(0xF1F5F9))
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xCBD5E1));
+
+        let month_total_center_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x0F172A))
+            .set_background_color(Color::RGB(0xF1F5F9))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xCBD5E1));
+
+        let month_total_num_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x0F172A))
+            .set_background_color(Color::RGB(0xF1F5F9))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xCBD5E1))
+            .set_num_format("#,##0");
+
+        let month_total_curr_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x0F172A))
+            .set_background_color(Color::RGB(0xF1F5F9))
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0xCBD5E1))
+            .set_num_format("$#,##0.00");
+
+        let subtotal_label_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x0F766E))
+            .set_background_color(Color::RGB(0xCCFBF1))
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x99F6E4));
+
+        let subtotal_num_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x0F766E))
+            .set_background_color(Color::RGB(0xCCFBF1))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x99F6E4))
+            .set_num_format("#,##0");
+
+        let subtotal_curr_format = Format::new()
+            .set_bold()
+            .set_font_size(10)
+            .set_font_color(Color::RGB(0x0F766E))
+            .set_background_color(Color::RGB(0xCCFBF1))
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border(FormatBorder::Thin)
+            .set_border_color(Color::RGB(0x99F6E4))
+            .set_num_format("$#,##0.00");
+
+        let grand_total_label_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x134E4A))
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border_bottom(FormatBorder::Double)
+            .set_border_top(FormatBorder::Thin);
+
+        let grand_total_num_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x134E4A))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border_bottom(FormatBorder::Double)
+            .set_border_top(FormatBorder::Thin)
+            .set_num_format("#,##0");
+
+        let grand_total_curr_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x134E4A))
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border_bottom(FormatBorder::Double)
+            .set_border_top(FormatBorder::Thin)
+            .set_num_format("$#,##0.00");
+
+        // Table 2 Title banner
+        worksheet.merge_range(
+            current_row,
+            0,
+            current_row,
+            total_cols - 1,
+            "TOTALES Y SUMATORIAS POR MES, REGISTRO PATRONAL Y REGISTRO DE OBRA",
+            &table_head_format,
+        )?;
+        current_row += 1;
+
+        let table2_header_row = current_row;
+        for (col, head) in month_headers.iter().enumerate() {
+            worksheet.write_string_with_format(table2_header_row, col as u16, *head, &table_head_format)?;
+        }
+        current_row += 1;
+
+        let mut grand_unique_workers: HashSet<String> = HashSet::new();
+        let mut grand_total_dias: f64 = 0.0;
+        let mut grand_total_patronal: f64 = 0.0;
+        let mut grand_total_obrera: f64 = 0.0;
+        let mut grand_total_subtotal: f64 = 0.0;
+
+        let mut total_month_rows_count = 0;
+
+        for (_sheet_name, biz) in sheets {
+            let reg = biz.registro_patronal.as_deref().unwrap_or("SIN_REGISTRO");
+            let razon = biz.razon_social.as_deref().unwrap_or("SIN_RAZON_SOCIAL");
+
+            // Group business by period (year_num, month_num)
+            let mut biz_months_map: std::collections::BTreeMap<(u32, u32), (String, String)> =
+                std::collections::BTreeMap::new();
+
+            for emp in &biz.employees {
+                for de in &emp.data_employee {
+                    let y_str = de.anio_periodo.as_deref().or(emp.anio_periodo.as_deref()).unwrap_or("0");
+                    let m_str = de.mes_periodo.as_deref().or(emp.mes_periodo.as_deref()).unwrap_or("0");
+                    let y_num = y_str.parse::<u32>().unwrap_or(0);
+                    let m_num = crate::cedulas::business::month_to_num(m_str);
+                    if y_num > 0 || m_num > 0 {
+                        biz_months_map.insert((y_num, m_num), (y_str.to_string(), m_str.to_string()));
+                    }
+                }
+                if emp.data_employee.is_empty() {
+                    let y_str = emp.anio_periodo.as_deref().unwrap_or("0");
+                    let m_str = emp.mes_periodo.as_deref().unwrap_or("0");
+                    let y_num = y_str.parse::<u32>().unwrap_or(0);
+                    let m_num = crate::cedulas::business::month_to_num(m_str);
+                    if y_num > 0 || m_num > 0 {
+                        biz_months_map.insert((y_num, m_num), (y_str.to_string(), m_str.to_string()));
+                    }
+                }
+            }
+
+            if biz_months_map.is_empty() && !biz.employees.is_empty() {
+                biz_months_map.insert((0, 0), ("-".to_string(), "-".to_string()));
+            }
+
+            let mut rp_unique_workers: HashSet<String> = HashSet::new();
+            let mut rp_total_dias: f64 = 0.0;
+            let mut rp_total_patronal: f64 = 0.0;
+            let mut rp_total_obrera: f64 = 0.0;
+            let mut rp_total_subtotal: f64 = 0.0;
+
+            let rp_month_count = biz_months_map.len();
+
+            for ((y_num, m_num), (y_str, m_str)) in &biz_months_map {
+                total_month_rows_count += 1;
+
+                let m_name = crate::cedulas::business::month_num_to_name(*m_num);
+                let display_month = if *m_num > 0 { m_name } else { m_str.as_str() };
+                let display_year = if *y_num > 0 { y_num.to_string() } else { y_str.clone() };
+
+                let mut month_unique_workers: HashSet<String> = HashSet::new();
+                let mut month_total_dias: f64 = 0.0;
+                let mut month_total_patronal: f64 = 0.0;
+                let mut month_total_obrera: f64 = 0.0;
+                let mut month_total_subtotal: f64 = 0.0;
+
+                let mut month_active_obras: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                let mut obra_workers: HashMap<String, HashSet<String>> = HashMap::new();
+                let mut obra_dias: HashMap<String, f64> = HashMap::new();
+                let mut obra_patronal: HashMap<String, f64> = HashMap::new();
+                let mut obra_obrera: HashMap<String, f64> = HashMap::new();
+                let mut obra_subtotal: HashMap<String, f64> = HashMap::new();
+
+                let mut sin_obra_workers: HashSet<String> = HashSet::new();
+                let mut sin_obra_dias: f64 = 0.0;
+                let mut sin_obra_patronal: f64 = 0.0;
+                let mut sin_obra_obrera: f64 = 0.0;
+                let mut sin_obra_subtotal: f64 = 0.0;
+
+                for emp in &biz.employees {
+                    let matching_des: Vec<&crate::cedulas::employees::DataEmployee> = emp
+                        .data_employee
+                        .iter()
+                        .filter(|de| {
+                            let dy = de.anio_periodo.as_deref().or(emp.anio_periodo.as_deref()).unwrap_or("0").parse::<u32>().unwrap_or(0);
+                            let dm = crate::cedulas::business::month_to_num(de.mes_periodo.as_deref().or(emp.mes_periodo.as_deref()).unwrap_or("0"));
+                            (*y_num == 0 && *m_num == 0) || (dy == *y_num && dm == *m_num)
+                        })
+                        .collect();
+
+                    if matching_des.is_empty() && !emp.data_employee.is_empty() {
+                        continue;
+                    }
+
+                    let worker_id = emp
+                        .no_seguro_social
+                        .as_deref()
+                        .filter(|s| !s.trim().is_empty())
+                        .or(emp.curp.as_deref().filter(|s| !s.trim().is_empty()))
+                        .or(emp.rfc.as_deref().filter(|s| !s.trim().is_empty()))
+                        .or(emp.nombre.as_deref().filter(|s| !s.trim().is_empty()))
+                        .unwrap_or("UNKNOWN")
+                        .trim()
+                        .to_uppercase();
+
+                    month_unique_workers.insert(worker_id.clone());
+                    rp_unique_workers.insert(worker_id.clone());
+                    grand_unique_workers.insert(worker_id.clone());
+
+                    let emp_dias: f64 = matching_des.iter().filter_map(|d| d.dias).sum();
+                    let emp_patronal: f64 = matching_des.iter().filter_map(|d| d.patronal).sum();
+                    let emp_obrera: f64 = matching_des.iter().filter_map(|d| d.obrera).sum();
+                    let emp_subtotal: f64 = matching_des.iter().filter_map(|d| d.subtotal).sum();
+
+                    month_total_dias += emp_dias;
+                    month_total_patronal += emp_patronal;
+                    month_total_obrera += emp_obrera;
+                    month_total_subtotal += emp_subtotal;
+
+                    let active_obras_for_emp: Vec<&crate::cedulas::employees::RegistroObra> = emp
+                        .registro_obras
+                        .iter()
+                        .filter(|ro| !ro.registro_obra.trim().is_empty())
+                        .collect();
+
+                    if active_obras_for_emp.is_empty() {
+                        sin_obra_workers.insert(worker_id.clone());
+                        sin_obra_dias += emp_dias;
+                        sin_obra_patronal += emp_patronal;
+                        sin_obra_obrera += emp_obrera;
+                        sin_obra_subtotal += emp_subtotal;
+                    } else if active_obras_for_emp.len() == 1 {
+                        let ro = active_obras_for_emp[0];
+                        let obra_key = ro.registro_obra.trim().to_uppercase();
+                        month_active_obras.insert(obra_key.clone());
+
+                        obra_workers.entry(obra_key.clone()).or_default().insert(worker_id.clone());
+
+                        let d = if ro.dias_registro_obra > 0 { ro.dias_registro_obra as f64 } else { emp_dias };
+                        *obra_dias.entry(obra_key.clone()).or_insert(0.0) += d;
+                        *obra_patronal.entry(obra_key.clone()).or_insert(0.0) += emp_patronal;
+                        *obra_obrera.entry(obra_key.clone()).or_insert(0.0) += emp_obrera;
+                        *obra_subtotal.entry(obra_key).or_insert(0.0) += emp_subtotal;
+                    } else {
+                        let sum_ro_dias: f64 = active_obras_for_emp.iter().map(|r| r.dias_registro_obra as f64).sum();
+                        for ro in &active_obras_for_emp {
+                            let obra_key = ro.registro_obra.trim().to_uppercase();
+                            month_active_obras.insert(obra_key.clone());
+
+                            obra_workers.entry(obra_key.clone()).or_default().insert(worker_id.clone());
+
+                            let ratio = if sum_ro_dias > 0.0 { (ro.dias_registro_obra as f64) / sum_ro_dias } else { 1.0 / active_obras_for_emp.len() as f64 };
+                            let d = if ro.dias_registro_obra > 0 { ro.dias_registro_obra as f64 } else { emp_dias * ratio };
+                            *obra_dias.entry(obra_key.clone()).or_insert(0.0) += d;
+                            *obra_patronal.entry(obra_key.clone()).or_insert(0.0) += emp_patronal * ratio;
+                            *obra_obrera.entry(obra_key.clone()).or_insert(0.0) += emp_obrera * ratio;
+                            *obra_subtotal.entry(obra_key).or_insert(0.0) += emp_subtotal * ratio;
+                        }
+                    }
+                }
+
+                rp_total_dias += month_total_dias;
+                rp_total_patronal += month_total_patronal;
+                rp_total_obrera += month_total_obrera;
+                rp_total_subtotal += month_total_subtotal;
+
+                grand_total_dias += month_total_dias;
+                grand_total_patronal += month_total_patronal;
+                grand_total_obrera += month_total_obrera;
+                grand_total_subtotal += month_total_subtotal;
+
+                // 1. Emit row for each active obra in this month
+                for obra_key in &month_active_obras {
+                    let w_count = obra_workers.get(obra_key).map(|s| s.len()).unwrap_or(0);
+                    let d_val = obra_dias.get(obra_key).copied().unwrap_or(0.0);
+                    let pat_val = obra_patronal.get(obra_key).copied().unwrap_or(0.0);
+                    let obr_val = obra_obrera.get(obra_key).copied().unwrap_or(0.0);
+                    let sub_val = obra_subtotal.get(obra_key).copied().unwrap_or(0.0);
+
+                    worksheet.write_string_with_format(current_row, 0, reg, &cell_text_format)?;
+                    worksheet.write_string_with_format(current_row, 1, razon, &cell_text_format)?;
+                    worksheet.write_string_with_format(current_row, 2, &display_year, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 3, display_month, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 4, obra_key, &cell_center_format)?;
+                    worksheet.write_number_with_format(current_row, 5, w_count as f64, &cell_num_format)?;
+                    worksheet.write_number_with_format(current_row, 6, d_val, &cell_num_format)?;
+                    worksheet.write_number_with_format(current_row, 7, pat_val, &cell_curr_format)?;
+                    worksheet.write_number_with_format(current_row, 8, obr_val, &cell_curr_format)?;
+                    worksheet.write_number_with_format(current_row, 9, sub_val, &cell_curr_format)?;
+                    current_row += 1;
+                }
+
+                // 2. Emit row for workers without obra if any
+                if !sin_obra_workers.is_empty() {
+                    worksheet.write_string_with_format(current_row, 0, reg, &cell_text_format)?;
+                    worksheet.write_string_with_format(current_row, 1, razon, &cell_text_format)?;
+                    worksheet.write_string_with_format(current_row, 2, &display_year, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 3, display_month, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 4, "SIN REGISTRO DE OBRA", &cell_center_format)?;
+                    worksheet.write_number_with_format(current_row, 5, sin_obra_workers.len() as f64, &cell_num_format)?;
+                    worksheet.write_number_with_format(current_row, 6, sin_obra_dias, &cell_num_format)?;
+                    worksheet.write_number_with_format(current_row, 7, sin_obra_patronal, &cell_curr_format)?;
+                    worksheet.write_number_with_format(current_row, 8, sin_obra_obrera, &cell_curr_format)?;
+                    worksheet.write_number_with_format(current_row, 9, sin_obra_subtotal, &cell_curr_format)?;
+                    current_row += 1;
+                }
+
+                // 3. Emit "TOTAL POR REGISTRO DE OBRA" for this month
+                worksheet.write_string_with_format(current_row, 0, reg, &month_total_label_format)?;
+                worksheet.write_string_with_format(current_row, 1, razon, &month_total_label_format)?;
+                worksheet.write_string_with_format(current_row, 2, &display_year, &month_total_center_format)?;
+                worksheet.write_string_with_format(current_row, 3, display_month, &month_total_center_format)?;
+                worksheet.write_string_with_format(current_row, 4, "TOTAL POR REGISTRO DE OBRA", &month_total_center_format)?;
+                worksheet.write_number_with_format(current_row, 5, month_unique_workers.len() as f64, &month_total_num_format)?;
+                worksheet.write_number_with_format(current_row, 6, month_total_dias, &month_total_num_format)?;
+                worksheet.write_number_with_format(current_row, 7, month_total_patronal, &month_total_curr_format)?;
+                worksheet.write_number_with_format(current_row, 8, month_total_obrera, &month_total_curr_format)?;
+                worksheet.write_number_with_format(current_row, 9, month_total_subtotal, &month_total_curr_format)?;
+                current_row += 1;
+            }
+
+            // Subtotal per RP if multiple months
+            if rp_month_count > 1 {
+                let subtotal_title = format!("SUBTOTAL {}", reg);
+                worksheet.merge_range(current_row, 0, current_row, 4, &subtotal_title, &subtotal_label_format)?;
+                worksheet.write_number_with_format(current_row, 5, rp_unique_workers.len() as f64, &subtotal_num_format)?;
+                worksheet.write_number_with_format(current_row, 6, rp_total_dias, &subtotal_num_format)?;
+                worksheet.write_number_with_format(current_row, 7, rp_total_patronal, &subtotal_curr_format)?;
+                worksheet.write_number_with_format(current_row, 8, rp_total_obrera, &subtotal_curr_format)?;
+                worksheet.write_number_with_format(current_row, 9, rp_total_subtotal, &subtotal_curr_format)?;
+                current_row += 1;
+            }
+        }
+
+        // Grand Total row if multiple months or multiple RPs
+        if total_month_rows_count > 1 || (sheets.len() > 1 && total_month_rows_count > 0) {
+            worksheet.merge_range(current_row, 0, current_row, 4, "TOTAL GENERAL ACUMULADO", &grand_total_label_format)?;
+            worksheet.write_number_with_format(current_row, 5, grand_unique_workers.len() as f64, &grand_total_num_format)?;
+            worksheet.write_number_with_format(current_row, 6, grand_total_dias, &grand_total_num_format)?;
+            worksheet.write_number_with_format(current_row, 7, grand_total_patronal, &grand_total_curr_format)?;
+            worksheet.write_number_with_format(current_row, 8, grand_total_obrera, &grand_total_curr_format)?;
+            worksheet.write_number_with_format(current_row, 9, grand_total_subtotal, &grand_total_curr_format)?;
         }
 
         worksheet.autofit();
@@ -371,8 +809,16 @@ impl Excel {
         lang: &str,
     ) -> Result<(), XlsxError> {
 
+        // OpenXML (ECMA-376) and rust_xlsxwriter formula standard:
+        // Function names in XLSX files must always be stored in invariant US English ("SUM").
+        // When Excel opens the file:
+        // - In Spanish Excel, Excel automatically displays "=SUMA(...)".
+        // - In English Excel, Excel automatically displays "=SUM(...)".
+        // Storing literal "=SUMA(...)" causes "#NAME?" errors in English Excel and non-Spanish locales.
+        // We use "SUM" as the universal standard (rendered natively by Excel in the user's language),
+        // while honoring "force_suma" or "suma" if explicitly required.
         let sum_func = match lang.to_lowercase().as_str() {
-            "spanish" | "es" | "suma" => "SUMA",
+            "force_suma" | "suma" => "SUMA",
             _ => "SUM",
         };
 
@@ -800,5 +1246,179 @@ mod tests {
         assert!(test_path.exists());
         let _ = std::fs::remove_file(test_path);
     }
+
+    #[test]
+    fn test_estadisticas_registro_obras_and_monthly_grouping() {
+        use crate::cedulas::employees::{DataEmployee, Employee, RegistroObra};
+
+        // Biz 1: Constructor Alfa with 2 months and 2 workers in Jan (one with multiple data records)
+        let mut biz1 = Business::new();
+        biz1.razon_social = Some("CONSTRUCTORA ALFA SA DE CV".to_string());
+        biz1.registro_patronal = Some("A36-11111-10-1".to_string());
+
+        // Emp 1: Juan Perez in Enero (2 DataEmployee records - must be deduplicated to 1 worker)
+        let mut emp1 = Employee::default();
+        emp1.no_seguro_social = Some("12345678901".to_string());
+        emp1.nombre = Some("JUAN PEREZ".to_string());
+        emp1.anio_periodo = Some("2025".to_string());
+        emp1.mes_periodo = Some("01".to_string());
+        emp1.registro_obras = vec![RegistroObra::new("OBRA-NORTE", "31")];
+
+        let mut de1_1 = DataEmployee::default();
+        de1_1.anio_periodo = Some("2025".to_string());
+        de1_1.mes_periodo = Some("01".to_string());
+        de1_1.dias = Some(15.0);
+        de1_1.patronal = Some(800.0);
+        de1_1.obrera = Some(200.0);
+        de1_1.subtotal = Some(1000.0);
+
+        let mut de1_2 = DataEmployee::default();
+        de1_2.anio_periodo = Some("2025".to_string());
+        de1_2.mes_periodo = Some("01".to_string());
+        de1_2.dias = Some(16.0);
+        de1_2.patronal = Some(900.0);
+        de1_2.obrera = Some(200.0);
+        de1_2.subtotal = Some(1100.0);
+
+        emp1.data_employee = vec![de1_1, de1_2];
+
+        // Emp 2: Maria Lopez in Enero (Sin obra)
+        let mut emp2 = Employee::default();
+        emp2.no_seguro_social = Some("98765432109".to_string());
+        emp2.nombre = Some("MARIA LOPEZ".to_string());
+        emp2.anio_periodo = Some("2025".to_string());
+        emp2.mes_periodo = Some("01".to_string());
+
+        let mut de2 = DataEmployee::default();
+        de2.anio_periodo = Some("2025".to_string());
+        de2.mes_periodo = Some("01".to_string());
+        de2.dias = Some(31.0);
+        de2.patronal = Some(2000.0);
+        de2.obrera = Some(500.0);
+        de2.subtotal = Some(2500.0);
+        emp2.data_employee = vec![de2];
+
+        // Emp 3: Juan Perez in Febrero (OBRA-SUR)
+        let mut emp3 = Employee::default();
+        emp3.no_seguro_social = Some("12345678901".to_string());
+        emp3.nombre = Some("JUAN PEREZ".to_string());
+        emp3.anio_periodo = Some("2025".to_string());
+        emp3.mes_periodo = Some("02".to_string());
+        emp3.registro_obras = vec![RegistroObra::new("OBRA-SUR", "28")];
+
+        let mut de3 = DataEmployee::default();
+        de3.anio_periodo = Some("2025".to_string());
+        de3.mes_periodo = Some("02".to_string());
+        de3.dias = Some(28.0);
+        de3.patronal = Some(1600.0);
+        de3.obrera = Some(400.0);
+        de3.subtotal = Some(2000.0);
+        emp3.data_employee = vec![de3];
+
+        biz1.employees = vec![emp1, emp2, emp3];
+
+        // Biz 2: Ingenieria Beta
+        let mut biz2 = Business::new();
+        biz2.razon_social = Some("INGENIERIA BETA SA DE CV".to_string());
+        biz2.registro_patronal = Some("B50-22222-10-2".to_string());
+
+        let mut emp4 = Employee::default();
+        emp4.no_seguro_social = Some("55555555555".to_string());
+        emp4.nombre = Some("CARLOS GOMEZ".to_string());
+        emp4.anio_periodo = Some("2025".to_string());
+        emp4.mes_periodo = Some("01".to_string());
+        emp4.registro_obras = vec![
+            RegistroObra::new("OBRA-NORTE", "15"),
+            RegistroObra::new("OBRA-CENTRO", "16"),
+        ];
+
+        let mut de4 = DataEmployee::default();
+        de4.anio_periodo = Some("2025".to_string());
+        de4.mes_periodo = Some("01".to_string());
+        de4.dias = Some(31.0);
+        de4.patronal = Some(2400.0);
+        de4.obrera = Some(600.0);
+        de4.subtotal = Some(3000.0);
+        emp4.data_employee = vec![de4];
+
+        biz2.employees = vec![emp4];
+
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("test_cedulas_estadisticas_obras.xlsx");
+
+        let mut excel = Excel::new(&test_path.to_string_lossy());
+        let sheets = vec![
+            ("alfa_A36-11111-10-1".to_string(), biz1),
+            ("beta_B50-22222-10-2".to_string(), biz2),
+        ];
+
+        let res = excel.create_excel_multi(&sheets, "spanish");
+        assert!(res.is_ok(), "Failed to create excel: {:?}", res.err());
+        assert!(test_path.exists());
+        let _ = std::fs::remove_file(test_path);
+    }
+
+    #[test]
+    fn test_detect_system_language() {
+        let lang = detect_system_language();
+        assert!(lang == "spanish" || lang == "english");
+
+        // Test environment override
+        unsafe {
+            std::env::set_var("DOCU_LANG", "english");
+        }
+        assert_eq!(detect_system_language(), "english");
+
+        unsafe {
+            std::env::set_var("DOCU_LANG", "spanish");
+        }
+        assert_eq!(detect_system_language(), "spanish");
+
+        unsafe {
+            std::env::remove_var("DOCU_LANG");
+        }
+    }
+
+    #[test]
+    fn test_excel_formulas_with_english_and_spanish_systems() {
+        use crate::cedulas::employees::{DataEmployee, Employee};
+
+        let mut biz = Business::new();
+        biz.razon_social = Some("EMPRESA PRUEBA SA DE CV".to_string());
+        biz.registro_patronal = Some("A1234567890".to_string());
+
+        let mut emp = Employee::default();
+        emp.no_seguro_social = Some("11111111111".to_string());
+        emp.anio_periodo = Some("2026".to_string());
+        emp.mes_periodo = Some("01".to_string());
+
+        let mut de = DataEmployee::default();
+        de.anio_periodo = Some("2026".to_string());
+        de.mes_periodo = Some("01".to_string());
+        de.dias = Some(30.0);
+        de.subtotal = Some(5000.0);
+        emp.data_employee = vec![de];
+        biz.employees = vec![emp];
+
+        let sheets = vec![("empresa_A12".to_string(), biz)];
+        let temp_dir = std::env::temp_dir();
+
+        // 1. Generate with English language setting (e.g. English OS)
+        let path_en = temp_dir.join("test_cedulas_formula_en.xlsx");
+        let mut excel_en = Excel::new(&path_en.to_string_lossy());
+        let res_en = excel_en.create_excel_multi(&sheets, "english");
+        assert!(res_en.is_ok());
+        assert!(path_en.exists());
+        let _ = std::fs::remove_file(path_en);
+
+        // 2. Generate with Spanish language setting (e.g. Spanish OS)
+        let path_es = temp_dir.join("test_cedulas_formula_es.xlsx");
+        let mut excel_es = Excel::new(&path_es.to_string_lossy());
+        let res_es = excel_es.create_excel_multi(&sheets, "spanish");
+        assert!(res_es.is_ok());
+        assert!(path_es.exists());
+        let _ = std::fs::remove_file(path_es);
+    }
 }
+
 

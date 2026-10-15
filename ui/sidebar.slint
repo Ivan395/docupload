@@ -1,0 +1,682 @@
+import { AppData, AppLogic } from "models.slint";
+
+export component Sidebar inherits Rectangle {
+    width: 240px;
+    background: #ffffff;
+    border-width: 1px;
+    border-color: #e2e8f0;
+
+    property <bool> client_selected: AppData.selected_cliente_id != "";
+    property <bool> rp_selected: AppData.selected_rp_id != "";
+    property <bool> revision_selected: AppData.selected_revision_id != "";
+
+    // Desbloqueo progresivo: al ir a Clientes o estar en Clientes todo lo posterior se bloquea
+    property <bool> can_go_rp: root.client_selected;
+    property <bool> can_go_revisiones: root.client_selected && root.rp_selected;
+    property <bool> can_go_obras: root.client_selected && root.rp_selected && root.revision_selected;
+    property <bool> can_go_empleados: root.client_selected;
+    property <bool> can_go_cedulas: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_cedulas || AppData.cedulas_access_allowed);
+    property <bool> can_go_reporte: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_liquidaciones || AppData.reportes_liquidaciones_data_exists);
+    property <bool> can_go_nominas: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_nominas || AppData.nominas_data_exists || AppData.nominas_access_allowed);
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+        alignment: space-between;
+
+        VerticalLayout {
+            spacing: 16px;
+
+            // Brand Header
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+
+                Rectangle {
+                    width: 38px;
+                    height: 38px;
+                    border-radius: 8px;
+                    background: #1e3a8a;
+
+                    Text {
+                        text: "🏛";
+                        font-size: 20px;
+                        color: #ffffff;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+
+                    Text {
+                        text: "Firma Fiscal ACD";
+                        font-size: 15px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        letter-spacing: 0.5px;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: #f1f5f9;
+            }
+
+            // Back to Auditoría General (View 0)
+            Rectangle {
+                height: 38px;
+                border-radius: 8px;
+                background: btn_esc.has-hover ? #f8fafc : (AppData.current_view == 0 ? #eff6ff : transparent);
+                border-width: AppData.current_view == 0 ? 1px : 0px;
+                border-color: #bfdbfe;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: space-between;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: center;
+                        Text { text: "←"; font-size: 14px; color: AppData.current_view == 0 ? #1d4ed8 : #475569; font-weight: 700; }
+                        Text {
+                            text: "Auditoría General";
+                            font-size: 12.5px;
+                            font-weight: 700;
+                            color: AppData.current_view == 0 ? #1d4ed8 : #334155;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 20px;
+                        width: 32px;
+                        border-radius: 4px;
+                        background: #f1f5f9;
+                        y: (parent.height - self.height) / 2;
+                        Text {
+                            text: "Esc";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #64748b;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                btn_esc := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { AppLogic.navigate_view(0); }
+                }
+            }
+
+            // Section 1: Correcciones Patronales
+            VerticalLayout {
+                spacing: 4px;
+
+                Text {
+                    text: "CORRECCIONES PATRONALES";
+                    font-size: 11px;
+                    font-weight: 800;
+                    color: #94a3b8;
+                    letter-spacing: 0.5px;
+                }
+
+                // Clientes (F2) -> View 1
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 1 ? #1e3a8a : (btn_f2.has-hover ? #f8fafc : transparent);
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "🏢";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Clientes";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 1 ? #ffffff : #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 1 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F2";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 1 ? #ffffff : #64748b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f2 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.navigate_view(1); }
+                    }
+                }
+
+                // Registros Patronales (F3) -> View 2 (Habilitado con Cliente seleccionado)
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 2 ? #1e3a8a : (root.can_go_rp && btn_f3.has-hover) ? #f8fafc : transparent;
+                    opacity: root.can_go_rp ? 1.0 : 0.35;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "📜";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Registros Patronales";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 2 ? #ffffff : (root.can_go_rp ? #1e293b : #94a3b8);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 2 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F3";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 2 ? #ffffff : (root.can_go_rp ? #64748b : #cbd5e1);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f3 := TouchArea {
+                        enabled: root.can_go_rp;
+                        mouse-cursor: root.can_go_rp ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_rp {
+                                AppLogic.navigate_view(2);
+                            }
+                        }
+                    }
+                }
+
+                // Revisiones (F4) -> View 3 (Habilitado con RP seleccionado)
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 3 ? #1e3a8a : (root.can_go_revisiones && btn_f4.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 3 || root.can_go_revisiones ? 1.0 : 0.35;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "📋";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Revisiones";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 3 ? #ffffff : (root.can_go_revisiones ? #1e293b : #94a3b8);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 3 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F4";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 3 ? #ffffff : (root.can_go_revisiones ? #64748b : #cbd5e1);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f4 := TouchArea {
+                        enabled: root.can_go_revisiones;
+                        mouse-cursor: root.can_go_revisiones ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_revisiones {
+                                AppLogic.navigate_view(3);
+                            }
+                        }
+                    }
+                }
+
+                // Registros de Obras (F5) -> View 4 (Habilitado con Revisión seleccionada)
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 4 ? #1e3a8a : (root.can_go_obras && btn_f5.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 4 || root.can_go_obras ? 1.0 : 0.35;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "🏗";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Registros de Obras";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 4 ? #ffffff : (root.can_go_obras ? #1e293b : #94a3b8);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 4 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F5";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 4 ? #ffffff : (root.can_go_obras ? #64748b : #cbd5e1);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f5 := TouchArea {
+                        enabled: root.can_go_obras;
+                        mouse-cursor: root.can_go_obras ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_obras {
+                                AppLogic.navigate_view(4);
+                            }
+                        }
+                    }
+                }
+
+                // Empleados (F6) -> View 5 (Habilitado con Cliente seleccionado)
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 5 ? #1e3a8a : (root.can_go_empleados && btn_f6.has-hover) ? #f8fafc : transparent;
+                    opacity: root.can_go_empleados ? 1.0 : 0.35;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "👥";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Empleados";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 5 ? #ffffff : (root.can_go_empleados ? #1e293b : #94a3b8);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 5 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F6";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 5 ? #ffffff : (root.can_go_empleados ? #64748b : #cbd5e1);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f6 := TouchArea {
+                        enabled: root.can_go_empleados;
+                        mouse-cursor: root.can_go_empleados ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_empleados {
+                                AppLogic.navigate_view(5);
+                            }
+                        }
+                    }
+                }
+
+                // Cédula de Cuotas (F7) -> View 6 (Habilitado con Revisión y Cédulas cargadas o permitidas)
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 6 ? #1e3a8a : (root.can_go_cedulas && btn_f7.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 6 || root.can_go_cedulas ? 1.0 : 0.35;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "📑";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Cédula de Cuotas";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 6 ? #ffffff : (root.can_go_cedulas ? #1e293b : #94a3b8);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 6 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F7";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 6 ? #ffffff : (root.can_go_cedulas ? #64748b : #cbd5e1);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f7 := TouchArea {
+                        enabled: root.can_go_cedulas;
+                        mouse-cursor: root.can_go_cedulas ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_cedulas {
+                                AppLogic.navigate_view(6);
+                            }
+                        }
+                    }
+                }
+
+                // Reporte Liquidaciones (F8) -> View 7 (Habilitado con Revisión y liquidaciones existentes)
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 7 ? #1e3a8a : (root.can_go_reporte && btn_f8.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 7 || root.can_go_reporte ? 1.0 : 0.35;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "📊";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Reporte Liquidaciones";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 7 ? #ffffff : (root.can_go_reporte ? #1e293b : #94a3b8);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 7 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F8";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 7 ? #ffffff : (root.can_go_reporte ? #64748b : #cbd5e1);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f8 := TouchArea {
+                        enabled: root.can_go_reporte;
+                        mouse-cursor: root.can_go_reporte ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_reporte {
+                                AppLogic.navigate_view(7);
+                            }
+                        }
+                    }
+                }
+
+                // Calendario Fiscal & Revisiones (F9) -> View 8
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 8 ? #1e3a8a : (btn_f9.has-hover ? #f8fafc : transparent);
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "📅";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Calendario Fiscal";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 8 ? #ffffff : #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 8 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F9";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 8 ? #ffffff : #64748b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f9 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            AppLogic.navigate_view(8);
+                        }
+                    }
+                }
+
+                // Reporte Nóminas (F10) -> View 9 (Habilitado con Revisión y nóminas existentes)
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 9 ? #1e3a8a : (root.can_go_nominas && btn_f10.has-hover) ? #f8fafc : transparent;
+                    opacity: AppData.current_view == 9 || root.can_go_nominas ? 1.0 : 0.35;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "💵";
+                                font-size: 15px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Reporte Nóminas";
+                                font-size: 13.5px;
+                                font-weight: 700;
+                                color: AppData.current_view == 9 ? #ffffff : (root.can_go_nominas ? #1e293b : #94a3b8);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 26px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 9 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F10";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.current_view == 9 ? #ffffff : (root.can_go_nominas ? #64748b : #cbd5e1);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f10 := TouchArea {
+                        enabled: root.can_go_nominas;
+                        mouse-cursor: root.can_go_nominas ? pointer : not-allowed;
+                        clicked => {
+                            if root.can_go_nominas {
+                                AppLogic.navigate_view(9);
+                            }
+                        }
+                    }
+                }
+            }
+
+        }
+
+        // Bottom status indicators
+        VerticalLayout {
+            spacing: 8px;
+            padding-bottom: 6px;
+
+            Rectangle {
+                height: 1px;
+                background: #f1f5f9;
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 3.5px;
+                    background: #10b981;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: "Motor Local: Rust/Slint GPU";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: #475569;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 3.5px;
+                    background: #2563eb;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: "Sincronización DB: En línea";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: #475569;
+                }
+            }
+        }
+    }
+}

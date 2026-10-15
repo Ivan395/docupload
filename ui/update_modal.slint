@@ -1,0 +1,320 @@
+import { ScrollView } from "std-widgets.slint";
+import { AppData, AppLogic } from "models.slint";
+
+export component UpdateModal inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: #00000080;
+
+    // Bloquear clics al fondo
+    TouchArea {}
+
+    Rectangle {
+        width: 580px;
+        height: Math.min(620px, parent.height - 40px);
+        background: #ffffff;
+        border-radius: 14px;
+        border-width: 1px;
+        border-color: #cbd5e1;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000060;
+        drop-shadow-offset-y: 8px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+
+        VerticalLayout {
+            padding: 28px;
+            spacing: 18px;
+
+            // 1. Cabecera con Icono y Título
+            HorizontalLayout {
+                spacing: 16px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 24px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+
+                        Text {
+                            text: "🚀";
+                            font-size: 24px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: center;
+
+                        Text {
+                            text: "Actualización Disponible";
+                            font-size: 19px;
+                            font-weight: 800;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: "Hay una versión más reciente de DocuUpload lista para ti.";
+                            font-size: 13px;
+                            color: #64748b;
+                        }
+                    }
+                }
+
+                // Botón Cerrar (✕)
+                if !AppData.update_downloading : Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: 16px;
+                    background: close_touch.has-hover ? #f1f5f9 : transparent;
+
+                    Text {
+                        text: "✕";
+                        font-size: 16px;
+                        font-weight: 700;
+                        color: #64748b;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    close_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.close_update_modal(); }
+                    }
+                }
+            }
+
+            // 2. Comparación de Versiones
+            Rectangle {
+                height: 52px;
+                border-radius: 8px;
+                background: #f8fafc;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                HorizontalLayout {
+                    padding-left: 18px;
+                    padding-right: 18px;
+                    spacing: 12px;
+                    alignment: space-between;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: center;
+
+                        Text {
+                            text: "Versión actual:";
+                            font-size: 13px;
+                            color: #64748b;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            height: 24px;
+                            border-radius: 4px;
+                            background: #e2e8f0;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                Text {
+                                    text: AppData.update_current_version;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: #334155;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "➔";
+                        font-size: 16px;
+                        font-weight: 800;
+                        color: #2563eb;
+                        vertical-alignment: center;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: center;
+
+                        Text {
+                            text: "Nueva versión:";
+                            font-size: 13px;
+                            color: #64748b;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            height: 24px;
+                            border-radius: 4px;
+                            background: #dcfce7;
+                            border-width: 1px;
+                            border-color: #86efac;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                Text {
+                                    text: AppData.update_version;
+                                    font-size: 12px;
+                                    font-weight: 800;
+                                    color: #15803d;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Notas de la versión
+            VerticalLayout {
+                spacing: 6px;
+                vertical-stretch: 1;
+
+                Text {
+                    text: "Notas de la versión / Novedades:";
+                    font-size: 12px;
+                    font-weight: 700;
+                    color: #475569;
+                }
+
+                Rectangle {
+                    border-radius: 8px;
+                    background: #fdfdfd;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+                    vertical-stretch: 1;
+
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 12px;
+
+                            Text {
+                                text: AppData.update_notes != "" ? AppData.update_notes : "Mejoras de rendimiento, correcciones y nuevas funcionalidades.";
+                                font-size: 12px;
+                                color: #334155;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Barra de Progreso de Descarga (Si está descargando o lista)
+            if AppData.update_downloading || AppData.update_ready_to_install : VerticalLayout {
+                spacing: 6px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: AppData.update_ready_to_install ? "✓ Descarga finalizada" : "Descargando actualización...";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: AppData.update_ready_to_install ? #15803d : #1d4ed8;
+                    }
+                    Text {
+                        text: AppData.update_status_msg != "" ? AppData.update_status_msg : AppData.update_progress_text;
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: #64748b;
+                    }
+                }
+
+                Rectangle {
+                    height: 10px;
+                    border-radius: 5px;
+                    background: #e2e8f0;
+
+                    Rectangle {
+                        x: 0px;
+                        width: parent.width * AppData.update_progress;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: AppData.update_ready_to_install ? #16a34a : #2563eb;
+                    }
+                }
+            }
+
+            // 5. Botones de Acción
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+
+                // Botón Cancelar / Más tarde
+                if !AppData.update_downloading : Rectangle {
+                    height: 40px;
+                    border-radius: 8px;
+                    background: btn_cancel.has-hover ? #f1f5f9 : transparent;
+                    border-width: 1px;
+                    border-color: #cbd5e1;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: center;
+                        Text {
+                            text: AppData.update_ready_to_install ? "Cerrar" : "Más tarde";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #475569;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_cancel := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.close_update_modal(); }
+                    }
+                }
+
+                // Botón Principal (Descargar / Instalar)
+                Rectangle {
+                    height: 40px;
+                    border-radius: 8px;
+                    background: AppData.update_downloading ? #94a3b8 : (AppData.update_ready_to_install ? (btn_primary.has-hover ? #15803d : #16a34a) : (btn_primary.has-hover ? #1d4ed8 : #2563eb));
+
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        spacing: 8px;
+                        alignment: center;
+
+                        Text {
+                            text: AppData.update_downloading ? "⏳" : (AppData.update_ready_to_install ? "⚡" : "⬇");
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: AppData.update_downloading ? "Descargando..." : (AppData.update_ready_to_install ? "Instalar y Reiniciar" : "Actualizar Ahora");
+                            font-size: 13px;
+                            font-weight: 800;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_primary := TouchArea {
+                        mouse-cursor: AppData.update_downloading ? default : pointer;
+                        clicked => {
+                            if !AppData.update_downloading {
+                                if AppData.update_ready_to_install {
+                                    AppLogic.install_update_now();
+                                } else {
+                                    AppLogic.start_update_download();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

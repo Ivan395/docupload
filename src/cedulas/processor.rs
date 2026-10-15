@@ -42,7 +42,7 @@ pub struct CedulasProcessResult {
     pub excel_path: Option<PathBuf>,
 }
 
-fn get_employee_data(data: &str, patterns: &OCRPatterns) -> Vec<Employee> {
+pub fn get_employee_data(data: &str, patterns: &OCRPatterns) -> Vec<Employee> {
     let mut employees = Vec::new();
     let mut columns = Columns::new();
     columns.get_column_names(data, &patterns.column_names, &patterns.columns_in_file);
@@ -183,7 +183,40 @@ pub fn process_cedulas(
                     });
                 }
 
-                // 3. Check for SUA cédula header markers
+                // 3. Check for EMA or SUA cédula header markers
+                if crate::cedulas::ema::is_ema_document(&raw_text) {
+                    match crate::cedulas::ema::parse_ema_document(&raw_text, &file_display_name) {
+                        Ok((biz, emps)) => {
+                            valid_counter.fetch_add(1, Ordering::Relaxed);
+                            let cur = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            let val = valid_counter.load(Ordering::Relaxed);
+                            let rem = total_files.saturating_sub(cur);
+                            progress_callback(
+                                cur,
+                                total_files,
+                                &format!("{}/{} analizadas ({} válidas SUA/EMA | Faltan {})", cur, total_files, val, rem),
+                            );
+                            return Ok((file_display_name, vec![(biz, emps)]));
+                        }
+                        Err(e) => {
+                            invalid_counter.fetch_add(1, Ordering::Relaxed);
+                            let cur = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            let val = valid_counter.load(Ordering::Relaxed);
+                            let rem = total_files.saturating_sub(cur);
+                            progress_callback(cur, total_files, &format!("{}/{} analizadas ({} válidas | Faltan {})", cur, total_files, val, rem));
+                            return Err(UnprocessedCedula {
+                                filename: file_display_name,
+                                registro_patronal: "N/D".to_string(),
+                                razon_social: "N/D".to_string(),
+                                identifier: "DOCUMENTO EMA".to_string(),
+                                periodo: "N/D".to_string(),
+                                category: "ERROR PARSEO EMA".to_string(),
+                                reason: e,
+                            });
+                        }
+                    }
+                }
+
                 let text_lower = raw_text.to_lowercase();
                 let is_sua_cedula = text_lower.contains("cédula de determinación de cuotas")
                     || text_lower.contains("cedula de determinacion de cuotas")
@@ -203,8 +236,8 @@ pub fn process_cedulas(
                         razon_social: "N/D".to_string(),
                         identifier: "DOCUMENTO".to_string(),
                         periodo: "N/D".to_string(),
-                        category: "NO CORRESPONDE A SUA".to_string(),
-                        reason: "El documento no corresponde al formato oficial de Cédula de Determinación de Cuotas del SUA (faltan encabezados)".to_string(),
+                        category: "NO CORRESPONDE A SUA/EMA".to_string(),
+                        reason: "El documento no corresponde al formato oficial de Cédula de Determinación de Cuotas del SUA ni EMA (faltan encabezados)".to_string(),
                     });
                 }
 
@@ -445,12 +478,76 @@ pub fn process_cedulas(
             total_cuotas,
         };
 
+        let system_lang = crate::cedulas::excel::detect_system_language();
         let mut excel = Excel::new(&output_excel_path.to_string_lossy());
         excel
-            .create_excel_full(&sheets, &invalid_items, &stats, "spanish")
+            .create_excel_full(&sheets, &invalid_items, &stats, system_lang)
             .map_err(|e| format!("Error creando archivo Excel de Cédulas: {}", e))?;
 
         generated_excel_path = Some(output_excel_path.to_path_buf());
+
+        // Guardar en la base de datos PostgreSQL de manera concurrente
+        if !sheets.is_empty() {
+            let total_workers = valid_workers;
+            progress_callback(
+                0,
+                total_workers,
+                "Conectando a PostgreSQL y preparando guardado concurrente de cédulas...",
+            );
+
+            let num_cpus = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            let pool_size = (num_cpus * 2).clamp(4, 32) as u32;
+
+            match crate::db::create_pool(pool_size) {
+                Ok(pool) => {
+                    match pool.get() {
+                        Ok(mut init_client) => {
+                            if let Err(e) = crate::db::ensure_schema(&mut init_client) {
+                                log::error!("Error al verificar esquema en PostgreSQL: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("No se pudo obtener cliente inicial del pool para cédulas: {}", e);
+                        }
+                    }
+
+                    let cb = |done: usize, total: usize| {
+                        progress_callback(
+                            done,
+                            total,
+                            &format!("Guardando cédulas en PostgreSQL de forma concurrente ({}/{})...", done, total),
+                        );
+                    };
+
+                    let biz_list: Vec<Business> = sheets.iter().map(|(_, b)| b.clone()).collect();
+                    match crate::db::save_cedulas_concurrent(&pool, &biz_list, Some(&cb)) {
+                        Ok(db_stats) => {
+                            log::info!(
+                                "Cédulas guardadas en PostgreSQL concurrentemente: {} liquidaciones, {} detalles, {} vinculaciones obras, {} empleados, {} registros obras",
+                                db_stats.liquidaciones_guardadas,
+                                db_stats.detalles_guardados,
+                                db_stats.vinculaciones_guardadas,
+                                db_stats.empleados_guardados,
+                                db_stats.registros_obras_guardados
+                            );
+                            if !db_stats.errores.is_empty() {
+                                for err in db_stats.errores {
+                                    log::warn!("Advertencia al guardar cédula concurrentemente en BD: {}", err);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Error al guardar cédulas concurrentes en PostgreSQL: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("No se pudo inicializar pool de PostgreSQL para guardar cédulas: {}", e);
+                }
+            }
+        }
     }
 
     Ok(CedulasProcessResult {
@@ -576,6 +673,24 @@ mod tests {
 
         assert_eq!(valid_emps.len(), 2);
         assert_eq!(duplicate_count, 1);
+    }
+
+    #[test]
+    fn test_business_curp_extraction() {
+        let patterns = crate::cedulas::regex_expressions::initialize_patterns().unwrap();
+        let mut b = Business::new();
+        let page_text = "NOMBRE O RAZÓN SOCIAL: JUAN PEREZ GARCIA\nRFC: PEGJ800101XYZ\nCURP: PEGJ800101HDFRRN01\nDOMICILIO: AV INSURGENTES 123\nCÓDIGO POSTAL: 06700\nACTIVIDAD: CONSTRUCCION\nENTIDAD: CIUDAD DE MEXICO\n";
+        b.extract_from_page(page_text, &patterns);
+
+        assert_eq!(b.curp.as_deref(), Some("PEGJ800101HDFRRN01"));
+        assert_eq!(b.razon_social.as_deref(), Some("JUAN PEREZ GARCIA"));
+        assert_eq!(b.rfc.as_deref(), Some("PEGJ800101XYZ"));
+        assert_eq!(b.codigo_postal.as_deref(), Some("06700"));
+
+        let mut b_no_curp = Business::new();
+        let page_moral = "NOMBRE O RAZÓN SOCIAL: EMPRESA SA DE CV\nRFC: EMP900101XYZ\nDOMICILIO: AV JUAREZ 456\n";
+        b_no_curp.extract_from_page(page_moral, &patterns);
+        assert_eq!(b_no_curp.curp, None);
     }
 }
 

@@ -25,7 +25,13 @@ fn merge_field(
 }
 
 pub fn month_to_num(month: &str) -> u32 {
-    match month.to_lowercase().trim() {
+    let trimmed = month.trim();
+    if let Ok(n) = trimmed.parse::<u32>() {
+        if (1..=12).contains(&n) {
+            return n;
+        }
+    }
+    match trimmed.to_lowercase().as_str() {
         "enero" | "january" | "jan" => 1,
         "febrero" | "february" | "feb" => 2,
         "marzo" | "march" | "mar" => 3,
@@ -42,6 +48,150 @@ pub fn month_to_num(month: &str) -> u32 {
     }
 }
 
+pub fn month_num_to_name(month: u32) -> &'static str {
+    match month {
+        1 => "ENERO",
+        2 => "FEBRERO",
+        3 => "MARZO",
+        4 => "ABRIL",
+        5 => "MAYO",
+        6 => "JUNIO",
+        7 => "JULIO",
+        8 => "AGOSTO",
+        9 => "SEPTIEMBRE",
+        10 => "OCTUBRE",
+        11 => "NOVIEMBRE",
+        12 => "DICIEMBRE",
+        _ => "SIN_MES",
+    }
+}
+
+pub fn clean_entidad(s: &str) -> String {
+    let mut text = s.trim().to_uppercase();
+    let markers = [
+        " PRIMA",
+        " V ",
+        " V3.",
+        " V 3.",
+        " VERSI",
+        " POB.",
+        " POB ",
+        " MUN.",
+        " ALCALD",
+        " RFC",
+    ];
+    for marker in &markers {
+        if let Some(idx) = text.find(marker) {
+            text = text[..idx].trim().to_string();
+        }
+    }
+
+    const ESTADOS: &[&str] = &[
+        "AGUASCALIENTES", "BAJA CALIFORNIA SUR", "BAJA CALIFORNIA", "CAMPECHE", "CHIAPAS",
+        "CHIHUAHUA", "CIUDAD DE MEXICO", "DISTRITO FEDERAL", "CDMX", "COAHUILA DE ZARAGOZA", "COAHUILA",
+        "COLIMA", "DURANGO", "ESTADO DE MEXICO", "MEXICO", "GUANAJUATO", "GUERRERO",
+        "HIDALGO", "JALISCO", "MICHOACAN DE OCAMPO", "MICHOACAN", "MORELOS", "NAYARIT",
+        "NUEVO LEON", "OAXACA", "PUEBLA", "QUERETARO", "QUINTANA ROO", "SAN LUIS POTOSI",
+        "SINALOA", "SONORA", "TABASCO", "TAMAULIPAS", "TLAXCALA", "VERACRUZ DE IGNACIO DE LA LLAVE",
+        "VERACRUZ", "YUCATAN", "ZACATECAS",
+    ];
+
+    let norm_text = text
+        .replace(['Á', 'À', 'Ä'], "A")
+        .replace(['É', 'È', 'Ë'], "E")
+        .replace(['Í', 'Ì', 'Ï'], "I")
+        .replace(['Ó', 'Ò', 'Ö'], "O")
+        .replace(['Ú', 'Ù', 'Ü'], "U");
+
+    for &est in ESTADOS {
+        let est_norm = est
+            .replace(['Á', 'À', 'Ä'], "A")
+            .replace(['É', 'È', 'Ë'], "E")
+            .replace(['Í', 'Ì', 'Ï'], "I")
+            .replace(['Ó', 'Ò', 'Ö'], "O")
+            .replace(['Ú', 'Ù', 'Ü'], "U");
+
+        if norm_text == est_norm
+            || norm_text.starts_with(&format!("{} ", est_norm))
+            || norm_text.starts_with(&format!("{}/", est_norm))
+            || norm_text.starts_with(&format!("{}-", est_norm))
+        {
+            return est.to_string();
+        }
+    }
+
+    text.trim_end_matches([',', '/', '-', ':', ';', '.']).trim().to_string()
+}
+
+pub fn clean_domicilio(s: &str) -> String {
+    let mut text = s.trim().to_string();
+    let markers = [
+        "POB. MUN.",
+        "POB.MUN.",
+        "POB. MUN",
+        "POB MUN",
+        "POBLACION / MUNICIPIO",
+        "POBLACIÓN / MUNICIPIO",
+        "POBLACION/MUNICIPIO",
+        "POBLACION",
+        "POBLACIÓN",
+        "ALCALDÍA:",
+        "ALCALDIA:",
+        "/ ALCALDÍA",
+        "/ ALCALDIA",
+        "ALCALDÍA",
+        "ALCALDIA",
+        "MUNICIPIO:",
+        "CÓDIGO POSTAL",
+        "CODIGO POSTAL",
+        "C.P.:",
+        "ENTIDAD:",
+        "PRIMA DE R.T.",
+    ];
+    let upper = text.to_uppercase();
+    let mut cut_idx = None;
+    for &marker in &markers {
+        if let Some(idx) = upper.find(marker) {
+            cut_idx = Some(match cut_idx {
+                Some(curr) => std::cmp::min(curr, idx),
+                None => idx,
+            });
+        }
+    }
+    if let Some(idx) = cut_idx {
+        text = text[..idx].trim().to_string();
+    }
+    text.trim_end_matches([',', '/', '-', ':', ';', '.']).trim().to_uppercase()
+}
+
+pub fn clean_actividad(s: &str) -> String {
+    let mut text = s.trim().to_string();
+    let markers = [
+        "SUBDELEGACIÓN",
+        "SUBDELEGACION",
+        "DELEGACIÓN",
+        "DELEGACION",
+        "REGISTRO PATRONAL",
+        "DOMICILIO",
+        "CÓDIGO POSTAL",
+        "CODIGO POSTAL",
+    ];
+    let upper = text.to_uppercase();
+    let mut cut_idx = None;
+    for &marker in &markers {
+        if let Some(idx) = upper.find(marker) {
+            cut_idx = Some(match cut_idx {
+                Some(curr) => std::cmp::min(curr, idx),
+                None => idx,
+            });
+        }
+    }
+    if let Some(idx) = cut_idx {
+        text = text[..idx].trim().to_string();
+    }
+    text.trim_end_matches([',', '/', '-', ':', ';', '.']).trim().to_uppercase()
+}
+
 #[derive(Default, Clone)]
 pub struct Business {
     pub registro_patronal: Option<String>,
@@ -55,6 +205,7 @@ pub struct Business {
     pub codigo_postal: Option<String>,
     pub entidad: Option<String>,
     pub rfc: Option<String>,
+    pub curp: Option<String>,
     pub area_geografica: Option<String>,
     pub prima: Option<String>,
     pub employees: Vec<Employee>,
@@ -77,6 +228,7 @@ impl Business {
         merge_field("codigo_postal", &mut self.codigo_postal, &other.codigo_postal, file_name);
         merge_field("entidad", &mut self.entidad, &other.entidad, file_name);
         merge_field("rfc", &mut self.rfc, &other.rfc, file_name);
+        merge_field("curp", &mut self.curp, &other.curp, file_name);
         merge_field("area_geografica", &mut self.area_geografica, &other.area_geografica, file_name);
         merge_field("prima", &mut self.prima, &other.prima, file_name);
     }
@@ -105,7 +257,14 @@ impl Business {
         if self.registro_patronal.is_none() {
             if let Ok(Some(caps)) = patterns.business_registro_patronal.captures(page) {
                 if let Some(m) = caps.name("registro_patronal") {
-                    self.registro_patronal = Some(m.as_str().trim().to_uppercase());
+                    let mut s = m.as_str().trim().to_uppercase();
+                    if let Some(idx) = s.find(" RFC") {
+                        s = s[..idx].trim().to_string();
+                    }
+                    if s.ends_with("RFC") {
+                        s = s.trim_end_matches("RFC").trim().to_string();
+                    }
+                    self.registro_patronal = Some(s);
                 }
             }
         }
@@ -113,6 +272,21 @@ impl Business {
             if let Ok(Some(caps)) = patterns.business_rfc.captures(page) {
                 if let Some(m) = caps.name("rfc") {
                     self.rfc = Some(m.as_str().trim().to_uppercase());
+                }
+            }
+        }
+        if self.curp.is_none() {
+            if let Ok(Some(caps)) = patterns.business_curp.captures(page) {
+                if let Some(m) = caps.name("curp") {
+                    let c: String = m
+                        .as_str()
+                        .chars()
+                        .filter(|ch| ch.is_alphanumeric())
+                        .collect::<String>()
+                        .to_uppercase();
+                    if c.len() == 18 {
+                        self.curp = Some(c);
+                    }
                 }
             }
         }
@@ -126,7 +300,17 @@ impl Business {
         if self.razon_social.is_none() {
             if let Ok(Some(caps)) = patterns.business_razon_social.captures(page) {
                 if let Some(m) = caps.name("razon_social") {
-                    self.razon_social = Some(m.as_str().trim().to_uppercase());
+                    let mut rz = m.as_str().trim().to_uppercase();
+                    if let Some(idx) = rz.find(" DELEGACIÓN") {
+                        rz = rz[..idx].trim().to_string();
+                    }
+                    if let Some(idx) = rz.find(" DELEGACION") {
+                        rz = rz[..idx].trim().to_string();
+                    }
+                    if let Some(idx) = rz.find(" RFC") {
+                        rz = rz[..idx].trim().to_string();
+                    }
+                    self.razon_social = Some(rz);
                 }
             }
         }
@@ -143,7 +327,10 @@ impl Business {
         if self.actividad.is_none() {
             if let Ok(Some(caps)) = patterns.business_actividad.captures(page) {
                 if let Some(m) = caps.name("actividad") {
-                    self.actividad = Some(m.as_str().trim().to_uppercase());
+                    let cleaned = clean_actividad(m.as_str());
+                    if !cleaned.is_empty() {
+                        self.actividad = Some(cleaned);
+                    }
                 }
             }
         }
@@ -160,7 +347,10 @@ impl Business {
         if self.domicilio.is_none() {
             if let Ok(Some(caps)) = patterns.business_domicilio.captures(page) {
                 if let Some(m) = caps.name("domicilio") {
-                    self.domicilio = Some(m.as_str().trim().to_uppercase());
+                    let cleaned = clean_domicilio(m.as_str());
+                    if !cleaned.is_empty() {
+                        self.domicilio = Some(cleaned);
+                    }
                 }
             }
         }
@@ -174,7 +364,10 @@ impl Business {
         if self.entidad.is_none() {
             if let Ok(Some(caps)) = patterns.business_entidad.captures(page) {
                 if let Some(m) = caps.name("entidad") {
-                    self.entidad = Some(m.as_str().trim().to_uppercase());
+                    let cleaned = clean_entidad(m.as_str());
+                    if !cleaned.is_empty() {
+                        self.entidad = Some(cleaned);
+                    }
                 }
             }
         }

@@ -6,8 +6,8 @@ pkgdesc="DocuUpload - Procesamiento concurrente de nóminas SAT y cédulas SUA I
 arch=('x86_64')
 url="https://github.com/Ivan395/docupload"
 license=('MIT' 'Apache-2.0')
-depends=('fontconfig' 'freetype2')
-makedepends=('cargo' 'rust')
+depends=('fontconfig' 'freetype2' 'libx11' 'libxext' 'libxrender' 'libxml2' 'libpng' 'zlib')
+makedepends=('cargo' 'rust' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Ivan395/docupload/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 

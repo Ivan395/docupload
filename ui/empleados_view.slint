@@ -1,0 +1,680 @@
+import { ScrollView, LineEdit, Button, Switch } from "std-widgets.slint";
+import { AppData, AppLogic, EmpleadoData } from "models.slint";
+
+export component EmpleadosView inherits Rectangle {
+    background: #f8fafc;
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 18px;
+
+        // Header Superior: Título, Breadcrumb de Cliente y Botón Nuevo
+        HorizontalLayout {
+            alignment: space-between;
+
+            VerticalLayout {
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+
+                    Text {
+                        text: "Padrón de Empleados";
+                        font-size: 22px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+
+                    Rectangle {
+                        height: 24px;
+                        border-radius: 4px;
+                        background: #eff6ff;
+                        border-width: 1px;
+                        border-color: #bfdbfe;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: AppData.selected_cliente_nombre != "" ? AppData.selected_cliente_nombre : "Cliente";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if AppData.selected_cliente_rfc != "" : Rectangle {
+                        height: 24px;
+                        border-radius: 4px;
+                        background: #f1f5f9;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: "RFC: " + AppData.selected_cliente_rfc;
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: "Control de trabajadores registrados, números de seguridad social (NSS), RFC, CURP y estatus laboral activo.";
+                    font-size: 12px;
+                    color: #64748b;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+
+                // Botón Registrar Empleado
+                Rectangle {
+                    height: 38px;
+                    border-radius: 8px;
+                    background: btn_new_emp.has-hover ? #1e40af : #1e3a8a;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        alignment: center;
+
+                        Text {
+                            text: "+ Registrar Empleado";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_new_emp := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.open_new_empleado_dialog(); }
+                    }
+                }
+            }
+        }
+
+        // Barra de Filtros y Búsqueda
+        Rectangle {
+            height: 52px;
+            border-radius: 10px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e2e8f0;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                alignment: space-between;
+
+                // Buscador de Empleados
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+                    Text { text: "🔍"; font-size: 13px; vertical-alignment: center; }
+                    LineEdit {
+                        width: 320px;
+                        text <=> AppData.empleados_search;
+                        placeholder-text: "Buscar por Nombre, RFC, CURP o NSS...";
+                        edited => { AppLogic.filter_empleados_search(); }
+                    }
+                }
+
+                // Filtro: Solo Activos
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: center;
+
+                    Rectangle {
+                        height: 32px;
+                        border-radius: 6px;
+                        background: AppData.empleados_filter_active_only ? #ecfdf5 : #f8fafc;
+                        border-width: 1px;
+                        border-color: AppData.empleados_filter_active_only ? #a7f3d0 : #cbd5e1;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: AppData.empleados_filter_active_only ? "✓" : "○";
+                                font-size: 11px;
+                                font-weight: 800;
+                                color: AppData.empleados_filter_active_only ? #059669 : #64748b;
+                            }
+                            Text {
+                                text: "Solo Empleados Activos";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.empleados_filter_active_only ? #065f46 : #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.toggle_empleados_filter_active(); }
+                        }
+                    }
+
+                    Text {
+                        text: AppData.empleados_list.length + " Registros mostrados";
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: #64748b;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Layout de Tabla de Empleados y Panel Lateral de Edición
+        HorizontalLayout {
+            spacing: 20px;
+            vertical-stretch: 1;
+
+            // Tabla / Listado de Empleados
+            Rectangle {
+                horizontal-stretch: 1;
+                border-radius: 12px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #e2e8f0;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+
+                    // Encabezados de Columna
+                    Rectangle {
+                        height: 38px;
+                        background: #f8fafc;
+                        border-radius: 6px;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 16px;
+
+                            Rectangle { horizontal-stretch: 1; min-width: 220px; Text { text: "EMPLEADO / RFC"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                            Rectangle { width: 170px; Text { text: "CURP & NSS"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                            Rectangle { width: 130px; Text { text: "REG. PATRONAL"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                            Rectangle { width: 110px; Text { text: "SBC DIARIO"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                            Rectangle { width: 100px; Text { text: "ESTADO"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                            Rectangle { width: 90px; Text { text: "ACCIÓN"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                        }
+                    }
+
+                    // Filas de Empleados
+                    ScrollView {
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            spacing: 8px;
+                            padding-bottom: 12px;
+
+                            if AppData.empleados_list.length == 0 : Rectangle {
+                                height: 160px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 6px;
+                                    Text { text: "👥"; font-size: 26px; horizontal-alignment: center; }
+                                    Text {
+                                        text: "No se encontraron empleados registrados";
+                                        font-size: 14px;
+                                        font-weight: 700;
+                                        color: #0f172a;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Cargue nóminas CFDI / cédulas SUA o registre un empleado manualmente.";
+                                        font-size: 11px;
+                                        color: #64748b;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+
+                            for emp in AppData.empleados_list : Rectangle {
+                                height: 58px;
+                                border-radius: 8px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: #f1f5f9;
+
+                                HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    spacing: 16px;
+
+                                    // Columna 1: Nombre & RFC con Avatar de Iniciales
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        min-width: 220px;
+
+                                        HorizontalLayout {
+                                            spacing: 12px;
+                                            alignment: start;
+
+                                            Rectangle {
+                                                width: 36px;
+                                                height: 36px;
+                                                border-radius: 18px;
+                                                background: #1e3a8a;
+                                                y: (parent.height - self.height) / 2;
+
+                                                Text {
+                                                    text: "👤";
+                                                    font-size: 14px;
+                                                    color: #ffffff;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                spacing: 2px;
+                                                HorizontalLayout {
+                                                    spacing: 6px;
+                                                    cross-axis-alignment: center;
+                                                    Text {
+                                                        text: emp.nombre;
+                                                        font-size: 12.5px;
+                                                        font-weight: 700;
+                                                        color: #0f172a;
+                                                        overflow: elide;
+                                                    }
+                                                    if emp.pensionado != "": Rectangle {
+                                                        height: 16px;
+                                                        border-radius: 3px;
+                                                        background: #fef3c7;
+                                                        border-width: 1px;
+                                                        border-color: #f59e0b;
+                                                        HorizontalLayout {
+                                                            padding-left: 4px;
+                                                            padding-right: 4px;
+                                                            cross-axis-alignment: center;
+                                                            Text {
+                                                                text: emp.pensionado;
+                                                                font-size: 9.5px;
+                                                                font-weight: 700;
+                                                                color: #b45309;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: emp.rfc != "" ? ("RFC: " + emp.rfc) : "Sin RFC";
+                                                    font-size: 10.5px;
+                                                    font-weight: 600;
+                                                    color: #64748b;
+                                                    overflow: elide;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Columna 2: CURP & NSS
+                                    Rectangle {
+                                        width: 170px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 2px;
+                                            Text {
+                                                text: emp.curp != "" ? emp.curp : "Sin CURP";
+                                                font-size: 11.5px;
+                                                font-weight: 700;
+                                                color: #1e293b;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: emp.nss != "" ? ("NSS: " + emp.nss) : "Sin NSS";
+                                                font-size: 10.5px;
+                                                font-weight: 600;
+                                                color: #64748b;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+
+                                    // Columna 3: Registro Patronal
+                                    Rectangle {
+                                        width: 130px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: emp.registro_patronal != "" ? emp.registro_patronal : "General";
+                                                font-size: 12px;
+                                                font-weight: 700;
+                                                color: #1d4ed8;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+
+                                    // Columna 4: SBC Diario
+                                    Rectangle {
+                                        width: 110px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: emp.sbc_diario_str;
+                                                font-size: 12.5px;
+                                                font-weight: 700;
+                                                color: #0f172a;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+
+                                    // Columna 5: Estado (Activo / Baja)
+                                    Rectangle {
+                                        width: 100px;
+                                        HorizontalLayout {
+                                            alignment: center;
+
+                                            Rectangle {
+                                                height: 24px;
+                                                width: 76px;
+                                                border-radius: 12px;
+                                                background: emp.esta_activo ? #ecfdf5 : #f1f5f9;
+                                                border-width: 1px;
+                                                border-color: emp.esta_activo ? #a7f3d0 : #cbd5e1;
+                                                y: (parent.height - self.height) / 2;
+
+                                                HorizontalLayout {
+                                                    alignment: center;
+                                                    spacing: 5px;
+                                                    Rectangle {
+                                                        width: 6px;
+                                                        height: 6px;
+                                                        border-radius: 3px;
+                                                        background: emp.esta_activo ? #059669 : #94a3b8;
+                                                        y: (parent.height - self.height) / 2;
+                                                    }
+                                                    Text {
+                                                        text: emp.esta_activo ? "Activo" : "Baja";
+                                                        font-size: 11px;
+                                                        font-weight: 700;
+                                                        color: emp.esta_activo ? #065f46 : #64748b;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Columna 6: Botón Editar
+                                    Rectangle {
+                                        width: 90px;
+                                        HorizontalLayout {
+                                            alignment: center;
+
+                                            Rectangle {
+                                                width: 80px;
+                                                height: 28px;
+                                                border-radius: 6px;
+                                                background: edit_emp_btn.has-hover ? #eff6ff : #ffffff;
+                                                border-width: 1px;
+                                                border-color: #bfdbfe;
+                                                y: (parent.height - self.height) / 2;
+
+                                                HorizontalLayout {
+                                                    alignment: center;
+                                                    spacing: 4px;
+                                                    Text { text: "✏"; font-size: 10px; vertical-alignment: center; }
+                                                    Text {
+                                                        text: "Editar";
+                                                        font-size: 11px;
+                                                        font-weight: 700;
+                                                        color: #1d4ed8;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                edit_emp_btn := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { AppLogic.select_empleado_for_edit(emp.id); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Panel Lateral de Edición / Alta de Empleado (Aparece al seleccionar o crear)
+            if AppData.show_edit_empleado_panel : Rectangle {
+                width: 380px;
+                border-radius: 12px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #cbd5e1;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        // Header del Panel
+                        HorizontalLayout {
+                            alignment: space-between;
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text {
+                                    text: AppData.emp_edit_is_new ? "Nuevo Empleado" : "Edición de Empleado";
+                                    font-size: 16px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                }
+                                Text {
+                                    text: "Actualizar datos patronales y RFC/CURP";
+                                    font-size: 11px;
+                                    color: #64748b;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                border-radius: 14px;
+                                background: close_emp_panel.has-hover ? #fee2e2 : transparent;
+                                Text {
+                                    text: "✕";
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    color: close_emp_panel.has-hover ? #dc2626 : #64748b;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                close_emp_panel := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { AppLogic.close_edit_empleado_panel(); }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: #f1f5f9; }
+
+                        // 1. Nombre Completo
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: "Nombre Completo del Empleado *"; font-size: 11px; font-weight: 700; color: #1e293b; }
+                            LineEdit {
+                                text <=> AppData.emp_edit_nombre;
+                                placeholder-text: "Ej. JUAN PÉREZ GONZÁLEZ";
+                            }
+                        }
+
+                        // 2. RFC
+                        VerticalLayout {
+                            spacing: 3px;
+                            Text { text: "RFC SAT (13 Posiciones - Persona Física)"; font-size: 11px; font-weight: 700; color: #475569; }
+                            LineEdit {
+                                text <=> AppData.emp_edit_rfc;
+                                placeholder-text: "Ej. PEGJ800101XYZ";
+                                edited => { AppLogic.validate_empleado_input(); }
+                            }
+                            if AppData.emp_edit_rfc_msg != "" : Text {
+                                text: AppData.emp_edit_rfc_msg;
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: AppData.emp_edit_rfc_status == "valid" ? #16a34a : #dc2626;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // 3. NSS
+                        VerticalLayout {
+                            spacing: 3px;
+                            Text { text: "NSS IMSS (11 Dígitos)"; font-size: 11px; font-weight: 700; color: #475569; }
+                            LineEdit {
+                                text <=> AppData.emp_edit_nss;
+                                placeholder-text: "Ej. 12345678901";
+                                edited => { AppLogic.validate_empleado_input(); }
+                            }
+                            if AppData.emp_edit_nss_msg != "" : Text {
+                                text: AppData.emp_edit_nss_msg;
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: AppData.emp_edit_nss_status == "valid" ? #16a34a : #dc2626;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // 4. CURP
+                        VerticalLayout {
+                            spacing: 3px;
+                            Text { text: "CURP RENAPO (18 Posiciones)"; font-size: 11px; font-weight: 700; color: #475569; }
+                            LineEdit {
+                                text <=> AppData.emp_edit_curp;
+                                placeholder-text: "Ej. PEGJ800101HDFRRN01";
+                                edited => { AppLogic.validate_empleado_input(); }
+                            }
+                            if AppData.emp_edit_curp_msg != "" : Text {
+                                text: AppData.emp_edit_curp_msg;
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: AppData.emp_edit_curp_status == "valid" ? #16a34a : #dc2626;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // Banner de alerta por inconsistencia cruzada (ej. NSS año nacimiento != CURP o RFC)
+                        if AppData.emp_edit_cross_warning != "" : Rectangle {
+                            border-radius: 6px;
+                            background: #fef2f2;
+                            border-width: 1px;
+                            border-color: #fecaca;
+                            HorizontalLayout {
+                                padding: 8px;
+                                spacing: 6px;
+                                Text { text: "⚠"; font-size: 12px; color: #b91c1c; }
+                                Text {
+                                    text: AppData.emp_edit_cross_warning;
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    color: #991b1b;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // 5. Toggle Switch: esta_activo
+                        Rectangle {
+                            height: 48px;
+                            border-radius: 8px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                alignment: space-between;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 1px;
+                                    Text {
+                                        text: "Empleado Activo en Obra / Nómina";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #0f172a;
+                                    }
+                                    Text {
+                                        text: "Incluye aportaciones en cédula SUA y obra activa.";
+                                        font-size: 9px;
+                                        color: #64748b;
+                                    }
+                                }
+
+                                Switch {
+                                    checked <=> AppData.emp_edit_esta_activo;
+                                }
+                            }
+                        }
+
+                        // Botones Cancelar / Actualizar
+                        HorizontalLayout {
+                            spacing: 12px;
+                            padding-top: 8px;
+
+                            Button {
+                                text: "Cancelar";
+                                clicked => { AppLogic.close_edit_empleado_panel(); }
+                            }
+
+                            Rectangle {
+                                height: 38px;
+                                border-radius: 6px;
+                                background: AppData.emp_edit_nombre != "" ? #1e3a8a : #94a3b8;
+                                horizontal-stretch: 1;
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: AppData.emp_edit_is_new ? "Registrar Empleado" : "Actualizar Empleado";
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: AppData.emp_edit_nombre != "" ? pointer : default;
+                                    clicked => {
+                                        if AppData.emp_edit_nombre != "" {
+                                            AppLogic.submit_edit_empleado(
+                                                AppData.emp_edit_id,
+                                                AppData.selected_cliente_id,
+                                                AppData.emp_edit_nombre,
+                                                AppData.emp_edit_rfc,
+                                                AppData.emp_edit_curp,
+                                                AppData.emp_edit_nss,
+                                                AppData.emp_edit_esta_activo
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

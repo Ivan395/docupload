@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=DocuUpload
 GenericName=Procesamiento Fiscal y Cédulas SUA
-Comment=Validación de nóminas CFDI con SAT SOAP y extracción de cédulas SUA IMSS
+Comment=Creacion de Correcciones Patronales ante el IMSS
 Exec=docu_ffacd
 Icon=docu_ffacd
 Terminal=false

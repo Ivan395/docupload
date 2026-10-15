@@ -166,9 +166,6 @@ fn write_estadisticas_sheet(
         .set_border_color(Color::RGB(0xE2E8F0))
         .set_num_format("$#,##0.00");
 
-    // Title banner
-    worksheet.merge_range(0, 0, 0, 4, "DOCUUPLOAD - RESUMEN EJECUTIVO Y ESTADÍSTICAS DE NÓMINAS", &title_format)?;
-
     // KPI Summary Table
     let kpi_data = [
         ("Total de Comprobantes XML Analizados", stats.total_files as f64, &kpi_val_format),
@@ -197,41 +194,227 @@ fn write_estadisticas_sheet(
     worksheet.write_string_with_format(9, 0, "Tasa de Validez y Efectividad Fiscal", &kpi_label_format)?;
     worksheet.write_number_with_format(9, 1, validez_rate, &percent_format)?;
 
-    worksheet.write_string_with_format(10, 0, "Importe Total Bruto de Sueldos Válidos", &kpi_label_format)?;
+    worksheet.write_string_with_format(10, 0, "Importe Total Bruto de Sueldos Válidos (Sueldo + 7mo Día)", &kpi_label_format)?;
     worksheet.write_number_with_format(10, 1, stats.total_sueldos_validos, &currency_kpi_format)?;
 
-    // Company breakdown table
-    worksheet.merge_range(13, 0, 13, 3, "DESGLOSE POR EMPRESA / PATRÓN EMISOR", &table_head_format)?;
-
-    let comp_headers = ["RAZÓN SOCIAL EMISOR", "RFC EMISOR", "NÓMINAS VÁLIDAS", "TOTAL SUELDOS ($)"];
-    for (col, head) in comp_headers.iter().enumerate() {
-        worksheet.write_string_with_format(14, col as u16, *head, &table_head_format)?;
+    let mut next_table_start_row = 13;
+    if stats.total_septimo_dia_validos > 0.0 {
+        worksheet.write_string_with_format(11, 0, "Importe Total de Séptimo Día (Incluido en Sueldos)", &kpi_label_format)?;
+        worksheet.write_number_with_format(11, 1, stats.total_septimo_dia_validos, &currency_kpi_format)?;
+        next_table_start_row = 14;
     }
 
-    let mut current_row = 15;
+    // Determine distinct payment periodicities present
+    let standard_periodicities = [
+        "Diario",
+        "Semanal",
+        "Decenal",
+        "Catorcenal",
+        "Quincenal",
+        "Mensual",
+        "Bimestral",
+        "Unidad de obra",
+        "Comisión",
+        "Precio alzado",
+        "Otra Periodicidad",
+    ];
+
+    let mut present_periodicities_set = HashSet::new();
+    let mut has_any_septimo = false;
+    for emps in companies_map.values() {
+        for emp in emps {
+            present_periodicities_set.insert(emp.periodicidad_display());
+            if emp.get_septimo_dia_importe() > 0.0 {
+                has_any_septimo = true;
+            }
+        }
+    }
+
+    let mut periodicities_present = Vec::new();
+    for p in &standard_periodicities {
+        if present_periodicities_set.contains(*p) {
+            periodicities_present.push(p.to_string());
+            present_periodicities_set.remove(*p);
+        }
+    }
+    let mut rest_p: Vec<String> = present_periodicities_set.into_iter().collect();
+    rest_p.sort();
+    periodicities_present.extend(rest_p);
+
+    // Build headers for the company breakdown table
+    let mut comp_headers = vec![
+        "RAZÓN SOCIAL EMISOR".to_string(),
+        "RFC EMISOR".to_string(),
+        "NÓMINAS VÁLIDAS".to_string(),
+        if has_any_septimo {
+            "TOTAL SUELDOS (SUELDO + 7MO DÍA) ($)".to_string()
+        } else {
+            "TOTAL SUELDOS ($)".to_string()
+        },
+    ];
+
+    if has_any_septimo {
+        comp_headers.push("TOTAL 7MO DÍA ($)".to_string());
+    }
+
+    for p in &periodicities_present {
+        let p_upper = p.to_uppercase();
+        let p_has_septimo = companies_map.values().any(|emps| {
+            emps.iter()
+                .any(|e| e.periodicidad_display() == *p && e.get_septimo_dia_importe() > 0.0)
+        });
+
+        comp_headers.push(format!("EMPLEADOS {}", p_upper));
+        if p_has_septimo {
+            comp_headers.push(format!("TOTAL {} (SUELDO + 7MO DÍA) ($)", p_upper));
+            comp_headers.push(format!("7MO DÍA {} ($)", p_upper));
+        } else {
+            comp_headers.push(format!("TOTAL {} ($)", p_upper));
+        }
+    }
+
+    // Title banner
+    let banner_width = comp_headers.len().max(5) as u16;
+    worksheet.merge_range(
+        0,
+        0,
+        0,
+        banner_width - 1,
+        "DOCUUPLOAD - RESUMEN EJECUTIVO Y ESTADÍSTICAS DE NÓMINAS",
+        &title_format,
+    )?;
+
+    // Company breakdown table title
+    worksheet.merge_range(
+        next_table_start_row,
+        0,
+        next_table_start_row,
+        (comp_headers.len() - 1) as u16,
+        "DESGLOSE POR EMPRESA / PATRÓN EMISOR",
+        &table_head_format,
+    )?;
+
+    let header_row = next_table_start_row + 1;
+    for (col, head) in comp_headers.iter().enumerate() {
+        worksheet.write_string_with_format(header_row, col as u16, head, &table_head_format)?;
+    }
+
+    let mut current_row = header_row + 1;
     let mut company_keys: Vec<(String, String)> = companies_map.keys().cloned().collect();
     company_keys.sort();
 
-    for (rfc, nombre) in company_keys {
+    let mut total_nominas: usize = 0;
+    let mut grand_total_sueldos: f64 = 0.0;
+    let mut grand_total_septimo: f64 = 0.0;
+    let mut periodicities_total_emps: HashMap<String, usize> = HashMap::new();
+    let mut periodicities_total_sueldo: HashMap<String, f64> = HashMap::new();
+    let mut periodicities_total_septimo: HashMap<String, f64> = HashMap::new();
+
+    for (rfc, nombre) in &company_keys {
         let emps = &companies_map[&(rfc.clone(), nombre.clone())];
         let count = emps.len();
-        let total_sueldos: f64 = emps
-            .iter()
-            .map(|e| {
-                e.nomina
-                    .percepciones
-                    .iter()
-                    .find(|p| p.concepto.contains("SUELDO"))
-                    .map_or(0.0, |p| p.importe)
-            })
-            .sum();
+        let total_sueldos_co: f64 = emps.iter().map(|e| e.get_sueldo_total_con_septimo()).sum();
+        let total_septimo_co: f64 = emps.iter().map(|e| e.get_septimo_dia_importe()).sum();
 
-        let display_nombre = if nombre.is_empty() { "SIN_RAZON_SOCIAL" } else { &nombre };
+        total_nominas += count;
+        grand_total_sueldos += total_sueldos_co;
+        grand_total_septimo += total_septimo_co;
+
+        let display_nombre = if nombre.is_empty() { "SIN_RAZON_SOCIAL" } else { nombre.as_str() };
         worksheet.write_string_with_format(current_row, 0, display_nombre, &cell_text_format)?;
-        worksheet.write_string_with_format(current_row, 1, &rfc, &cell_text_format)?;
+        worksheet.write_string_with_format(current_row, 1, rfc, &cell_text_format)?;
         worksheet.write_number_with_format(current_row, 2, count as f64, &cell_num_format)?;
-        worksheet.write_number_with_format(current_row, 3, total_sueldos, &cell_curr_format)?;
+        worksheet.write_number_with_format(current_row, 3, total_sueldos_co, &cell_curr_format)?;
+
+        let mut col_idx: u16 = 4;
+        if has_any_septimo {
+            worksheet.write_number_with_format(current_row, col_idx, total_septimo_co, &cell_curr_format)?;
+            col_idx += 1;
+        }
+
+        for p in &periodicities_present {
+            let emps_p: Vec<&&Employee> = emps.iter().filter(|e| e.periodicidad_display() == *p).collect();
+            let unique_p: HashSet<&str> = emps_p.iter().map(|e| e.unique_key()).collect();
+            let p_emp_count = unique_p.len();
+            let p_total_sueldo_septimo: f64 = emps_p.iter().map(|e| e.get_sueldo_total_con_septimo()).sum();
+            let p_total_septimo: f64 = emps_p.iter().map(|e| e.get_septimo_dia_importe()).sum();
+
+            *periodicities_total_emps.entry(p.clone()).or_insert(0) += p_emp_count;
+            *periodicities_total_sueldo.entry(p.clone()).or_insert(0.0) += p_total_sueldo_septimo;
+            *periodicities_total_septimo.entry(p.clone()).or_insert(0.0) += p_total_septimo;
+
+            worksheet.write_number_with_format(current_row, col_idx, p_emp_count as f64, &cell_num_format)?;
+            col_idx += 1;
+            worksheet.write_number_with_format(current_row, col_idx, p_total_sueldo_septimo, &cell_curr_format)?;
+            col_idx += 1;
+
+            let p_has_septimo = companies_map.values().any(|all_emps| {
+                all_emps.iter().any(|e| e.periodicidad_display() == *p && e.get_septimo_dia_importe() > 0.0)
+            });
+            if p_has_septimo {
+                worksheet.write_number_with_format(current_row, col_idx, p_total_septimo, &cell_curr_format)?;
+                col_idx += 1;
+            }
+        }
+
         current_row += 1;
+    }
+
+    if company_keys.len() > 1 {
+        let total_label_format = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x1E293B))
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border(FormatBorder::Thin);
+
+        let total_num_fmt = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x1E293B))
+            .set_align(rust_xlsxwriter::FormatAlign::Center)
+            .set_border(FormatBorder::Thin)
+            .set_num_format("#,##0");
+
+        let total_curr_fmt = Format::new()
+            .set_bold()
+            .set_font_size(11)
+            .set_font_color(Color::White)
+            .set_background_color(Color::RGB(0x1E293B))
+            .set_align(rust_xlsxwriter::FormatAlign::Right)
+            .set_border(FormatBorder::Thin)
+            .set_num_format("$#,##0.00");
+
+        worksheet.merge_range(current_row, 0, current_row, 1, "TOTAL GENERAL", &total_label_format)?;
+        worksheet.write_number_with_format(current_row, 2, total_nominas as f64, &total_num_fmt)?;
+        worksheet.write_number_with_format(current_row, 3, grand_total_sueldos, &total_curr_fmt)?;
+
+        let mut col_idx: u16 = 4;
+        if has_any_septimo {
+            worksheet.write_number_with_format(current_row, col_idx, grand_total_septimo, &total_curr_fmt)?;
+            col_idx += 1;
+        }
+
+        for p in &periodicities_present {
+            let p_emps = periodicities_total_emps.get(p).copied().unwrap_or(0);
+            let p_sueldo = periodicities_total_sueldo.get(p).copied().unwrap_or(0.0);
+            let p_septimo = periodicities_total_septimo.get(p).copied().unwrap_or(0.0);
+
+            worksheet.write_number_with_format(current_row, col_idx, p_emps as f64, &total_num_fmt)?;
+            col_idx += 1;
+            worksheet.write_number_with_format(current_row, col_idx, p_sueldo, &total_curr_fmt)?;
+            col_idx += 1;
+
+            let p_has_septimo = companies_map.values().any(|all_emps| {
+                all_emps.iter().any(|e| e.periodicidad_display() == *p && e.get_septimo_dia_importe() > 0.0)
+            });
+            if p_has_septimo {
+                worksheet.write_number_with_format(current_row, col_idx, p_septimo, &total_curr_fmt)?;
+                col_idx += 1;
+            }
+        }
     }
 
     worksheet.autofit();
@@ -353,10 +536,108 @@ pub fn generate_excel(
         .set_bold()
         .set_font_color(Color::White)
         .set_background_color(Color::RGB(0x1D4ED8)) // Elegant Royal Blue
-        .set_align(rust_xlsxwriter::FormatAlign::Center);
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_border(FormatBorder::Thin);
 
-    let currency_format = Format::new().set_num_format("$#,##0.00");
-    let integer_format = Format::new().set_num_format("#,##0");
+    let currency_format = Format::new()
+        .set_num_format("$#,##0.00")
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xE2E8F0));
+
+    let integer_format = Format::new()
+        .set_num_format("#,##0")
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xE2E8F0));
+
+    let cell_text_format = Format::new()
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xE2E8F0));
+
+    let cell_center_format = Format::new()
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xE2E8F0));
+
+    let month_section_format = Format::new()
+        .set_bold()
+        .set_font_size(11)
+        .set_font_color(Color::White)
+        .set_background_color(Color::RGB(0x1E3A8A))
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_border(FormatBorder::Thin);
+
+    let subtotal_label_format = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0xDBEAFE))
+        .set_align(rust_xlsxwriter::FormatAlign::Right)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0x93C5FD));
+
+    let subtotal_curr_format = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0xDBEAFE))
+        .set_align(rust_xlsxwriter::FormatAlign::Right)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0x93C5FD))
+        .set_num_format("$#,##0.00");
+
+    let subtotal_int_format = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0xDBEAFE))
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0x93C5FD))
+        .set_num_format("#,##0");
+
+    let subtotal_center_format = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0xDBEAFE))
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0x93C5FD));
+
+    let grand_total_label_format = Format::new()
+        .set_bold()
+        .set_font_size(11)
+        .set_font_color(Color::White)
+        .set_background_color(Color::RGB(0x1E293B))
+        .set_align(rust_xlsxwriter::FormatAlign::Right)
+        .set_border_bottom(FormatBorder::Double)
+        .set_border_top(FormatBorder::Thin);
+
+    let grand_total_curr_format = Format::new()
+        .set_bold()
+        .set_font_size(11)
+        .set_font_color(Color::White)
+        .set_background_color(Color::RGB(0x1E293B))
+        .set_align(rust_xlsxwriter::FormatAlign::Right)
+        .set_border_bottom(FormatBorder::Double)
+        .set_border_top(FormatBorder::Thin)
+        .set_num_format("$#,##0.00");
+
+    let grand_total_int_format = Format::new()
+        .set_bold()
+        .set_font_size(11)
+        .set_font_color(Color::White)
+        .set_background_color(Color::RGB(0x1E293B))
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_border_bottom(FormatBorder::Double)
+        .set_border_top(FormatBorder::Thin)
+        .set_num_format("#,##0");
+
+    let grand_total_center_format = Format::new()
+        .set_bold()
+        .set_font_size(11)
+        .set_font_color(Color::White)
+        .set_background_color(Color::RGB(0x1E293B))
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_border_bottom(FormatBorder::Double)
+        .set_border_top(FormatBorder::Thin);
 
     if companies_map.is_empty() {
         let ws_empty = workbook.add_worksheet();
@@ -404,10 +685,13 @@ pub fn generate_excel(
 
             // Headers
             let mut headers = vec![
+                "AÑO",
+                "MES",
                 "NOMBRE_ARCHIVO",
                 "FECHA_INICIAL",
                 "FECHA_FINAL",
                 "FECHA_PAGO",
+                "PERIODICIDAD",
                 "NOMBRE",
                 "NSS",
                 "SD_CALCULADO",
@@ -418,79 +702,162 @@ pub fn generate_excel(
             ];
             let header_strs: Vec<&str> = columns_conceptos.iter().map(AsRef::as_ref).collect();
             headers.extend(header_strs);
+            let total_cols = headers.len() as u16;
 
             for (col, header) in headers.iter().enumerate() {
                 worksheet.write_string_with_format(0, col as u16, *header, &header_format)?;
             }
 
-            // Write Data rows
-            for (row_idx, emp) in emps.iter().enumerate() {
-                let row = (row_idx + 1) as u32;
+            // Group by (year, month)
+            let mut month_groups: HashMap<(i32, u32), Vec<&Employee>> = HashMap::new();
+            for emp in emps {
+                let ym = emp.get_year_month();
+                month_groups.entry(ym).or_default().push(emp);
+            }
 
-                let fecha_ini = emp
-                    .nomina
-                    .fechainicialpago
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                let fecha_fin = emp
-                    .nomina
-                    .fechafinalpago
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                let fecha_pago = emp
-                    .nomina
-                    .fechapago
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default();
-                let sueldo_importe = emp
-                    .nomina
-                    .percepciones
-                    .iter()
-                    .find(|p| p.concepto.contains("SUELDO"))
-                    .map_or(0.0, |p| p.importe);
+            let mut sorted_ym: Vec<(i32, u32)> = month_groups.keys().cloned().collect();
+            sorted_ym.sort();
 
-                worksheet.write_string(row, 0, &emp.nombrearchivo)?;
-                worksheet.write_string(row, 1, &fecha_ini)?;
-                worksheet.write_string(row, 2, &fecha_fin)?;
-                worksheet.write_string(row, 3, &fecha_pago)?;
-                worksheet.write_string(row, 4, emp.nombre.as_deref().unwrap_or(""))?;
-                worksheet.write_string(row, 5, emp.numseguridadsocial.as_deref().unwrap_or(""))?;
-                worksheet.write_number_with_format(
-                    row,
-                    6,
-                    emp.salariodiariocalculado.unwrap_or(0.0),
-                    &currency_format,
-                )?;
-                worksheet.write_number_with_format(
-                    row,
-                    7,
-                    emp.salariobasecotapor.unwrap_or(0.0),
-                    &currency_format,
-                )?;
-                worksheet.write_number_with_format(
-                    row,
-                    8,
-                    emp.salariodiariointegradocalculado.unwrap_or(0.0),
-                    &currency_format,
-                )?;
-                worksheet.write_number_with_format(
-                    row,
-                    9,
-                    emp.nomina.numdiaspagados.unwrap_or(0.0),
-                    &integer_format,
-                )?;
-                worksheet.write_number_with_format(row, 10, sueldo_importe, &currency_format)?;
+            let mut current_row: u32 = 1;
 
-                let mut row_conceptos: HashMap<&str, f64> = HashMap::new();
-                for p in &emp.nomina.percepciones {
-                    row_conceptos.insert(&p.concepto, p.importe);
+            let mut grand_total_dias: f64 = 0.0;
+            let mut grand_total_sueldo: f64 = 0.0;
+            let mut grand_total_conceptos: HashMap<String, f64> = HashMap::new();
+
+            for (year, month) in sorted_ym {
+                let mut month_emps = month_groups[&(year, month)].clone();
+                month_emps.sort_by(|a, b| {
+                    let date_a = a.nomina.fechafinalpago.unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
+                    let date_b = b.nomina.fechafinalpago.unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
+                    date_a.cmp(&date_b).then(a.nombre.cmp(&b.nombre))
+                });
+
+                let month_name = crate::nominas::utils::month_name_spanish(month);
+                let banner_text = format!("PERÍODO DE NÓMINA: {} {}", month_name, year);
+
+                worksheet.merge_range(
+                    current_row,
+                    0,
+                    current_row,
+                    total_cols - 1,
+                    &banner_text,
+                    &month_section_format,
+                )?;
+                current_row += 1;
+
+                let mut subtotal_dias: f64 = 0.0;
+                let mut subtotal_sueldo: f64 = 0.0;
+                let mut subtotal_conceptos: HashMap<String, f64> = HashMap::new();
+
+                for emp in month_emps {
+                    let fecha_ini = emp
+                        .nomina
+                        .fechainicialpago
+                        .map(|d| d.format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    let fecha_fin = emp
+                        .nomina
+                        .fechafinalpago
+                        .map(|d| d.format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    let fecha_pago = emp
+                        .nomina
+                        .fechapago
+                        .map(|d| d.format("%Y-%m-%d").to_string())
+                        .unwrap_or_default();
+                    let sueldo_importe = emp.get_sueldo_importe();
+                    let dias_pagados = emp.nomina.numdiaspagados.unwrap_or(0.0);
+
+                    worksheet.write_number_with_format(current_row, 0, year as f64, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 1, month_name, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 2, &emp.nombrearchivo, &cell_text_format)?;
+                    worksheet.write_string_with_format(current_row, 3, &fecha_ini, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 4, &fecha_fin, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 5, &fecha_pago, &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 6, &emp.periodicidad_display(), &cell_center_format)?;
+                    worksheet.write_string_with_format(current_row, 7, emp.nombre.as_deref().unwrap_or(""), &cell_text_format)?;
+                    worksheet.write_string_with_format(current_row, 8, emp.numseguridadsocial.as_deref().unwrap_or(""), &cell_center_format)?;
+                    worksheet.write_number_with_format(
+                        current_row,
+                        9,
+                        emp.salariodiariocalculado.unwrap_or(0.0),
+                        &currency_format,
+                    )?;
+                    worksheet.write_number_with_format(
+                        current_row,
+                        10,
+                        emp.salariobasecotapor.unwrap_or(0.0),
+                        &currency_format,
+                    )?;
+                    worksheet.write_number_with_format(
+                        current_row,
+                        11,
+                        emp.salariodiariointegradocalculado.unwrap_or(0.0),
+                        &currency_format,
+                    )?;
+                    worksheet.write_number_with_format(
+                        current_row,
+                        12,
+                        dias_pagados,
+                        &integer_format,
+                    )?;
+                    worksheet.write_number_with_format(current_row, 13, sueldo_importe, &currency_format)?;
+
+                    subtotal_dias += dias_pagados;
+                    subtotal_sueldo += sueldo_importe;
+                    grand_total_dias += dias_pagados;
+                    grand_total_sueldo += sueldo_importe;
+
+                    let mut row_conceptos: HashMap<&str, f64> = HashMap::new();
+                    for p in &emp.nomina.percepciones {
+                        if !p.concepto.contains("SUELDO") {
+                            row_conceptos.insert(&p.concepto, p.importe);
+                        }
+                    }
+
+                    for (i, col_name) in columns_conceptos.iter().enumerate() {
+                        let col_idx = (14 + i) as u16;
+                        let val = row_conceptos.get(col_name.as_str()).copied().unwrap_or(0.0);
+                        worksheet.write_number_with_format(current_row, col_idx, val, &currency_format)?;
+                        *subtotal_conceptos.entry(col_name.clone()).or_insert(0.0) += val;
+                        *grand_total_conceptos.entry(col_name.clone()).or_insert(0.0) += val;
+                    }
+
+                    current_row += 1;
                 }
+
+                // Month Subtotal Row
+                let subtotal_label = format!("TOTAL {} {}", month_name, year);
+                worksheet.merge_range(current_row, 0, current_row, 8, &subtotal_label, &subtotal_label_format)?;
+                worksheet.write_string_with_format(current_row, 9, "-", &subtotal_center_format)?;
+                worksheet.write_string_with_format(current_row, 10, "-", &subtotal_center_format)?;
+                worksheet.write_string_with_format(current_row, 11, "-", &subtotal_center_format)?;
+                worksheet.write_number_with_format(current_row, 12, subtotal_dias, &subtotal_int_format)?;
+                worksheet.write_number_with_format(current_row, 13, subtotal_sueldo, &subtotal_curr_format)?;
 
                 for (i, col_name) in columns_conceptos.iter().enumerate() {
-                    let col_idx = (11 + i) as u16;
-                    let val = row_conceptos.get(col_name.as_str()).unwrap_or(&0.0);
-                    worksheet.write_number_with_format(row, col_idx, *val, &currency_format)?;
+                    let col_idx = (14 + i) as u16;
+                    let val = subtotal_conceptos.get(col_name).copied().unwrap_or(0.0);
+                    worksheet.write_number_with_format(current_row, col_idx, val, &subtotal_curr_format)?;
                 }
+                current_row += 1;
+
+                // Blank separator row
+                current_row += 1;
+            }
+
+            // Grand Total Row
+            worksheet.merge_range(current_row, 0, current_row, 8, "TOTAL GENERAL ACUMULADO", &grand_total_label_format)?;
+            worksheet.write_string_with_format(current_row, 9, "-", &grand_total_center_format)?;
+            worksheet.write_string_with_format(current_row, 10, "-", &grand_total_center_format)?;
+            worksheet.write_string_with_format(current_row, 11, "-", &grand_total_center_format)?;
+            worksheet.write_number_with_format(current_row, 12, grand_total_dias, &grand_total_int_format)?;
+            worksheet.write_number_with_format(current_row, 13, grand_total_sueldo, &grand_total_curr_format)?;
+
+            for (i, col_name) in columns_conceptos.iter().enumerate() {
+                let col_idx = (14 + i) as u16;
+                let val = grand_total_conceptos.get(col_name).copied().unwrap_or(0.0);
+                worksheet.write_number_with_format(current_row, col_idx, val, &grand_total_curr_format)?;
             }
 
             worksheet.autofit();
@@ -568,6 +935,86 @@ mod tests {
         };
 
         let res = generate_excel(&[emp1, emp2], &[], &stats, &test_path);
+        assert!(res.is_ok());
+        assert!(test_path.exists());
+        let _ = std::fs::remove_file(test_path);
+    }
+
+    #[test]
+    fn test_generate_excel_with_monthly_grouping_and_septimo_dia() {
+        use crate::nominas::models::Percepcion;
+        use chrono::NaiveDate;
+
+        let mut emp_semanal_may = Employee {
+            nombrearchivo: "emp_sem_may.xml".to_string(),
+            nombre: Some("CARLOS SEMANAL".to_string()),
+            rfc_emisor: Some("AAA010101AAA".to_string()),
+            nombre_emisor: Some("EMPRESA PRUEBA SA DE CV".to_string()),
+            rfc_receptor: Some("CARL800101XYZ".to_string()),
+            ..Default::default()
+        };
+        emp_semanal_may.nomina.periodicidad_pago = Some("02".to_string());
+        emp_semanal_may.nomina.numdiaspagados = Some(7.0);
+        emp_semanal_may.nomina.fechafinalpago = Some(NaiveDate::from_ymd_opt(2024, 5, 7).unwrap());
+        emp_semanal_may.nomina.percepciones = vec![
+            Percepcion { concepto: "SUELDO SEMANAL".to_string(), importe: 3000.0 },
+            Percepcion { concepto: "SEPTIMO DIA".to_string(), importe: 500.0 },
+        ];
+        emp_semanal_may.calculate_salaries();
+
+        let mut emp_quincenal_may = Employee {
+            nombrearchivo: "emp_quin_may.xml".to_string(),
+            nombre: Some("ANA QUINCENAL".to_string()),
+            rfc_emisor: Some("AAA010101AAA".to_string()),
+            nombre_emisor: Some("EMPRESA PRUEBA SA DE CV".to_string()),
+            rfc_receptor: Some("ANAA900101XYZ".to_string()),
+            ..Default::default()
+        };
+        emp_quincenal_may.nomina.periodicidad_pago = Some("04".to_string());
+        emp_quincenal_may.nomina.numdiaspagados = Some(15.0);
+        emp_quincenal_may.nomina.fechafinalpago = Some(NaiveDate::from_ymd_opt(2024, 5, 15).unwrap());
+        emp_quincenal_may.nomina.percepciones = vec![
+            Percepcion { concepto: "SUELDO QUINCENAL".to_string(), importe: 8000.0 },
+        ];
+        emp_quincenal_may.calculate_salaries();
+
+        let mut emp_semanal_jun = Employee {
+            nombrearchivo: "emp_sem_jun.xml".to_string(),
+            nombre: Some("CARLOS SEMANAL".to_string()),
+            rfc_emisor: Some("AAA010101AAA".to_string()),
+            nombre_emisor: Some("EMPRESA PRUEBA SA DE CV".to_string()),
+            rfc_receptor: Some("CARL800101XYZ".to_string()),
+            ..Default::default()
+        };
+        emp_semanal_jun.nomina.periodicidad_pago = Some("02".to_string());
+        emp_semanal_jun.nomina.numdiaspagados = Some(7.0);
+        emp_semanal_jun.nomina.fechafinalpago = Some(NaiveDate::from_ymd_opt(2024, 6, 7).unwrap());
+        emp_semanal_jun.nomina.percepciones = vec![
+            Percepcion { concepto: "SUELDO SEMANAL".to_string(), importe: 3000.0 },
+            Percepcion { concepto: "SEPTIMO DIA".to_string(), importe: 500.0 },
+        ];
+        emp_semanal_jun.calculate_salaries();
+
+        let employees = vec![emp_semanal_may, emp_quincenal_may, emp_semanal_jun];
+        let total_sueldos: f64 = employees.iter().map(|e| e.get_sueldo_total_con_septimo()).sum();
+        let total_septimo: f64 = employees.iter().map(|e| e.get_septimo_dia_importe()).sum();
+
+        // 3500 + 8000 + 3500 = 15000 total sueldos (including septimo dia)
+        assert_eq!(total_sueldos, 15000.0);
+        assert_eq!(total_septimo, 1000.0);
+
+        let stats = NominasStats {
+            total_files: 3,
+            valid_count: 3,
+            total_sueldos_validos: total_sueldos,
+            total_septimo_dia_validos: total_septimo,
+            ..Default::default()
+        };
+
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("test_nominas_monthly_grouping.xlsx");
+
+        let res = generate_excel(&employees, &[], &stats, &test_path);
         assert!(res.is_ok());
         assert!(test_path.exists());
         let _ = std::fs::remove_file(test_path);

@@ -1,0 +1,165 @@
+import { AppData } from "models.slint";
+
+export component BottomBar inherits Rectangle {
+    height: 38px;
+    background: #ffffff;
+    border-width: 1px;
+    border-color: #e2e8f0;
+
+    HorizontalLayout {
+        padding-left: 20px;
+        padding-right: 20px;
+        alignment: space-between;
+
+        HorizontalLayout {
+            spacing: 20px;
+            alignment: start;
+
+            // Motor
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Text { text: "🖩"; font-size: 12px; vertical-alignment: center; }
+                Text {
+                    text: "Motor: PostgreSQL (Pool R2D2 Concurrente)";
+                    font-size: 12px;
+                    color: #475569;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Latencia
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Text { text: "⚡"; font-size: 12px; vertical-alignment: center; }
+                Text {
+                    text: "Latencia: 5ms";
+                    font-size: 12px;
+                    color: #475569;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 24px;
+            alignment: end;
+
+            // Clientes
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Text {
+                    text: "Clientes:";
+                    font-size: 12px;
+                    color: #64748b;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: AppData.total_clientes_count;
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Reg. Patronales
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Text {
+                    text: "Reg. Patronales:";
+                    font-size: 12px;
+                    color: #64748b;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: AppData.total_rp_count;
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Revisiones
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Text {
+                    text: "Revisiones:";
+                    font-size: 12px;
+                    color: #64748b;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: AppData.total_revisiones_count;
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Obras
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Text {
+                    text: "Obras:";
+                    font-size: 12px;
+                    color: #64748b;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: AppData.total_obras_count;
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Empleados Activos
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Text {
+                    text: "Empleados Activos:";
+                    font-size: 12px;
+                    color: #64748b;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: AppData.total_empleados_activos_count;
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #059669;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Catálogos
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: center;
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 3.5px;
+                    background: #10b981;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: "Catálogos Cargados (" + AppData.catalogos_loaded_str + ")";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: #065f46;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

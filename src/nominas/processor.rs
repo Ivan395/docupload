@@ -2,6 +2,7 @@ use chrono::NaiveDate;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use crate::archives::collect_or_extract_files;
 use crate::nominas::excel::generate_excel;
@@ -31,6 +32,7 @@ pub struct NominasStats {
     pub parse_error_count: usize,
     pub other_invalid_count: usize,
     pub total_sueldos_validos: f64,
+    pub total_septimo_dia_validos: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +52,9 @@ pub fn process_nominas(
     output_excel_path: &Path,
     temp_dir: &Path,
     progress_callback: impl Fn(usize, usize, &str) + Send + Sync,
+    revision_id: Uuid,
+    expected_client_rfc: Option<&str>,
+    expected_rp: Option<&str>,
 ) -> Result<NominasProcessResult, String> {
     progress_callback(0, 0, "Buscando y extrayendo nóminas XML...");
 
@@ -146,12 +151,65 @@ pub fn process_nominas(
         }
     }
 
-    // 2. Deduplication check: Detect and filter duplicate UUIDs or identical receipts
+    // 2. Validate client RFC and Registro Patronal against active revision
+    let clean_exp_rfc = expected_client_rfc.map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let clean_exp_rp = expected_rp.map(|s| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()).filter(|s| !s.is_empty() && s != "GENERAL");
+
+    let mut context_filtered = Vec::new();
+    for (file_display_name, emp) in parsed_ok {
+        // Validar RFC Emisor
+        if let Some(ref exp_rfc) = clean_exp_rfc {
+            let emisor = emp.rfc_emisor.as_deref().unwrap_or("").trim().to_uppercase();
+            if !emisor.is_empty() && emisor != *exp_rfc {
+                invalid_items.push(UnprocessedNomina {
+                    filename: file_display_name,
+                    uuid: emp.uuid.clone().unwrap_or_default(),
+                    rfc_emisor: emisor.clone(),
+                    rfc_receptor: emp.rfc_receptor.clone().unwrap_or_default(),
+                    total: emp.total.unwrap_or(0.0),
+                    category: "RFC EMISOR NO COINCIDE".to_string(),
+                    reason: format!(
+                        "El RFC emisor '{}' en el XML no coincide con el RFC '{}' registrado para la empresa en la aplicación.",
+                        emisor, exp_rfc
+                    ),
+                    is_sat_error: false,
+                });
+                continue;
+            }
+        }
+
+        // Validar Registro Patronal si el XML lo incluye
+        if let Some(ref exp_rp) = clean_exp_rp {
+            if let Some(ref rp) = emp.registro_patronal {
+                let clean_rp: String = rp.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
+                if !clean_rp.is_empty() && clean_rp != *exp_rp {
+                    invalid_items.push(UnprocessedNomina {
+                        filename: file_display_name,
+                        uuid: emp.uuid.clone().unwrap_or_default(),
+                        rfc_emisor: emp.rfc_emisor.clone().unwrap_or_default(),
+                        rfc_receptor: emp.rfc_receptor.clone().unwrap_or_default(),
+                        total: emp.total.unwrap_or(0.0),
+                        category: "REGISTRO PATRONAL NO COINCIDE".to_string(),
+                        reason: format!(
+                            "El Registro Patronal '{}' en el XML no coincide con el Registro Patronal '{}' registrado para la revisión.",
+                            rp.trim(), exp_rp
+                        ),
+                        is_sat_error: false,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        context_filtered.push((file_display_name, emp));
+    }
+
+    // 3. Deduplication check: Detect and filter duplicate UUIDs or identical receipts
     let mut seen_uuids = HashSet::new();
     let mut unique_parsed = Vec::new();
     let mut duplicate_count = 0;
 
-    for (file_display_name, emp) in parsed_ok {
+    for (file_display_name, emp) in context_filtered {
         let uuid_key = emp.uuid.as_deref().unwrap_or("").trim().to_uppercase();
         if !uuid_key.is_empty() {
             if seen_uuids.contains(&uuid_key) {
@@ -305,21 +363,56 @@ pub fn process_nominas(
         }
     }
 
-    // Filter valid employees (require fecha final de pago and employee name)
-    let initial_valid = valid_employees.len();
-    valid_employees.retain(|emp| emp.nomina.fechafinalpago.is_some() && emp.nombre.is_some());
+    // Requisito mínimo para persistir: fecha final de pago y nombre del
+    // trabajador. Una nómina que SUPERVIVIÓ la validación SAT pero no cumple
+    // esto no puede guardarse (el modelo exige esas columnas), pero tampoco debe
+    // desaparecer: antes solo se contaba con `log::warn!` y quedaba fuera tanto
+    // de la base de datos como del Excel de "omitidas", así que el usuario no
+    // tenía ninguna traza. Ahora cada descarte entra a `invalid_items` con su
+    // motivo explícito, de modo que aparece en la hoja de no procesadas y en la
+    // lista de rechazados de la UI.
+    let mut dropped_missing_fields = 0usize;
+    valid_employees.retain(|emp| {
+        let falta_fecha = emp.nomina.fechafinalpago.is_none();
+        let falta_nombre = emp.nombre.is_none();
+        if !falta_fecha && !falta_nombre {
+            return true;
+        }
 
-    let other_inv = if valid_employees.len() < initial_valid {
-        let diff = initial_valid - valid_employees.len();
-        log::warn!("Ignorados {} registros por carecer de fecha final o nombre", diff);
-        diff
-    } else {
-        0
-    };
+        let mut motivos: Vec<&str> = Vec::new();
+        if falta_nombre {
+            motivos.push("falta el nombre del trabajador");
+        }
+        if falta_fecha {
+            motivos.push("falta la fecha final de pago");
+        }
+        let motivo = format!(
+            "Datos incompletos (válida ante SAT pero {}): no se puede registrar en la base de datos",
+            motivos.join(" y ")
+        );
+
+        log::warn!("Nómina descartada ({}): {}", emp.nombrearchivo, motivo);
+        invalid_items.push(UnprocessedNomina {
+            filename: emp.nombrearchivo.clone(),
+            uuid: emp.uuid.as_deref().unwrap_or("").trim().to_uppercase(),
+            rfc_emisor: emp.rfc_emisor.clone().unwrap_or_default(),
+            rfc_receptor: emp.rfc_receptor.clone().unwrap_or_default(),
+            total: emp.total.unwrap_or(0.0),
+            category: "DATOS INCOMPLETOS".to_string(),
+            reason: motivo,
+            is_sat_error: false,
+        });
+        dropped_missing_fields += 1;
+        false
+    });
+
+    let other_inv = dropped_missing_fields;
 
     // Sort valid employees using dedicated CPU pool
     cpu_pool.install(|| {
         valid_employees.par_sort_unstable_by(|a, b| {
+            let (year_a, month_a) = a.get_year_month();
+            let (year_b, month_b) = b.get_year_month();
             let date_a = a
                 .nomina
                 .fechafinalpago
@@ -328,19 +421,22 @@ pub fn process_nominas(
                 .nomina
                 .fechafinalpago
                 .unwrap_or_else(|| NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
-            date_a.cmp(&date_b).then(a.nombre.cmp(&b.nombre))
+            year_a
+                .cmp(&year_b)
+                .then(month_a.cmp(&month_b))
+                .then(date_a.cmp(&date_b))
+                .then(a.nombre.cmp(&b.nombre))
         });
     });
 
     let total_sueldos: f64 = valid_employees
         .iter()
-        .map(|e| {
-            e.nomina
-                .percepciones
-                .iter()
-                .find(|p| p.concepto.contains("SUELDO"))
-                .map_or(0.0, |p| p.importe)
-        })
+        .map(|e| e.get_sueldo_total_con_septimo())
+        .sum();
+
+    let total_septimo: f64 = valid_employees
+        .iter()
+        .map(|e| e.get_septimo_dia_importe())
         .sum();
 
     let stats = NominasStats {
@@ -352,6 +448,7 @@ pub fn process_nominas(
         parse_error_count,
         other_invalid_count: other_inv,
         total_sueldos_validos: total_sueldos,
+        total_septimo_dia_validos: total_septimo,
     };
 
     let mut generated_excel_path = None;
@@ -367,6 +464,68 @@ pub fn process_nominas(
         generate_excel(&valid_employees, &invalid_items, &stats, output_excel_path)
             .map_err(|e| format!("Error generando Excel de Nóminas: {}", e))?;
         generated_excel_path = Some(output_excel_path.to_path_buf());
+    }
+
+    // Guardar en la base de datos PostgreSQL si hay empleados válidos
+    if !valid_employees.is_empty() {
+        let total_val = valid_employees.len();
+        progress_callback(
+            0,
+            total_val,
+            "Conectando a PostgreSQL y preparando guardado concurrente de nóminas...",
+        );
+
+        let num_cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let pool_size = (num_cpus * 2).clamp(4, 32) as u32;
+
+        match crate::db::create_pool(pool_size) {
+            Ok(pool) => {
+                match pool.get() {
+                    Ok(mut init_client) => {
+                        if let Err(e) = crate::db::ensure_schema(&mut init_client) {
+                            log::error!("Error al verificar esquema en PostgreSQL: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("No se pudo obtener cliente inicial del pool: {}", e);
+                    }
+                }
+
+                let cb = |done: usize, total: usize| {
+                    progress_callback(
+                        done,
+                        total,
+                        &format!("Guardando nóminas en PostgreSQL de forma concurrente ({}/{})...", done, total),
+                    );
+                };
+
+                match crate::db::save_nominas_concurrent(&pool, &valid_employees, Some(&cb), revision_id) {
+                    Ok(db_stats) => {
+                        log::info!(
+                            "Nóminas guardadas en PostgreSQL concurrentemente: {} nóminas, {} cfdis, {} contratos, {} detalles, {} empleados",
+                            db_stats.nominas_guardadas,
+                            db_stats.cfdis_guardados,
+                            db_stats.contratos_guardados,
+                            db_stats.detalles_guardados,
+                            db_stats.empleados_guardados
+                        );
+                        if !db_stats.errores.is_empty() {
+                            for err in db_stats.errores {
+                                log::warn!("Advertencia al guardar nóminas concurrentemente en BD: {}", err);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error al guardar nóminas concurrentes en PostgreSQL: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("No se pudo inicializar pool de PostgreSQL para guardar nóminas: {}", e);
+            }
+        }
     }
 
     Ok(NominasProcessResult {

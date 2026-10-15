@@ -8,6 +8,34 @@ VERSION="0.5.0"
 ARCH="amd64"
 PKG_NAME="docu-ffacd_${VERSION}_${ARCH}"
 
+echo "==> [Debian/Ubuntu] Verificando dependencias del sistema para la compilación..."
+SUDO_CMD=""
+if [ "$EUID" -ne 0 ]; then
+    if sudo -n true 2>/dev/null; then
+        SUDO_CMD="sudo -n"
+    elif [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+        SUDO_CMD="sudo"
+    fi
+fi
+
+if command -v apt-get >/dev/null 2>&1; then
+    DEB_BUILD_DEPS="libfontconfig1-dev libfreetype6-dev zlib1g-dev libx11-dev pkg-config build-essential"
+    MISSING_DEPS=""
+    for dep in $DEB_BUILD_DEPS; do
+        if ! dpkg -s "$dep" >/dev/null 2>&1; then
+            MISSING_DEPS="$MISSING_DEPS $dep"
+        fi
+    done
+    if [ -n "$MISSING_DEPS" ]; then
+        echo "==> [Debian/Ubuntu] Descargando e instalando librerías necesarias para compilar:$MISSING_DEPS"
+        if [ -n "$SUDO_CMD" ]; then
+            $SUDO_CMD apt-get update && $SUDO_CMD apt-get install -y $MISSING_DEPS || echo "Aviso: No se pudo completar la instalación con apt-get."
+        else
+            echo "Aviso: Ejecuta con sudo o instala manualmente:$MISSING_DEPS"
+        fi
+    fi
+fi
+
 echo "==> [Debian/Ubuntu] Compilando binario de lanzamiento..."
 cd "$PROJECT_ROOT"
 cargo build --release
@@ -42,13 +70,37 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Depends: libfontconfig1, libfreetype6
+Depends: libfontconfig1, libfreetype6, libx11-6, libxext6, libxrender1, libxml2, libpng16-16, zlib1g
 Maintainer: Firma Fiscal ACD <soporte@firmafiscalacd.com>
 Installed-Size: $INSTALLED_SIZE
 Description: DocuUpload Fiscal y Nominas
  Procesamiento concurrente y en paralelo de Nominas CFDI con validacion
  ante el SAT (SOAP) y Cedulas SUA IMSS con reportes Excel.
 EOF
+
+cat <<'EOF' > "$BUILD_DIR/DEBIAN/postinst"
+#!/bin/sh
+set -e
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+EOF
+chmod 755 "$BUILD_DIR/DEBIAN/postinst"
+
+cat <<'EOF' > "$BUILD_DIR/DEBIAN/postrm"
+#!/bin/sh
+set -e
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+EOF
+chmod 755 "$BUILD_DIR/DEBIAN/postrm"
 
 # Generate md5sums
 (

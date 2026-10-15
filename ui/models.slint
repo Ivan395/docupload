@@ -1,9 +1,22 @@
+export struct DateDmy {
+    day: int,
+    month: int,
+    year: int,
+    valid: bool,
+}
+
+export global DateHelper {
+    pure callback parse_date(string) -> DateDmy;
+    pure callback get_today() -> DateDmy;
+}
+
 export struct FileItemData {
     id: int,
     filename: string,
     filesize: string,
     extension: string,
     is_archive: bool,
+    rustfs_path: string,
 }
 
 export struct UnprocessedItemData {
@@ -12,6 +25,14 @@ export struct UnprocessedItemData {
     uuid: string,
     reason: string,
     is_sat_error: bool,
+}
+
+export struct MismatchDetailItem {
+    filename: string,
+    tipo_error: string,
+    valor_esperado: string,
+    valor_encontrado: string,
+    descripcion: string,
 }
 
 export struct ProcessingSummary {
@@ -27,25 +48,737 @@ export struct ProcessingSummary {
     cedulas_excel_path: string,
 }
 
+export struct ClienteCardData {
+    id: string,
+    nombre: string,
+    razon_social: string,
+    rfc: string,
+    curp: string,
+    tipo_persona: string,
+    regimen_fiscal: string,
+    registros_patronales_count: int,
+    empleados_count: int,
+    has_ingested_data: bool,
+    status_label: string,
+    is_sat_locked: bool,
+}
+
+export struct RegistroPatronalData {
+    id: string,
+    id_cliente: string,
+    cliente_nombre: string,
+    registro: string,
+    actividad: string,
+    domicilio: string,
+    codigo_postal: string,
+    entidad: string,
+    area_geografica: string,
+    delegacion: string,
+    subdelegacion: string,
+    prima_riesgo: string,
+    clase_nombre: string,
+    fraccion_codigo: string,
+    fraccion_actividad: string,
+    empleados_count: int,
+    has_ingested_data: bool,
+    is_valid_structure: bool,
+}
+
+export struct EmpleadoData {
+    id: string,
+    id_cliente: string,
+    cliente_nombre: string,
+    nombre: string,
+    rfc: string,
+    curp: string,
+    nss: string,
+    registro_patronal: string,
+    sbc_diario_str: string,
+    pensionado: string,
+    esta_activo: bool,
+}
+
+export struct RevisionData {
+    id: string,
+    id_registro_patronal: string,
+    id_concepto_diferencia: string,
+    id_estatus_imss: string,
+    id_estatus: string,
+    nombre: string,
+    folio: string,
+    concepto_diferencia: string,
+    estatus_imss: string,
+    estatus: string,
+    fecha_entrega_imss: string,
+    fecha_aprobacion_imss: string,
+    fecha_maxima_aprobacion_imss: string,
+    fecha_maxima_entrega_revision: string,
+    fecha_maxima_entrega_imss: string,
+    fecha_entrega_revision: string,
+    fecha_aprobacion_prorroga: string,
+    fecha_entrega_con_prorroga: string,
+    pidio_prorroga: bool,
+    obras_count: int,
+    created_at_str: string,
+    id_db_label: string,
+}
+
+export struct RegistroObraData {
+    id: string,
+    id_revision: string,
+    id_registro_patronal: string,
+    numero: string,
+    clase: string,
+    tipo_obra: string,
+    fecha_inicio: string,
+    fecha_fin: string,
+    ubicacion: string,
+    superficie_construida: float,
+    superficie_construida_str: string,
+    monto: float,
+    monto_str: string,
+    delegacion: string,
+    subdelegacion: string,
+    created_at_str: string,
+    is_valid_structure: bool,
+    creado_usuario: bool,
+}
+
+export struct CedulaFileItem {
+    id: string,
+    filename: string,
+    file_type: string,
+    size_str: string,
+    pages_detected: string,
+    status_badge: string,
+    status_is_valid: bool,
+    checksum: string,
+    has_warning: bool,
+    warning_msg: string,
+}
+
+export struct CedulaDetalleRow {
+    idx: int,
+    reg_num_str: string,
+    mes_anio: string,
+    registro_patronal: string,
+    registro_obra: string,
+    nss: string,
+    rfc_curp: string,
+    nombre_trabajador: string,
+    dias: int,
+    sdi_str: string,
+    cuota_patronal_str: string,
+    cuota_obrera_str: string,
+    total_str: string,
+}
+
+export struct CedulaSumatoriaRow {
+    registro_patronal: string,
+    razon_social: string,
+    anio: string,
+    mes: string,
+    registro_obra: string,
+    trabajadores_count: int,
+    total_dias: int,
+    cuota_patronal_str: string,
+    cuota_obrera_str: string,
+    total_liquidacion_str: string,
+}
+
+export struct ReporteGuarderiaObraItem {
+    id_obra: string,
+    obra_numero: string,
+    obra_label: string,
+    total_gps: float,
+    total_gps_str: string,
+    valor_guarderias: float,
+    valor_guarderias_str: string,
+    monto_obra: float,
+    monto_obra_str: string,
+    limite_18_obra: float,
+    limite_18_obra_str: string,
+    supera_18: bool,
+    empleados_count: int,
+}
+
+export struct ReporteObraItem {
+    id: string,
+    numero: string,
+    label: string,
+}
+
+export struct ReporteFilterOptionItem {
+    id: string,
+    label: string,
+    count: int,
+    selected: bool,
+}
+
+export struct ReporteObraUsuarioItem {
+    id: string,
+    numero: string,
+    tipo_obra: string,
+    fecha_inicio: string,
+    fecha_fin: string,
+    vigencia_str: string,
+}
+
+export struct ReporteSuaObraItem {
+    id: string,
+    numero: string,
+    tipo_obra: string,
+    vigencia: string,
+    empleados_count: int,
+    selected: bool,
+    creado_usuario: bool,
+}
+
+export struct ReporteBatchWorkerItem {
+    id: string,
+    nss: string,
+    nombre: string,
+    periodo: string,
+    obra_label: string,
+    dias_cedula: int,
+    dias_obra: int,
+    tope_max: int,
+}
+
+export struct ReporteSelectedItem {
+    id: string,
+    idx: int,
+    nombre_trabajador: string,
+    pensionado: string,
+    nss: string,
+    periodo: string,
+    obra_label: string,
+}
+
+export struct ReporteMesTotalItem {
+    mes_label: string,
+    empleados_count: int,
+    dias_cedula: int,
+    dias_obra: int,
+    cf_str: string,
+    patronal_str: string,
+    obrera_str: string,
+    subtotal_str: string,
+}
+
+export struct ReporteLiquidacionRow {
+    selected: bool,
+    can_delete_split: bool,
+    idx: int,
+    id_reporte_liq: string,
+    id_liquidacion: string,
+    periodo: string,
+    nss: string,
+    rfc_curp: string,
+    nombre_trabajador: string,
+    pensionado: string,
+    registro_patronal: string,
+    id_registro_obra: string,
+    obra_numero: string,
+    obra_label: string,
+    is_assigned: bool,
+    dias_cedula: int,
+    dias_obra: int,
+    clave: string,
+    is_baja: bool,
+    fecha: string,
+    sdi_str: string,
+    lic_str: string,
+    inc_str: string,
+    aus_str: string,
+    has_incidencias: bool,
+    lic_val: float,
+    inc_val: float,
+    aus_val: float,
+    row_bg_color: color,
+    row_hover_color: color,
+    row_accent_color: color,
+    has_prorrateo: bool,
+    total_prorrateado_str: string,
+    cf_str: string,
+    exc_pat_str: string,
+    exc_obr_str: string,
+    pd_pat_str: string,
+    pd_obr_str: string,
+    gmp_pat_str: string,
+    gmp_obr_str: string,
+    rt_str: string,
+    iv_pat_str: string,
+    iv_obr_str: string,
+    gps_str: string,
+    patronal_str: string,
+    obrera_str: string,
+    subtotal_str: string,
+    cf_orig_str: string,
+    exc_pat_orig_str: string,
+    exc_obr_orig_str: string,
+    pd_pat_orig_str: string,
+    pd_obr_orig_str: string,
+    gmp_pat_orig_str: string,
+    gmp_obr_orig_str: string,
+    rt_orig_str: string,
+    iv_pat_orig_str: string,
+    iv_obr_orig_str: string,
+    gps_orig_str: string,
+    patronal_orig_str: string,
+    obrera_orig_str: string,
+    subtotal_orig_str: string,
+}
+
+// ─── NÓMINAS ────────────────────────────────────────────────────────────────
+// Una fila por nómina (trabajador + periodo). El total de días del trabajador
+// viaja desglosado por mes para poder contrastarlo contra la cédula sin abrir
+// otra vista.
+
+export struct NominaEmpleadoDiaItem {
+    periodo: string,
+    anio: int,
+    dias_nomina: string,
+    dias_cedula: string,
+    delta_str: string,
+    coincide: bool,
+}
+
+export struct NominaPercepcionItem {
+    clave: string,
+    concepto: string,
+    tipo_sat: string,
+    importe_str: string,
+    gravado_str: string,
+    exento_str: string,
+}
+
+export struct NominaRow {
+    idx: int,
+    id_nomina: string,
+    id_empleado: string,
+    nombre_trabajador: string,
+    nss: string,
+    rfc_curp: string,
+    registro_patronal: string,
+
+    periodo_str: string,
+    semana_fiscal: int,
+    semana_fiscal_str: string,
+
+    // Todas las fechas de pago del CFDI
+    fecha_inicial_pago_str: string,
+    fecha_final_pago_str: string,
+    fecha_pago_str: string,
+    fecha_inicio_rel_str: string,
+    fecha_emision_str: string,
+    fecha_timbrado_str: string,
+
+    // Días: nómina vs cédula del mismo periodo
+    num_dias_pagados_str: string,
+    dias_cedula_str: string,
+    dias_delta_str: string,
+    dias_coinciden: bool,
+    sin_cedula: bool,
+
+    // Percepciones (sin deducciones)
+    total_percepciones_str: string,
+    total_gravado_str: string,
+    total_exento_str: string,
+    num_percepciones: int,
+    percepcion_detalle_str: string,
+
+    salario_diario_str: string,
+    tipo_nomina: string,
+    periodicidad: string,
+
+    // Total de días del trabajador, desglosado por mes
+    total_dias_empleado: string,
+    total_dias_meses: int,
+    meses: [NominaEmpleadoDiaItem],
+
+    // Montos por concepto de percepción (columnas dinámicas),
+    // alineados con AppData.nominas_percepcion_headers
+    percepciones_cols: [string],
+
+    row_bg_color: color,
+    row_hover_color: color,
+}
+
+export struct NominaMesTotalItem {
+    periodo: string,
+    nominas: int,
+    dias_pagados_str: string,
+    dias_cedula_str: string,
+    percepciones_str: string,
+}
+
+export struct NominaRegistroPatronalTotalItem {
+    registro_patronal: string,
+    obra_numero: string,
+    tipo_obra: string,
+    total_dias_cedula_str: string,
+}
+
+export struct NominaEditableConceptoItem {
+    id_detalle: string,
+    id_concepto: string,
+    clave: string,
+    concepto: string,
+    importe_original: float,
+    importe_original_str: string,
+    importe_actual_str: string,
+}
+
+export struct NominaTemplateOptionItem {
+    id_nomina: string,
+    label: string,
+    dias: float,
+    dias_str: string,
+}
+
+export struct NominaFaltanteItem {
+    id_empleado: string,
+    nombre_trabajador: string,
+    nss: string,
+    rfc: string,
+    mes_periodo: string,
+    anio_periodo: int,
+    periodo_str: string,
+    dias_cedula_str: string,
+    dias_nomina_str: string,
+    dias_faltantes: float,
+    dias_faltantes_str: string,
+    clave: string,
+    is_baja: bool,
+    tiene_plantilla: bool,
+    template_label: string,
+    id_template: string,
+    template_dias_str: string,
+    selected: bool,
+}
+
+export struct EmpleadoMesStatsRow {
+    nombre: string,
+    nss: string,
+    dias_pagados: string,
+    total_percepciones: string,
+    dias_cedula: string,
+}
+
+export struct MesStatsRow {
+    mes: string,
+    anio: int,
+    total_nominas: int,
+    empleados_unicos: int,
+    dias_pagados: string,
+    dias_cedula: string,
+    total_percepciones: string,
+    nominas_sin_cedula: int,
+    // Empleados en este mes
+    empleados: [EmpleadoMesStatsRow],
+}
+
+export struct CalendarDayMilestone {
+    rev_id: string,
+    folio: string,
+    nombre: string,
+    rp_numero: string,
+    cliente_nombre: string,
+    milestone_name: string,
+    milestone_desc: string,
+    color_fg: color,
+    color_bg: color,
+    color_border: color,
+}
+
+export struct CalendarDayCell {
+    day_number: int,
+    month: int,
+    year: int,
+    date_str: string,
+    date_iso: string,
+    is_current_month: bool,
+    is_today: bool,
+    is_weekend: bool,
+    is_holiday: bool,
+    holiday_motivo: string,
+    holiday_is_system: bool,
+    holiday_id: string,
+    has_milestones: bool,
+    milestone_count: int,
+    summary_label: string,
+    color_cell_bg: color,
+    color_cell_border: color,
+    has_events: bool,
+    badge1_label: string,
+    badge1_color_fg: color,
+    badge1_color_bg: color,
+    badge2_label: string,
+    badge2_color_fg: color,
+    badge2_color_bg: color,
+    badge3_label: string,
+    badge3_color_fg: color,
+    badge3_color_bg: color,
+    more_count: int,
+    is_highlighted: bool,
+    highlight_color: color,
+    highlight_label: string,
+}
+
+export struct CalendarHolidayItem {
+    id: string,
+    fecha_str: string,
+    fecha_iso: string,
+    dia_semana: string,
+    motivo: string,
+    es_sistema: bool,
+}
+
+export struct CalendarRevisionItem {
+    id: string,
+    nombre: string,
+    folio: string,
+    cliente_nombre: string,
+    rp_numero: string,
+    estatus: string,
+    estatus_imss: string,
+    f_entrega_imss: string,
+    f_max_aprobacion_imss: string,
+    f_aprobacion_imss: string,
+    f_max_entrega_revision: string,
+    f_entrega_revision: string,
+    f_max_entrega_imss: string,
+    f_aprobacion_prorroga: string,
+    f_entrega_con_prorroga: string,
+    pidio_prorroga: bool,
+    has_entrega_imss: bool,
+    has_max_aprobacion_imss: bool,
+    has_aprobacion_imss: bool,
+    has_max_entrega_rev: bool,
+    has_entrega_rev: bool,
+    has_max_entrega_imss: bool,
+    has_aprobacion_prorroga: bool,
+    has_entrega_con_prorroga: bool,
+}
+
 export global AppData {
+    // Vista actual: 0: Auditoría/Carga, 1: Clientes, 2: Registros Patronales, 3: Empleados
+    in-out property <int> current_view: 1;
+
+    // Navegación contextual
+    in-out property <string> selected_cliente_id: "";
+    in-out property <string> selected_cliente_nombre: "Todos los Clientes";
+    in-out property <string> selected_cliente_rfc: "";
+    in-out property <bool> selected_cliente_has_data: false;
+
+    // Listados principales
+    in-out property <[ClienteCardData]> clientes_list: [];
+    in-out property <[RegistroPatronalData]> registros_patronales_list: [];
+    in-out property <[EmpleadoData]> empleados_list: [];
+
+    // Filtros de búsqueda
+    in-out property <string> clientes_search: "";
+    in-out property <int> clientes_filter_tab: 0; // 0: Todos, 1: Con Cédulas, 2: Nuevos / En espera
+    in-out property <string> rp_search: "";
+    in-out property <string> empleados_search: "";
+    in-out property <bool> empleados_filter_active_only: false;
+
+    // Estadísticas globales para Barra Inferior
+    in-out property <int> total_clientes_count: 0;
+    in-out property <int> total_rp_count: 0;
+    in-out property <int> total_empleados_activos_count: 0;
+    in-out property <string> catalogos_loaded_str: "100% (9 Catálogos)";
+
+    // Catálogos para Combos
+    in-out property <[string]> tipos_personas_combo: ["-- Seleccionar Tipo Persona --", "FÍSICA", "MORAL"];
+    in-out property <[string]> regimenes_fiscales_combo: ["-- Seleccione primero Tipo Persona --"];
+    in-out property <[string]> clases_combo: ["-- Seleccionar Clase --", "I", "II", "III", "IV", "V"];
+    in-out property <[string]> fracciones_combo: ["-- Seleccione primero Clase --"];
+
+    // Modal: Nuevo Cliente
+    in-out property <bool> show_new_cliente_modal: false;
+    in-out property <string> new_cliente_nombre: "";
+    in-out property <string> new_cliente_rfc: "";
+    in-out property <string> new_cliente_razon_social: "";
+    in-out property <string> new_cliente_curp: "";
+    in-out property <string> new_cliente_tipo_persona_val: "-- Seleccionar Tipo Persona --";
+    in-out property <string> new_cliente_regimen_val: "-- Seleccione primero Tipo Persona --";
+    in-out property <bool> new_cliente_regimen_enabled: false;
+    in-out property <[string]> new_cliente_regimenes_combo: ["-- Seleccione primero Tipo Persona --"];
+    in-out property <string> new_cliente_rfc_status: "";
+    in-out property <string> new_cliente_rfc_msg: "";
+    in-out property <string> new_cliente_curp_status: "";
+    in-out property <string> new_cliente_curp_msg: "";
+
+    // Modal: Editar Cliente
+    in-out property <bool> show_edit_cliente_modal: false;
+    in-out property <string> edit_cliente_id: "";
+    in-out property <string> edit_cliente_nombre: "";
+    in-out property <string> edit_cliente_razon_social: "";
+    in-out property <string> edit_cliente_rfc: "";
+    in-out property <string> edit_cliente_curp: "";
+    in-out property <string> edit_cliente_tipo_persona_val: "-- Seleccionar Tipo Persona --";
+    in-out property <string> edit_cliente_regimen_val: "-- Seleccione primero Tipo Persona --";
+    in-out property <bool> edit_cliente_regimen_enabled: false;
+    in-out property <bool> edit_cliente_has_data: false;
+    in-out property <string> edit_cliente_rfc_status: "";
+    in-out property <string> edit_cliente_rfc_msg: "";
+    in-out property <string> edit_cliente_curp_status: "";
+    in-out property <string> edit_cliente_curp_msg: "";
+
+    // Modal: Eliminar Cliente
+    in-out property <bool> show_delete_cliente_modal: false;
+    in-out property <string> delete_cliente_id: "";
+    in-out property <string> delete_cliente_nombre: "";
+
+    // Formulario: Registro Patronal
+    in-out property <string> rp_form_id: "";
+    in-out property <bool> rp_form_is_editing: false;
+    in-out property <string> rp_form_registro: "";
+    in-out property <string> rp_form_registro_status: "";
+    in-out property <string> rp_form_registro_msg: "";
+    in-out property <string> rp_form_actividad: "";
+    changed rp_form_actividad => {
+        AppLogic.update_rp_actividad(self.rp_form_actividad);
+    }
+    in-out property <int> rp_form_char_count: 0;
+    in-out property <string> rp_form_domicilio: "";
+    in-out property <string> rp_form_codigo_postal: "";
+    in-out property <string> rp_form_entidad: "";
+    in-out property <string> rp_form_area_geografica: "";
+    in-out property <string> rp_form_delegacion: "";
+    in-out property <string> rp_form_subdelegacion: "";
+    in-out property <string> rp_form_prima_riesgo: "";
+    in-out property <string> rp_form_clase_val: "-- Seleccionar Clase --";
+    in-out property <string> rp_form_fraccion_val: "-- Seleccione primero Clase --";
+    in-out property <bool> rp_form_complementary_enabled: false;
+    in-out property <bool> show_rp_modal: false;
+
+    // Modal: Eliminar Registro Patronal
+    in-out property <bool> show_delete_rp_modal: false;
+    in-out property <string> delete_rp_id: "";
+    in-out property <string> delete_rp_registro: "";
+
+    // Panel Lateral: Edición de Empleado
+    in-out property <bool> show_edit_empleado_panel: false;
+    in-out property <bool> emp_edit_is_new: false;
+    in-out property <string> emp_edit_id: "";
+    in-out property <string> emp_edit_nombre: "";
+    in-out property <string> emp_edit_rfc: "";
+    in-out property <string> emp_edit_curp: "";
+    in-out property <string> emp_edit_nss: "";
+    in-out property <bool> emp_edit_esta_activo: true;
+    in-out property <string> emp_edit_sbc: "$0.00";
+    in-out property <string> emp_edit_rp: "";
+    in-out property <string> emp_edit_rfc_status: "";
+    in-out property <string> emp_edit_rfc_msg: "";
+    in-out property <string> emp_edit_curp_status: "";
+    in-out property <string> emp_edit_curp_msg: "";
+    in-out property <string> emp_edit_nss_status: "";
+    in-out property <string> emp_edit_nss_msg: "";
+    in-out property <string> emp_edit_cross_warning: "";
+
+    // Navegación contextual de Revisiones y Obras
+    in-out property <string> selected_rp_id: "";
+    in-out property <string> selected_rp_registro: "";
+    in-out property <bool> selected_rp_is_valid_structure: true;
+    in-out property <string> selected_rp_delegacion: "";
+    in-out property <string> selected_rp_subdelegacion: "";
+    in-out property <string> selected_revision_id: "";
+    in-out property <string> selected_revision_nombre: "";
+    in-out property <string> selected_revision_folio: "";
+
+    // Listados de Revisiones y Registros de Obras
+    in-out property <[RevisionData]> revisiones_list: [];
+    in-out property <[RegistroObraData]> obras_list: [];
+
+    // Filtros de Revisiones y Obras
+    in-out property <string> revisiones_search: "";
+    in-out property <int> revisiones_filter_tab: 0; // 0: Todos, 1: En Proceso, 2: Aprobadas IMSS, 3: Con Prórroga
+    in-out property <string> obras_search: "";
+    in-out property <int> obras_filter_tab: 0; // 0: Todas, 1: Privadas, 2: Públicas
+
+    // Contadores para BottomBar y KPIs
+    in-out property <int> total_revisiones_count: 0;
+    in-out property <int> total_obras_count: 0;
+    in-out property <int> revisiones_vigentes_count: 0;
+    in-out property <int> revisiones_prorrogas_count: 0;
+    in-out property <float> obras_superficie_total: 0.0;
+    in-out property <float> obras_monto_total: 0.0;
+    in-out property <string> obras_superficie_total_str: "0.00 m²";
+    in-out property <string> obras_monto_total_str: "$0.00 MXN";
+
+    // Combos para Revisiones y Obras
+    in-out property <[string]> estatus_combo: ["-- Seleccionar Estatus --", "INICIADA", "EN REVISIÓN", "EN PROCESO DE ACLARACIÓN", "APROBADA POR EMPRESA", "RECHAZADA", "FINALIZADA"];
+    in-out property <[string]> estatus_imss_combo: ["-- Seleccionar Estatus IMSS --", "PENDIENTE DICTAMEN IMSS", "EN ESTUDIO", "APROBADA POR IMSS", "RECHAZADA POR IMSS"];
+    in-out property <[string]> conceptos_combo: ["-- Seleccionar Concepto Diferencia --"];
+    in-out property <[string]> clases_obra_combo: ["-- Seleccionar Clase --", "PRIVADA", "PUBLICA", "MIXTA"];
+
+    // Modal: Formulario Revisión
+    in-out property <bool> show_revision_modal: false;
+    in-out property <bool> revision_form_is_editing: false;
+    in-out property <string> rev_form_id: "";
+    in-out property <string> rev_form_nombre: "";
+    in-out property <string> rev_form_folio: "";
+    in-out property <string> rev_form_concepto_val: "-- Seleccionar Concepto Diferencia --";
+    in-out property <string> rev_form_estatus_val: "EN PROCESO DE ACLARACIÓN";
+    in-out property <string> rev_form_estatus_imss_val: "PENDIENTE DICTAMEN IMSS";
+    in-out property <string> rev_form_fecha_entrega_rev: "";
+    in-out property <string> rev_form_fecha_max_entrega_rev: "";
+    in-out property <string> rev_form_fecha_entrega_imss: "";
+    in-out property <string> rev_form_fecha_max_entrega_imss: "";
+    in-out property <string> rev_form_fecha_aprobacion_imss: "";
+    in-out property <string> rev_form_fecha_max_aprobacion_imss: "";
+    in-out property <bool> rev_form_pidio_prorroga: false;
+    in-out property <string> rev_form_fecha_aprobacion_prorroga: "";
+    in-out property <string> rev_form_fecha_entrega_con_prorroga: "";
+
+    // Modal: Confirmación Eliminar Revisión
+    in-out property <bool> show_delete_revision_modal: false;
+    in-out property <string> delete_revision_id: "";
+    in-out property <string> delete_revision_nombre: "";
+    in-out property <string> delete_revision_folio: "";
+
+    // Modal: Formulario Registro de Obra
+    in-out property <bool> show_obra_modal: false;
+    in-out property <bool> obra_form_is_editing: false;
+    in-out property <string> obra_form_id: "";
+    in-out property <string> obra_form_numero: "";
+    in-out property <string> obra_form_numero_status: "";
+    in-out property <string> obra_form_numero_msg: "";
+    in-out property <string> obra_form_clase_val: "-- Seleccionar Clase --";
+    in-out property <string> obra_form_tipo_obra: "";
+    in-out property <string> obra_form_fecha_inicio: "";
+    in-out property <string> obra_form_fecha_fin: "";
+    in-out property <string> obra_form_ubicacion: "";
+    in-out property <string> obra_form_superficie: "";
+    in-out property <string> obra_form_monto: "";
+    in-out property <string> obra_form_delegacion: "";
+    in-out property <string> obra_form_subdelegacion: "";
+
+    // Modal: Confirmación Eliminar Registro de Obra
+    in-out property <bool> show_delete_obra_modal: false;
+    in-out property <string> delete_obra_id: "";
+    in-out property <string> delete_obra_numero: "";
+
+    // Estado original de Carga de Nóminas y Cédulas
     in-out property <[FileItemData]> nominas_files: [];
     in-out property <[FileItemData]> cedulas_files: [];
     in-out property <string> nominas_total_size: "0 KB";
     in-out property <string> cedulas_total_size: "0 KB";
 
     in-out property <bool> is_processing: false;
-    in-out property <string> status_message: "Listo para procesar";
+    in-out property <string> status_message: "Listo para operar";
     in-out property <float> progress_fraction: 0.0;
     in-out property <string> progress_text: "";
 
-    // Estados independientes para Nóminas (Barra de estado 1)
     in-out property <bool> nominas_is_processing: false;
     in-out property <float> nominas_progress_fraction: 0.0;
     in-out property <string> nominas_progress_text: "";
     in-out property <bool> nominas_ready_to_download: false;
     in-out property <bool> nominas_has_downloaded: false;
 
-    // Estados independientes para Cédulas (Barra de estado 2)
     in-out property <bool> cedulas_is_processing: false;
     in-out property <float> cedulas_progress_fraction: 0.0;
     in-out property <string> cedulas_progress_text: "";
@@ -68,9 +801,613 @@ export global AppData {
     in-out property <[UnprocessedItemData]> unprocessed_items: [];
     in-out property <string> toast_message: "";
     in-out property <bool> show_toast: false;
+    in-out property <string> toast_type: "info";
+    in-out property <string> toast_icon: "ℹ";
+
+    // ==========================================
+    // SISTEMA DE ACTUALIZACIÓN AUTOMÁTICA
+    // ==========================================
+    in-out property <bool> update_available: false;
+    in-out property <string> update_version: "";
+    in-out property <string> update_current_version: "v0.5.0";
+    in-out property <string> update_notes: "";
+    in-out property <string> update_download_url: "";
+    in-out property <string> update_asset_name: "";
+    in-out property <bool> show_update_modal: false;
+    in-out property <bool> update_checking: false;
+    in-out property <bool> update_downloading: false;
+    in-out property <float> update_progress: 0.0;
+    in-out property <string> update_progress_text: "0%";
+    in-out property <string> update_status_msg: "";
+    in-out property <bool> update_ready_to_install: false;
+
+    // ==========================================
+    // CÉDULA DE DETERMINACIÓN DE CUOTAS (SUA)
+    // ==========================================
+    // Estado de la vista: 0 = En blanco / Solo subir, 1 = Archivos seleccionados / Por guardar, 2 = Procesado y Guardado en BD
+    in-out property <int> cedulas_view_state: 0;
+    in-out property <[CedulaFileItem]> cedulas_view_files: [];
+    in-out property <int> cedulas_view_files_count: 0;
+    in-out property <string> cedulas_view_total_size_str: "0.0 MB";
+    in-out property <string> cedulas_view_extracted_count_str: "0 Cédulas Extraídas";
+    in-out property <int> cedulas_view_warning_count: 0;
+    in-out property <string> cedulas_view_status_banner_text: "Sin archivos en memoria temporal";
+    in-out property <bool> cedulas_view_is_processing: false;
+    in-out property <float> cedulas_view_progress_fraction: 0.0;
+    in-out property <string> cedulas_view_progress_text: "";
+
+    // Indicadores generales superiores
+    in-out property <string> cedulas_periodo_rango_str: "Oct 2023 – Dic 2023";
+    in-out property <string> cedulas_periodo_sub_str: "Bimestres 5 y 6 (3 Periodos Mensuales)";
+    in-out property <int> cedulas_mensuales_count: 0;
+    in-out property <int> cedulas_bimestrales_count: 0;
+    in-out property <string> cedulas_sbc_promedio_str: "$0.00 MXN / día";
+    in-out property <string> cedulas_sbc_sub_str: "Coherente con Tabulador de Obra";
+    in-out property <string> cedulas_sbc_min_str: "Mínimo: $0.00";
+    in-out property <string> cedulas_sbc_max_str: "Máximo (Topado UMA): $2,714.25";
+    in-out property <string> cedulas_ramas_rt_str: "RT: 7.58875%";
+    in-out property <string> cedulas_ramas_sub_str: "Prestaciones en Especie y Dinero (100% Homologado)";
+
+    // Tabla: Detalle Extraído de Cédulas SUA (Paginada de 100 en 100)
+    in-out property <[CedulaDetalleRow]> cedulas_detalle_list: [];
+    in-out property <int> cedulas_detalle_total_count: 0;
+    in-out property <string> cedulas_detalle_search: "";
+    in-out property <int> cedulas_detalle_mes_filter: 0;
+    in-out property <int> cedulas_detalle_obra_filter: 0;
+    in-out property <[string]> cedulas_detalle_mes_options: ["Todos los Meses"];
+    in-out property <[string]> cedulas_detalle_obra_options: ["Todas las Obras"];
+    in-out property <int> cedulas_page_current: 1;
+    in-out property <int> cedulas_page_total: 1;
+    in-out property <int> cedulas_page_start_row: 0;
+    in-out property <int> cedulas_page_end_row: 0;
+
+    // Estadísticas y Auditoría de Archivos Procesados
+    in-out property <int> cedulas_kpi_total_analizados: 0;
+    in-out property <int> cedulas_kpi_validos_sua: 0;
+    in-out property <string> cedulas_kpi_validos_pct: "0.0%";
+    in-out property <int> cedulas_kpi_no_procesados: 0;
+    in-out property <string> cedulas_kpi_no_procesados_pct: "0.0%";
+    in-out property <string> cedulas_kpi_no_procesados_desc: "Sin capa de texto vectorial OCR (Escaneos)";
+    in-out property <int> cedulas_kpi_trabajadores_unicos: 0;
+    in-out property <int> cedulas_kpi_repeticiones_mensuales: 0;
+    in-out property <string> cedulas_kpi_importe_total_str: "$0.00 MXN";
+    in-out property <string> cedulas_kpi_patronal_str: "$0.00";
+    in-out property <string> cedulas_kpi_obrera_str: "$0.00";
+
+    // Auditoría avanzada de Obras y Superposiciones
+    in-out property <int> cedulas_kpi_superposiciones_count: 0;
+    in-out property <int> cedulas_kpi_obras_fuera_revision_count: 0;
+    in-out property <int> cedulas_kpi_empleados_obras_fuera_count: 0;
+    in-out property <int> cedulas_kpi_archivos_cliente_invalido_count: 0;
+    in-out property <bool> cedulas_kpi_sin_obras_revision_warning: false;
+
+    // Totales y Sumatorias por Mes, Registro Patronal y Registro de Obra
+    in-out property <[CedulaSumatoriaRow]> cedulas_sumatorias_list: [];
+    in-out property <int> cedulas_gran_total_trabajadores: 0;
+    in-out property <int> cedulas_gran_total_dias: 0;
+    in-out property <string> cedulas_gran_total_patronal_str: "$0.00";
+    in-out property <string> cedulas_gran_total_obrera_str: "$0.00";
+    in-out property <string> cedulas_gran_total_str: "$0.00";
+
+    // Modal de confirmación para Borrar Todas las Cédulas
+    in-out property <bool> show_delete_all_cedulas_modal: false;
+
+    // Modal de Alerta: Archivos no pertenecen a la empresa o registro patronal en revisión
+    in-out property <bool> show_cedulas_client_mismatch_modal: false;
+    in-out property <string> cedulas_mismatch_title: "Discrepancia en Cédulas de Cuotas";
+    in-out property <string> cedulas_mismatch_mensaje: "";
+    in-out property <string> cedulas_mismatch_expected_rfc: "";
+    in-out property <string> cedulas_mismatch_expected_rp: "";
+    in-out property <string> cedulas_mismatch_expected_cliente: "";
+    in-out property <[MismatchDetailItem]> cedulas_mismatch_items: [];
+
+    // Modal informativo de Carga y Actualizaciones por Vista
+    in-out property <bool> show_cedulas_success_modal: false;
+    in-out property <string> cedulas_success_liquidaciones_msg: "";
+    in-out property <string> cedulas_success_obras_msg: "";
+    in-out property <string> cedulas_success_revision_msg: "";
+    in-out property <string> cedulas_success_empleados_msg: "";
+    in-out property <string> cedulas_success_patronal_msg: "";
+
+    // Modal de Alerta: Archivos duplicados que ya contienen su información en la BD
+    in-out property <bool> show_cedulas_duplicate_modal: false;
+    in-out property <string> cedulas_duplicate_files_msg: "";
+
+    // Control de acceso a Cédulas de Cuotas (deshabilitado hasta acceder desde Registros de Obras)
+    in-out property <bool> cedulas_access_allowed: false;
+
+    // ─── VISTA DE CARGA DE NÓMINAS (máquina de estados: 0=vacío, 1=archivos, 2=procesado) ───
+    // Estado de la vista: 0 = En blanco / Solo subir, 1 = Archivos seleccionados / Por guardar, 2 = Procesado y Guardado en BD
+    in-out property <int> nominas_view_state: 0;
+    in-out property <[FileItemData]> nominas_view_files: [];
+    in-out property <int> nominas_view_files_count: 0;
+    in-out property <string> nominas_view_total_size_str: "0.0 MB";
+    in-out property <string> nominas_view_extracted_count_str: "0 Nóminas Extraídas";
+    in-out property <int> nominas_view_warning_count: 0;
+    in-out property <string> nominas_view_status_banner_text: "Sin archivos en memoria temporal";
+    in-out property <bool> nominas_view_is_processing: false;
+    in-out property <float> nominas_view_progress_fraction: 0.0;
+    in-out property <string> nominas_view_progress_text: "";
+
+    // Estadísticas tras procesar y guardar en BD
+    in-out property <string> nominas_view_periodo_rango_str: "";
+    in-out property <string> nominas_view_periodo_sub_str: "";
+    in-out property <string> nominas_view_total_trabajadores_str: "0";
+    in-out property <string> nominas_view_total_dias_str: "0";
+    in-out property <string> nominas_view_total_percepciones_str: "$0.00";
+    in-out property <string> nominas_view_sbc_promedio_str: "$0.00";
+    in-out property <string> nominas_view_sbc_sub_str: "";
+    in-out property <string> nominas_view_sbc_min_str: "";
+    in-out property <string> nominas_view_sbc_max_str: "";
+
+    // Estadísticas mensuales (para análisis del analista)
+    in-out property <[MesStatsRow]> nominas_view_mes_stats: [];
+    in-out property <int> nominas_view_total_empleados_unicos: 0;
+
+    // Modal de Alerta: Discrepancias en Nóminas XML
+    in-out property <bool> show_nominas_mismatch_modal: false;
+    in-out property <string> nominas_mismatch_title: "Discrepancia en Nóminas XML";
+    in-out property <string> nominas_mismatch_mensaje: "";
+    in-out property <string> nominas_mismatch_expected_rfc: "";
+    in-out property <string> nominas_mismatch_expected_rp: "";
+    in-out property <string> nominas_mismatch_expected_cliente: "";
+    in-out property <[MismatchDetailItem]> nominas_mismatch_items: [];
+    in-out property <string> nominas_view_promedio_dias_por_empleado: "0";
+    in-out property <string> nominas_view_promedio_percepciones_por_empleado: "$0.00";
+    in-out property <string> nominas_view_total_nominas_sin_cedula: "0";
+
+    // Tabla paginada de detalle de nóminas procesadas
+    in-out property <[NominaRow]> nominas_view_detalle_list: [];
+    in-out property <int> nominas_view_detalle_total_count: 0;
+    in-out property <int> nominas_view_detalle_page_current: 1;
+    in-out property <int> nominas_view_detalle_page_total: 1;
+    in-out property <int> nominas_view_detalle_page_start_row: 0;
+    in-out property <int> nominas_view_detalle_page_end_row: 0;
+    in-out property <string> nominas_view_detalle_search: "";
+    in-out property <int> nominas_view_detalle_page_size: 100;
+
+    // Control de acceso a la vista de carga de nóminas
+    in-out property <bool> nominas_upload_access_allowed: false;
+
+    // Modal de confirmación para borrar todas las nóminas
+    in-out property <bool> show_delete_all_nominas_modal: false;
+
+    // Columnas dinámicas de percepciones del reporte de nóminas
+    in-out property <[string]> nominas_percepcion_headers: [];
+    in-out property <length> nominas_table_min_width: 1540px;
+    // --- Vista 7: Reporte de Liquidaciones y Prorrateo por Obra ---
+    in-out property <bool> reporte_liquidaciones_access_allowed: false;
+
+    // Propiedades para rastrear si hay datos en BD por revisión
+    in-out property <bool> cedulas_data_exists: false;
+    in-out property <bool> nominas_data_exists: false;
+    in-out property <bool> reportes_liquidaciones_data_exists: false;
+    in-out property <bool> registros_obras_data_exists: false;
+
+    // Control granular de acceso por paso del flujo (para la revisión seleccionada)
+    in-out property <bool> revision_has_obras: false;
+    in-out property <bool> revision_has_cedulas: false;
+    in-out property <bool> revision_has_nominas: false;
+    in-out property <bool> revision_has_liquidaciones: false;
+
+    // Indica si la revisión tiene TODA la información completa
+    in-out property <bool> revision_has_all_data: false;
+
+    in-out property <[ReporteLiquidacionRow]> reporte_liquidaciones_list: [];
+    in-out property <[ReporteObraItem]> reporte_obras_options: [];
+    in-out property <[string]> reporte_obras_filter_labels: ["Todas las obras"];
+    in-out property <[string]> reporte_obras_batch_labels: ["-- Seleccionar Obra --"];
+    in-out property <[string]> reporte_periodo_options: ["Todos los meses"];
+    in-out property <[string]> reporte_estado_options: ["Todos", "Asignados", "Sin Asignar (Pendiente)"];
+
+    // Modal de confirmación para igualar días en lote
+    in-out property <bool> show_reporte_confirm_batch_dias_modal: false;
+    in-out property <string> reporte_confirm_batch_msg: "";
+
+    // KPIs
+    in-out property <int> reporte_kpi_total_registros: 0;
+    in-out property <string> reporte_kpi_total_registros_str: "0 filas";
+    in-out property <int> reporte_kpi_obras_count: 0;
+    in-out property <string> reporte_kpi_obras_homologadas_str: "0 Homologadas";
+    in-out property <string> reporte_kpi_subtotal_imss_str: "$0.00";
+    in-out property <string> reporte_kpi_prorrateado_str: "$0.00";
+    in-out property <string> reporte_kpi_diferencia_str: "$0.00";
+    in-out property <string> reporte_subtitle: "";
+
+    // Filtros
+    in-out property <string> reporte_search_query: "";
+    in-out property <int> reporte_filter_obra_idx: 0; // 0 = Todos
+    in-out property <int> reporte_filter_periodo_idx: 0; // 0 = Todos
+    in-out property <int> reporte_filter_estado_idx: 0; // 0 = Todos, 1 = Asignados, 2 = Sin Asignar
+
+    // Paginación (100 en 100)
+    in-out property <int> reporte_page_current: 1;
+    in-out property <int> reporte_page_total: 1;
+    in-out property <int> reporte_page_start_row: 0;
+    in-out property <int> reporte_page_end_row: 0;
+    in-out property <int> reporte_total_filtered: 0;
+
+    // Panel de Modificación Masiva
+    in-out property <bool> reporte_batch_panel_open: true;
+    in-out property <int> reporte_selected_count: 0;
+    in-out property <[ReporteSelectedItem]> reporte_selected_items: [];
+    in-out property <bool> reporte_all_filter_selected: false;
+    in-out property <int> reporte_batch_obra_idx: 0;
+    in-out property <string> reporte_batch_dias_input: "";
+    in-out property <string> reporte_batch_dias_cedula_input: "";
+    in-out property <string> reporte_batch_dias_obra_input: "";
+
+    // Modal unificado de modificación: Registro de Obra y Días (SIROC)
+    in-out property <bool> show_reporte_edit_modal: false;
+    in-out property <string> reporte_edit_row_id: "";
+    in-out property <string> reporte_edit_worker_name: "";
+    in-out property <string> reporte_edit_periodo: "";
+    in-out property <string> reporte_edit_selected_obra_id: "";
+    in-out property <string> reporte_edit_selected_obra_label: "";
+    in-out property <string> reporte_edit_search_query: "";
+    in-out property <bool> reporte_edit_dropdown_open: false;
+    in-out property <[ReporteObraItem]> reporte_edit_filtered_obras: [];
+    in-out property <string> reporte_edit_dias_cedula_val: "";
+    in-out property <string> reporte_edit_dias_obra_val: "";
+    in-out property <string> reporte_edit_lic_info: "0";
+    in-out property <string> reporte_edit_inc_info: "0";
+    in-out property <string> reporte_edit_aus_info: "0";
+    in-out property <int> reporte_edit_dias_max: 0;
+    in-out property <string> reporte_edit_obra_vigencia_info: "";
+    in-out property <bool> reporte_edit_alert_show: false;
+    in-out property <string> reporte_edit_alert_text: "";
+    in-out property <string> reporte_edit_alert_type: "error";
+
+    // Modal de Modificación Masiva en Lote: Obra, Días Cédula y Días Obra
+    in-out property <bool> show_reporte_batch_edit_modal: false;
+    in-out property <[ReporteBatchWorkerItem]> reporte_batch_edit_workers: [];
+    in-out property <int> reporte_batch_edit_worker_count: 0;
+    in-out property <string> reporte_batch_edit_selected_obra_id: "__KEEP__";
+    in-out property <string> reporte_batch_edit_selected_obra_label: "";
+    in-out property <string> reporte_batch_edit_search_query: "";
+    in-out property <bool> reporte_batch_edit_dropdown_open: false;
+    in-out property <[ReporteObraItem]> reporte_batch_edit_filtered_obras: [];
+    in-out property <string> reporte_batch_edit_dias_cedula_val: "";
+    in-out property <string> reporte_batch_edit_dias_obra_val: "";
+    in-out property <bool> reporte_batch_edit_change_obra: false;
+    in-out property <bool> reporte_batch_edit_change_dias_cedula: false;
+    in-out property <bool> reporte_batch_edit_change_dias_obra: false;
+    in-out property <bool> reporte_batch_edit_alert_show: false;
+    in-out property <string> reporte_batch_edit_alert_text: "";
+    in-out property <string> reporte_batch_edit_alert_type: "error";
+
+    // Modal para Vincular Trabajador a Otra Obra Adicional
+    in-out property <bool> show_reporte_add_obra_modal: false;
+    in-out property <string> reporte_add_row_id: "";
+    in-out property <string> reporte_add_worker_name: "";
+    in-out property <string> reporte_add_periodo: "";
+    in-out property <int> reporte_add_dias_cedula: 0;
+    in-out property <int> reporte_add_dias_used: 0;
+    in-out property <int> reporte_add_dias_available: 0;
+    in-out property <string> reporte_add_selected_obra_id: "";
+    in-out property <string> reporte_add_selected_obra_label: "";
+    in-out property <string> reporte_add_search_query: "";
+    in-out property <bool> reporte_add_dropdown_open: false;
+    in-out property <[ReporteObraItem]> reporte_add_filtered_obras: [];
+    in-out property <string> reporte_add_dias_obra_val: "";
+    in-out property <string> reporte_add_obra_vigencia_info: "";
+    in-out property <bool> reporte_add_alert_show: false;
+    in-out property <string> reporte_add_alert_text: "";
+    in-out property <string> reporte_add_alert_type: "error";
+
+    // Compatibilidad retroactiva
+    in-out property <bool> show_reporte_obra_picker_modal: false;
+    in-out property <string> reporte_picker_row_id: "";
+    in-out property <string> reporte_picker_worker_name: "";
+    in-out property <string> reporte_picker_search_query: "";
+    in-out property <[ReporteObraItem]> reporte_picker_filtered_obras: [];
+    in-out property <bool> show_reporte_edit_dias_modal: false;
+
+    // Ordenamiento multi-criterio
+    in-out property <bool> show_reporte_sort_modal: false;
+    in-out property <bool> reporte_sort_by_obra: false;
+    in-out property <bool> reporte_sort_obra_asc: true;
+    in-out property <bool> reporte_sort_by_anio: false;
+    in-out property <bool> reporte_sort_anio_asc: true;
+    in-out property <bool> reporte_sort_by_mes: false;
+    in-out property <bool> reporte_sort_mes_asc: true;
+    in-out property <bool> reporte_sort_by_rfc: false;
+    in-out property <bool> reporte_sort_rfc_asc: true;
+    in-out property <int> reporte_active_sort_count: 0;
+
+    // Filtro y selección de empleados seleccionados
+    in-out property <bool> show_reporte_emp_modal: false;
+    in-out property <int> reporte_emp_modal_worker_count: 0;
+    in-out property <string> reporte_emp_modal_worker_names_str: "";
+    in-out property <int> reporte_emp_modal_total_occurrences: 0;
+    in-out property <[ReporteFilterOptionItem]> reporte_emp_modal_meses: [];
+    in-out property <[ReporteFilterOptionItem]> reporte_emp_modal_obras: [];
+    in-out property <bool> reporte_emp_filter_all_months: true;
+    in-out property <bool> reporte_emp_filter_all_obras: true;
+    in-out property <bool> reporte_emp_filter_active: false;
+
+    // Selección rápida por Registro de Obra
+    in-out property <bool> show_reporte_select_obras_modal: false;
+    in-out property <[ReporteFilterOptionItem]> reporte_quick_select_obras: [];
+
+    // Obras creadas por el usuario en la revisión (Vigencias para análisis)
+    in-out property <bool> reporte_has_obras_usuario: false;
+    in-out property <[ReporteObraUsuarioItem]> reporte_obras_usuario: [];
+
+    // Modal de Exportación a SUA
+    in-out property <bool> show_reporte_export_sua_modal: false;
+    in-out property <[ReporteSuaObraItem]> reporte_sua_obras: [];
+    in-out property <int> reporte_sua_selected_count: 0;
+    in-out property <int> reporte_sua_total_empleados_filtrados: 0;
+
+    // Totales del Footer Fijo de la Tabla
+    in-out property <string> reporte_footer_total_dias_ced_str: "0";
+    in-out property <string> reporte_footer_total_dias_obr_str: "0";
+    in-out property <string> reporte_footer_total_lic_str: "-";
+    in-out property <string> reporte_footer_total_inc_str: "-";
+    in-out property <string> reporte_footer_total_aus_str: "-";
+    in-out property <string> reporte_footer_total_cf_str: "$0.00";
+    in-out property <string> reporte_footer_total_exc_pat_str: "$0.00";
+    in-out property <string> reporte_footer_total_exc_obr_str: "$0.00";
+    in-out property <string> reporte_footer_total_pd_pat_str: "$0.00";
+    in-out property <string> reporte_footer_total_pd_obr_str: "$0.00";
+    in-out property <string> reporte_footer_total_gmp_pat_str: "$0.00";
+    in-out property <string> reporte_footer_total_gmp_obr_str: "$0.00";
+    in-out property <string> reporte_footer_total_rt_str: "$0.00";
+    in-out property <string> reporte_footer_total_iv_pat_str: "$0.00";
+    in-out property <string> reporte_footer_total_iv_obr_str: "$0.00";
+    in-out property <string> reporte_footer_total_gps_str: "$0.00";
+    in-out property <string> reporte_footer_total_patronal_str: "$0.00";
+    in-out property <string> reporte_footer_total_obrera_str: "$0.00";
+    in-out property <string> reporte_footer_total_subtotal_str: "$0.00";
+
+    // Resumen de Totales por Mes (sólo para "Todos los meses")
+    in-out property <bool> show_reporte_totales_por_mes: true;
+    in-out property <[ReporteMesTotalItem]> reporte_totales_por_mes: [];
+
+    // Análisis de Guarderías (Tope 18% por Registro de Obra del Usuario)
+    in-out property <[ReporteGuarderiaObraItem]> reporte_guarderias_obras: [];
+
+    // Calendario Fiscal & Revisiones IMSS
+    in-out property <int> cal_view_year: 2026;
+    in-out property <int> cal_view_month: 9;
+    in-out property <string> cal_month_name: "Septiembre 2026";
+    in-out property <[CalendarDayCell]> cal_day_cells: [];
+    in-out property <[CalendarRevisionItem]> cal_revisions_list: [];
+    in-out property <[CalendarHolidayItem]> cal_holidays_list: [];
+    in-out property <string> cal_selected_revision_id: "";
+    in-out property <CalendarRevisionItem> cal_selected_revision;
+    in-out property <bool> cal_has_selected_revision: false;
+    in-out property <string> cal_search_text: "";
+    in-out property <int> cal_active_tab: 0; // 0: Cuadrícula Calendario, 1: Días Festivos IMSS
+    in-out property <int> cal_total_holidays_count: 0;
+    in-out property <int> cal_total_revisions_count: 0;
+    in-out property <int> cal_month_milestones_count: 0;
+
+    // Catálogo de Días Inhábiles (Pestaña 1)
+    in-out property <int> cal_holiday_catalog_year: 2026;
+    in-out property <int> cal_holiday_catalog_count: 0;
+    in-out property <string> cal_holiday_search_text: "";
+
+    // Modal Detalle de Día del Calendario (al hacer clic en cualquier día con eventos)
+    in-out property <bool> cal_show_day_detail_modal: false;
+    in-out property <string> cal_detail_date_str: "";
+    in-out property <string> cal_detail_date_weekday: "";
+    in-out property <bool> cal_detail_is_today: false;
+    in-out property <bool> cal_detail_is_holiday: false;
+    in-out property <string> cal_detail_holiday_motivo: "";
+    in-out property <bool> cal_detail_holiday_is_system: false;
+    in-out property <[CalendarDayMilestone]> cal_detail_milestones: [];
+    in-out property <int> cal_detail_milestones_count: 0;
+
+    // Modal Agregar Día Festivo
+    in-out property <bool> cal_show_add_holiday_modal: false;
+    in-out property <string> cal_new_holiday_date: "";
+    in-out property <string> cal_new_holiday_motivo: "";
+    in-out property <string> cal_holiday_error_msg: "";
+
+    // Modal Confirmar Eliminación Día Festivo
+    in-out property <bool> cal_show_delete_holiday_modal: false;
+    in-out property <string> cal_delete_holiday_id: "";
+    in-out property <string> cal_delete_holiday_motivo: "";
+    in-out property <string> cal_delete_holiday_fecha: "";
+
+    // ─── NÓMINAS (reporte) ────────────────────────────────────────────────
+    in-out property <bool> nominas_access_allowed: false;
+
+    // Ancho actual de la ventana, publicado por MainWindow al redimensionar.
+    // Lo consumen las vistas responsivas para decidir qué columnas mostrar.
+    in-out property <length> window_width: 1240px;
+
+    in-out property <[NominaRow]> nominas_list: [];
+    in-out property <[NominaPercepcionItem]> nominas_percepciones_detalle: [];
+    in-out property <[NominaMesTotalItem]> nominas_totales_por_mes: [];
+    in-out property <[string]> nominas_periodo_options: [];
+    in-out property <[string]> nominas_anio_options: [];
+
+    // KPIs
+    in-out property <string> nominas_kpi_total_str: "0";
+    in-out property <string> nominas_kpi_empleados_str: "0";
+    in-out property <string> nominas_kpi_dias_pagados_str: "0";
+    in-out property <string> nominas_kpi_dias_cedula_str: "0";
+    in-out property <string> nominas_kpi_dias_delta_str: "0";
+    in-out property <string> nominas_kpi_percepciones_str: "$0.00";
+    in-out property <string> nominas_kpi_sin_cedula_str: "0";
+    in-out property <string> nominas_subtitle: "";
+
+    // Filtros
+    in-out property <string> nominas_search_query: "";
+    in-out property <int> nominas_filter_periodo_idx: 0;
+    in-out property <int> nominas_filter_anio_idx: 0;
+    in-out property <int> nominas_filter_dias_idx: 0;
+    in-out property <bool> nominas_only_sin_cedula: false;
+    in-out property <bool> nominas_mostrar_detalle: true;
+    // Paginación
+    in-out property <int> nominas_page_current: 0;
+    in-out property <int> nominas_page_total: 0;
+    in-out property <int> nominas_page_start_row: 0;
+    in-out property <int> nominas_page_end_row: 0;
+    in-out property <int> nominas_total_filtered: 0;
+
+    // Panel de percepciones de la fila seleccionada
+    in-out property <bool> nominas_show_percepciones: false;
+    in-out property <string> nominas_percepciones_empleado: "";
+    in-out property <string> nominas_percepciones_periodo: "";
+    in-out property <string> nominas_percepciones_total_str: "$0.00";
+
+    // Totales por registro patronal de obras creadas por el usuario
+    in-out property <[NominaRegistroPatronalTotalItem]> nominas_totales_por_registro_patronal: [];
+
+    // Modal de edición de días y percepciones (con fórmula)
+    in-out property <bool> nominas_show_edit_modal: false;
+    in-out property <string> nominas_edit_id_nomina: "";
+    in-out property <string> nominas_edit_empleado: "";
+    in-out property <string> nominas_edit_periodo: "";
+    in-out property <string> nominas_edit_dias_original_str: "";
+    in-out property <string> nominas_edit_dias_input: "";
+    in-out property <[NominaEditableConceptoItem]> nominas_edit_conceptos: [];
+    in-out property <string> nominas_edit_total_str: "$0.00";
+    in-out property <bool> nominas_edit_is_baja: false;
+    in-out property <string> nominas_edit_baja_warning: "";
+
+    // Modal de copia/creación con plantilla
+    in-out property <bool> nominas_show_copy_modal: false;
+    in-out property <string> nominas_copy_id_empleado: "";
+    in-out property <string> nominas_copy_empleado: "";
+    in-out property <[NominaTemplateOptionItem]> nominas_copy_templates_list: [];
+    in-out property <[string]> nominas_copy_template_labels: [];
+    in-out property <int> nominas_copy_selected_template_idx: 0;
+    in-out property <[string]> nominas_copy_mes_options: ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"];
+    in-out property <int> nominas_copy_target_mes_idx: 0;
+    in-out property <string> nominas_copy_target_anio: "2026";
+    in-out property <string> nominas_copy_dias_original_str: "";
+    in-out property <string> nominas_copy_dias_input: "";
+    in-out property <[NominaEditableConceptoItem]> nominas_copy_conceptos: [];
+    in-out property <string> nominas_copy_total_str: "$0.00";
+
+    // Detector de nóminas faltantes y creación masiva
+    in-out property <bool> nominas_show_faltantes_modal: false;
+    in-out property <[NominaFaltanteItem]> nominas_faltantes_list: [];
+    in-out property <int> nominas_faltantes_count: 0;
+    in-out property <int> nominas_faltantes_selected_count: 0;
+    in-out property <bool> nominas_faltantes_all_selected: false;
+    in-out property <string> nominas_faltantes_search: "";
+    in-out property <string> nominas_faltantes_status_msg: "";
 }
 
 export global AppLogic {
+    // Navegación
+    callback navigate_view(int);
+    callback open_cedulas_from_obras();
+    callback close_cedulas_success_modal();
+    callback close_cedulas_duplicate_modal();
+    callback select_cliente_for_rp(string, string, string, bool);
+    callback select_cliente_for_empleados(string, string, string);
+
+    // Clientes
+    callback reload_clientes();
+    callback open_new_cliente_dialog();
+    callback close_new_cliente_dialog();
+    callback change_new_tipo_persona(string);
+    callback submit_new_cliente(string, string, string, string, string, string);
+    callback open_edit_cliente_dialog(string);
+    callback close_edit_cliente_dialog();
+    callback change_tipo_persona(string);
+    callback submit_edit_cliente(string, string, string, string, string, string, string);
+    callback open_delete_cliente_dialog(string, string);
+    callback close_delete_cliente_dialog();
+    callback confirm_delete_cliente(string);
+    callback filter_clientes_tab(int);
+
+    // Registros Patronales
+    callback open_new_rp_dialog();
+    callback close_rp_dialog();
+    callback update_rp_actividad(string);
+    callback change_rp_clase(string);
+    callback clear_rp_form();
+    callback submit_registro_patronal(string, string, string, string, string, string, string, string, string, string, string, string, string);
+    callback select_rp_for_edit(string);
+    callback open_delete_rp_dialog(string, string);
+    callback close_delete_rp_dialog();
+    callback confirm_delete_rp(string);
+    callback filter_rp_search();
+
+    // Revisiones y Obras
+    callback select_rp_for_revisiones(string, string, string, string);
+    callback select_revision_for_obras(string, string, string);
+    callback reload_revisiones();
+    callback open_new_revision_dialog();
+    callback close_revision_dialog();
+    callback select_revision_for_edit(string);
+    callback submit_revision(string, string, string, string, string, string, string, string, string, string, string, bool, string, string);
+    callback open_delete_revision_dialog(string, string, string);
+    callback close_delete_revision_dialog();
+    callback confirm_delete_revision(string);
+    callback filter_revisiones_search();
+    callback filter_revisiones_tab(int);
+    callback toggle_rev_prorroga();
+    callback on_fecha_entrega_imss_changed(string);
+    callback on_fecha_aprobacion_imss_changed(string);
+    callback on_fecha_entrega_rev_changed(string);
+    callback on_fecha_aprobacion_prorroga_changed(string);
+
+    callback reload_obras();
+    callback open_new_obra_dialog();
+    callback close_obra_dialog();
+    callback select_obra_for_edit(string);
+    callback submit_obra(string, string, string, string, string, string, string, string, string, string, string);
+    callback open_delete_obra_dialog(string, string);
+    callback close_delete_obra_dialog();
+    callback confirm_delete_obra(string);
+    callback filter_obras_search();
+    callback filter_obras_tab(int);
+
+    // Cédulas de Cuotas (SUA)
+    callback select_cedulas_view_files();
+    callback select_cedulas_view_folder();
+    callback remove_cedula_view_file(string);
+    callback procesar_y_guardar_cedulas();
+    callback descargar_cedulas_excel();
+    callback solicitar_borrar_todas_cedulas();
+    callback cancelar_borrar_todas_cedulas();
+    callback confirmar_borrar_todas_cedulas();
+    callback cedulas_cambiar_pagina(int);
+    callback cedulas_filtrar_busqueda(string);
+    callback cedulas_filtrar_mes(int);
+    callback cedulas_filtrar_obra(int);
+callback recargar_cedulas_view();
+
+    // ─── Vista de Carga de Nóminas ───
+    callback select_nominas_view_files();
+    callback select_nominas_view_folder();
+    callback procesar_y_guardar_nominas();
+    callback recargar_nominas_view();
+    callback realizar_reporte_nominas();
+    callback remove_nomina_view_file(int);
+    callback nominas_view_filtrar_busqueda(string);
+    callback nominas_view_cambiar_pagina(int);
+    callback solicitar_borrar_todas_nominas();
+    callback cancelar_borrar_todas_nominas();
+    callback confirmar_borrar_todas_nominas();
+
+    callback close_cedulas_client_mismatch_modal();
+    callback close_nominas_mismatch_modal();
+    // Empleados
+    callback open_new_empleado_dialog();
+    callback select_empleado_for_edit(string);
+    callback close_edit_empleado_panel();
+    callback submit_edit_empleado(string, string, string, string, string, string, bool);
+    callback toggle_empleados_filter_active();
+    callback filter_empleados_search();
+
+    // Validaciones en tiempo real (RFC, CURP, NSS, Registro Patronal, Registro de Obra)
+    callback validate_new_cliente_input();
+    callback validate_edit_cliente_input();
+    callback validate_empleado_input();
+    callback validate_rp_input();
+    callback validate_obra_input();
+
+    // Archivos y procesamiento (legacy / general)
     callback select_nominas_files();
     callback select_nominas_folder();
     callback select_cedulas_files();
@@ -89,4 +1426,172 @@ export global AppLogic {
     callback open_cedulas_folder();
     callback open_output_folder();
     callback copy_text_to_clipboard(string);
+
+    // Reporte Liquidaciones
+    callback open_reporte_liquidaciones();
+
+    // Reporte Nóminas
+    callback open_nominas_view();
+    callback open_nominas_carga();
+
+    // Redimensionado de la ventana (alimenta las vistas responsivas)
+    callback view_resized(length);
+    callback reload_reporte_liquidaciones();
+    callback reporte_filtrar_busqueda(string);
+    callback reporte_filtrar_obra(int);
+    callback reporte_filtrar_periodo(int);
+    callback reporte_filtrar_estado(int);
+    callback reporte_limpiar_todos_filtros();
+    callback reporte_cambiar_pagina(int);
+    callback reporte_toggle_select_row(string);
+    callback reporte_toggle_select_all(bool);
+    callback reporte_limpiar_seleccion();
+    callback reporte_open_obra_picker(string);
+    callback reporte_filter_obra_picker(string);
+    callback reporte_select_obra_picker(string, string);
+    callback reporte_close_obra_picker();
+    callback reporte_open_edit_dias(string);
+    callback reporte_submit_edit_dias(string, string, string);
+    callback reporte_close_edit_dias();
+
+    // Callbacks del modal unificado de edición
+    callback reporte_open_unified_modal(string);
+    callback reporte_filter_edit_obras(string);
+    callback reporte_select_edit_obra(string, string);
+    callback reporte_toggle_edit_dropdown();
+    callback reporte_edit_dias_cedula_changed(string);
+    callback reporte_submit_unified_edit(string, string, string, string);
+    callback reporte_close_edit_modal();
+
+    // Callbacks para vincular a otra obra adicional y eliminar vinculación dividida
+    callback reporte_open_add_obra_modal(string);
+    callback reporte_close_add_obra_modal();
+    callback reporte_filter_add_obras(string);
+    callback reporte_select_add_obra(string, string);
+    callback reporte_toggle_add_dropdown();
+    callback reporte_submit_add_obra(string, string, string);
+    callback reporte_delete_split_row(string);
+
+    // Callbacks del modal masivo de edición en lote
+    callback reporte_open_batch_edit_modal();
+    callback reporte_close_batch_edit_modal();
+    callback reporte_filter_batch_edit_obras(string);
+    callback reporte_select_batch_edit_obra(string, string);
+    callback reporte_toggle_batch_edit_dropdown();
+    callback reporte_batch_edit_dias_cedula_changed(string);
+    callback reporte_submit_batch_edit(string, bool, string, bool, string, bool);
+
+    callback reporte_batch_apply(int, string, string, bool);
+    callback reporte_batch_igualar_dias();
+    callback reporte_batch_poner_dias_cero();
+    callback reporte_batch_apply_dias_obra(string);
+    callback reporte_batch_desvincular_obra();
+    callback reporte_request_confirm_igualar_dias();
+    callback reporte_cancel_confirm_igualar_dias();
+    callback reporte_execute_confirm_igualar_dias();
+    callback exportar_reporte_liquidaciones_excel();
+    callback revertir_reporte_liquidaciones();
+
+    // Callbacks de ordenamiento multi-criterio
+    callback reporte_open_sort_modal();
+    callback reporte_close_sort_modal();
+    callback reporte_toggle_sort_criterion(string);
+    callback reporte_toggle_sort_direction(string);
+    callback reporte_reset_sorting();
+
+    // Callbacks de filtro y selección de empleados
+    callback reporte_open_empleados_filter_modal();
+    callback reporte_close_empleados_filter_modal();
+    callback reporte_select_all_months_for_selected_employees();
+    callback reporte_toggle_emp_filter_month(string);
+    callback reporte_toggle_emp_filter_obra(string);
+    callback reporte_set_emp_filter_all_months(bool);
+    callback reporte_set_emp_filter_all_obras(bool);
+    callback reporte_apply_emp_filter();
+    callback reporte_clear_emp_filter();
+
+    // Callbacks de selección rápida por Registro de Obra
+    callback reporte_open_select_obras_modal();
+    callback reporte_close_select_obras_modal();
+    callback reporte_toggle_quick_select_obra(string);
+    callback reporte_quick_select_all_obras(bool);
+    callback reporte_apply_quick_select_obras();
+
+    // Exportación a SUA Callbacks
+    callback reporte_abrir_modal_exportar_sua();
+    callback reporte_cerrar_modal_exportar_sua();
+    callback reporte_toggle_sua_obra(string);
+    callback reporte_sua_select_all_obras(bool);
+    callback reporte_sua_select_preset(string);
+    callback reporte_generar_sua();
+
+    // Calendario Fiscal & Revisiones Callbacks
+    callback cal_prev_month();
+    callback cal_next_month();
+    callback cal_today();
+    callback cal_set_year(int);
+    callback cal_select_revision(string);
+    callback cal_clear_selected_revision();
+    callback cal_day_clicked(string);
+    callback cal_close_day_detail_modal();
+    callback cal_inspect_revision_from_detail(string);
+    callback cal_holiday_catalog_prev_year();
+    callback cal_holiday_catalog_next_year();
+    callback cal_holiday_search(string);
+    callback cal_search_revisions(string);
+    callback cal_switch_tab(int);
+    callback cal_open_add_holiday_modal();
+    callback cal_close_add_holiday_modal();
+    callback cal_submit_add_holiday(string, string);
+    callback cal_prompt_delete_holiday(string, string, string);
+    callback cal_confirm_delete_holiday();
+    callback cal_cancel_delete_holiday();
+    callback cal_go_to_revision_view(string);
+
+    // Nóminas Callbacks
+    callback nominas_reload();
+    callback nominas_set_search(string);
+    callback nominas_clear_search();
+    callback nominas_filter_periodo(int);
+    callback nominas_filter_anio(int);
+    callback nominas_filter_dias(int);
+    callback nominas_toggle_only_sin_cedula();
+    callback nominas_toggle_detalle();
+    callback nominas_prev_page();
+    callback nominas_next_page();
+    callback nominas_open_percepciones(string, string, string);
+    callback nominas_close_percepciones();
+    callback nominas_export_excel();
+
+    // Callbacks de edición de días y fórmula
+    callback nominas_open_edit(string);
+    callback nominas_close_edit();
+    callback nominas_edit_recalc_dias(string);
+    callback nominas_edit_update_concepto(int, string);
+    callback nominas_save_edit();
+
+    // Callbacks de creación/copia por plantilla
+    callback nominas_open_copy_modal(string, string);
+    callback nominas_close_copy_modal();
+    callback nominas_copy_select_template(int);
+    callback nominas_copy_select_mes(int);
+    callback nominas_copy_set_anio(string);
+    callback nominas_copy_recalc_dias(string);
+    callback nominas_copy_update_concepto(int, string);
+    callback nominas_submit_create_nomina();
+
+    // Callbacks de detector de nóminas faltantes y masivo
+    callback nominas_open_faltantes_modal();
+    callback nominas_close_faltantes_modal();
+    callback nominas_faltantes_toggle_item(int);
+    callback nominas_faltantes_toggle_all(bool);
+    callback nominas_faltantes_crear_individual(int);
+    callback nominas_faltantes_crear_masivo();
+
+    // Actualizaciones de Software
+    callback check_for_updates();
+    callback open_update_modal();
+    callback close_update_modal();
+    callback start_update_download();
+    callback install_update_now();
 }

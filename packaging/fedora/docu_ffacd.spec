@@ -7,6 +7,12 @@ URL:            https://github.com/Ivan395/docupload
 
 Requires:       fontconfig
 Requires:       freetype
+Requires:       libX11
+Requires:       libXext
+Requires:       libXrender
+Requires:       libxml2
+Requires:       libpng
+Requires:       zlib
 
 %description
 DocuUpload Fiscal & Nóminas ACD
@@ -34,6 +40,17 @@ install -m 644 %{_sourcedir}/app_icon.svg %{buildroot}%{_datadir}/icons/hicolor/
 %{_datadir}/icons/hicolor/64x64/apps/docu_ffacd.png
 %{_datadir}/icons/hicolor/32x32/apps/docu_ffacd.png
 %{_datadir}/icons/hicolor/scalable/apps/docu_ffacd.svg
+
+%post
+/bin/touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
+%{_bindir}/update-desktop-database &>/dev/null || :
+
+%postun
+if [ $1 -eq 0 ] ; then
+    /bin/touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
+    %{_bindir}/gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
+    %{_bindir}/update-desktop-database &>/dev/null || :
+fi
 
 %changelog
 * Sat Sep 26 2026 Firma Fiscal ACD <soporte@firmafiscalacd.com> - 0.5.0-1

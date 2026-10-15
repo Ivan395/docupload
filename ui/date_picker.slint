@@ -1,0 +1,395 @@
+import { Button, LineEdit } from "std-widgets.slint";
+import { DateHelper, DateDmy } from "models.slint";
+
+export component DatePickerField inherits Rectangle {
+    in-out property <string> date-val: "";
+    in property <string> placeholder-text: "DD/MM/YYYY";
+    in property <bool> enabled: true;
+    in property <string> label-badge: "";
+    callback date-changed(string);
+
+    height: 36px;
+    border-radius: 6px;
+    background: !root.enabled ? #f1f5f9 : transparent;
+    border-width: !root.enabled ? 1px : 0px;
+    border-color: #cbd5e1;
+
+    // Estado interno del calendario
+    property <int> view-year: 2026;
+    property <int> view-month: 9;
+    property <int> sel-day: 0;
+    property <int> sel-month: 0;
+    property <int> sel-year: 0;
+
+    pure function is_leap_year(y: int) -> bool {
+        return (Math.mod(y, 4) == 0 && Math.mod(y, 100) != 0) || Math.mod(y, 400) == 0;
+    }
+
+    pure function days_in_month(y: int, m: int) -> int {
+        if m == 1 || m == 3 || m == 5 || m == 7 || m == 8 || m == 10 || m == 12 { return 31; }
+        if m == 4 || m == 6 || m == 9 || m == 11 { return 30; }
+        if m == 2 {
+            if is_leap_year(y) { return 29; }
+            return 28;
+        }
+        return 30;
+    }
+
+    pure function day_of_week_start(y: int, m: int) -> int {
+        // Monday = 0, Tuesday = 1, ... Sunday = 6
+        let adj_y = m < 3 ? y - 1 : y;
+        let t = m == 1 ? 0 :
+                m == 2 ? 3 :
+                m == 3 ? 2 :
+                m == 4 ? 5 :
+                m == 5 ? 0 :
+                m == 6 ? 3 :
+                m == 7 ? 5 :
+                m == 8 ? 1 :
+                m == 9 ? 4 :
+                m == 10 ? 6 :
+                m == 11 ? 2 : 4;
+        let dow_sun0 = Math.mod(adj_y + Math.floor(adj_y / 4) - Math.floor(adj_y / 100) + Math.floor(adj_y / 400) + t + 1, 7);
+        return Math.mod(dow_sun0 + 6, 7);
+    }
+
+    pure function month_name(m: int) -> string {
+        if m == 1 { return "Enero"; }
+        if m == 2 { return "Febrero"; }
+        if m == 3 { return "Marzo"; }
+        if m == 4 { return "Abril"; }
+        if m == 5 { return "Mayo"; }
+        if m == 6 { return "Junio"; }
+        if m == 7 { return "Julio"; }
+        if m == 8 { return "Agosto"; }
+        if m == 9 { return "Septiembre"; }
+        if m == 10 { return "Octubre"; }
+        if m == 11 { return "Noviembre"; }
+        return "Diciembre";
+    }
+
+    pure function format_date_str(d: int, m: int, y: int) -> string {
+        let ds = d < 10 ? "0" + d : "" + d;
+        let ms = m < 10 ? "0" + m : "" + m;
+        return ds + "/" + ms + "/" + y;
+    }
+
+    // Ventana Popup del Mini Calendario
+    pop := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        width: 270px;
+        height: 295px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #ffffff;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000028;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+
+                // Barra Superior: Navegación de Mes y Año
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    // Botones Año Anterior y Mes Anterior
+                    HorizontalLayout {
+                        spacing: 2px;
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: btn_py.has-hover ? #f1f5f9 : #ffffff;
+                            Text { text: "«"; font-size: 13px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            btn_py := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.view-year -= 1; }
+                            }
+                        }
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: btn_pm.has-hover ? #f1f5f9 : #ffffff;
+                            Text { text: "‹"; font-size: 16px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            btn_pm := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if root.view-month == 1 {
+                                        root.view-month = 12;
+                                        root.view-year -= 1;
+                                    } else {
+                                        root.view-month -= 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Título Mes y Año
+                    Text {
+                        text: root.month_name(root.view-month) + " " + root.view-year;
+                        font-size: 12px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    // Botones Mes Siguiente y Año Siguiente
+                    HorizontalLayout {
+                        spacing: 2px;
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: btn_nm.has-hover ? #f1f5f9 : #ffffff;
+                            Text { text: "›"; font-size: 16px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            btn_nm := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if root.view-month == 12 {
+                                        root.view-month = 1;
+                                        root.view-year += 1;
+                                    } else {
+                                        root.view-month += 1;
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: btn_ny.has-hover ? #f1f5f9 : #ffffff;
+                            Text { text: "»"; font-size: 13px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            btn_ny := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.view-year += 1; }
+                            }
+                        }
+                    }
+                }
+
+                // Encabezados Días de la Semana
+                HorizontalLayout {
+                    spacing: 2px;
+                    Rectangle { width: 33px; height: 18px; Text { text: "Lu"; font-size: 10px; font-weight: 800; color: #64748b; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { width: 33px; height: 18px; Text { text: "Ma"; font-size: 10px; font-weight: 800; color: #64748b; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { width: 33px; height: 18px; Text { text: "Mi"; font-size: 10px; font-weight: 800; color: #64748b; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { width: 33px; height: 18px; Text { text: "Ju"; font-size: 10px; font-weight: 800; color: #64748b; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { width: 33px; height: 18px; Text { text: "Vi"; font-size: 10px; font-weight: 800; color: #64748b; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { width: 33px; height: 18px; Text { text: "Sá"; font-size: 10px; font-weight: 800; color: #0284c7; horizontal-alignment: center; vertical-alignment: center; } }
+                    Rectangle { width: 33px; height: 18px; Text { text: "Do"; font-size: 10px; font-weight: 800; color: #ef4444; horizontal-alignment: center; vertical-alignment: center; } }
+                }
+
+                Rectangle { height: 1px; background: #f1f5f9; }
+
+                // Matriz de 6 Filas x 7 Días
+                VerticalLayout {
+                    spacing: 2px;
+                    for row in 6 : HorizontalLayout {
+                        spacing: 2px;
+                        for col in 7 : Rectangle {
+                            property <int> cell-idx: row * 7 + col;
+                            property <int> start-dow: root.day_of_week_start(root.view-year, root.view-month);
+                            property <int> total-days: root.days_in_month(root.view-year, root.view-month);
+                            property <int> day-num: cell-idx - start-dow + 1;
+                            property <bool> is-in-month: day-num >= 1 && day-num <= total-days;
+                            property <bool> is-selected: is-in-month && day-num == root.sel-day && root.view-month == root.sel-month && root.view-year == root.sel-year;
+
+                            width: 33px;
+                            height: 25px;
+                            border-radius: 4px;
+                            background: is-selected ? #2563eb : (day_touch.has-hover && is-in-month ? #f1f5f9 : transparent);
+
+                            Text {
+                                text: is-in-month ? "" + day-num : "";
+                                font-size: 11px;
+                                font-weight: is-selected ? 800 : 500;
+                                color: is-selected ? #ffffff : (col == 6 ? #ef4444 : #1e293b);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            day_touch := TouchArea {
+                                enabled: is-in-month;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.sel-day = day-num;
+                                    root.sel-month = root.view-month;
+                                    root.sel-year = root.view-year;
+                                    root.date-val = root.format_date_str(day-num, root.view-month, root.view-year);
+                                    root.date-changed(root.date-val);
+                                    pop.close();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #f1f5f9; }
+
+                // Barra Inferior: Hoy y Limpiar
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    // Botón Hoy
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: btn_today.has-hover ? #eff6ff : transparent;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            Text { text: "Hoy"; font-size: 10px; font-weight: 700; color: #2563eb; vertical-alignment: center; }
+                        }
+                        btn_today := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                let t = DateHelper.get_today();
+                                root.sel-day = t.day;
+                                root.sel-month = t.month;
+                                root.sel-year = t.year;
+                                root.view-month = t.month;
+                                root.view-year = t.year;
+                                root.date-val = root.format_date_str(t.day, t.month, t.year);
+                                root.date-changed(root.date-val);
+                                pop.close();
+                            }
+                        }
+                    }
+
+                    // Botón Limpiar
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: btn_clear.has-hover ? #fef2f2 : transparent;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            Text { text: "Limpiar"; font-size: 10px; font-weight: 700; color: #ef4444; vertical-alignment: center; }
+                        }
+                        btn_clear := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.sel-day = 0;
+                                root.sel-month = 0;
+                                root.sel-year = 0;
+                                root.date-val = "";
+                                root.date-changed("");
+                                pop.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.enabled : HorizontalLayout {
+        padding-left: 0px;
+        padding-right: 0px;
+        spacing: 4px;
+
+        input_field := LineEdit {
+            horizontal-stretch: 1;
+            text <=> root.date-val;
+            placeholder-text: root.placeholder-text;
+            font-size: 11px;
+            edited(text) => {
+                root.date-changed(text);
+            }
+        }
+
+        cal_box := Rectangle {
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: cal_touch.has-hover || pop.is-open ? #93c5fd : #cbd5e1;
+            background: cal_touch.has-hover || pop.is-open ? #eff6ff : #ffffff;
+            y: (parent.height - self.height) / 2;
+
+            Text {
+                text: "📅";
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            cal_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    let parsed = DateHelper.parse_date(root.date-val);
+                    root.view-year = parsed.year;
+                    root.view-month = parsed.month;
+                    if parsed.valid {
+                        root.sel-day = parsed.day;
+                        root.sel-month = parsed.month;
+                        root.sel-year = parsed.year;
+                    } else {
+                        root.sel-day = 0;
+                        root.sel-month = 0;
+                        root.sel-year = 0;
+                    }
+                    pop.show();
+                }
+            }
+        }
+    }
+
+    if !root.enabled : HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 8px;
+        spacing: 6px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.date-val != "" ? root.date-val : root.placeholder-text;
+            font-size: 11px;
+            font-weight: root.date-val != "" ? 700 : 400;
+            color: root.date-val != "" ? #334155 : #94a3b8;
+            vertical-alignment: center;
+        }
+
+        if root.label-badge != "" : Rectangle {
+            height: 18px;
+            border-radius: 4px;
+            background: #e2e8f0;
+            y: (parent.height - self.height) / 2;
+            HorizontalLayout {
+                padding-left: 5px;
+                padding-right: 5px;
+                Text {
+                    text: root.label-badge;
+                    font-size: 9px;
+                    font-weight: 800;
+                    color: #475569;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            y: (parent.height - self.height) / 2;
+            Text {
+                text: "🔒";
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+

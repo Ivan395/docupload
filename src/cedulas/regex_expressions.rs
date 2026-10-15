@@ -8,6 +8,7 @@ pub struct OCRPatterns {
     // Individual business header patterns
     pub business_registro_patronal: Regex,
     pub business_rfc: Regex,
+    pub business_curp: Regex,
     pub business_area_geografica: Regex,
     pub business_razon_social: Regex,
     pub business_delegacion: Regex,
@@ -76,9 +77,10 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
     let columns_in_file = Regex::new(r"c[li]ave[.]*")?;
 
     let business_registro_patronal = Regex::new(
-        r"(?i)reg(?:istro)?[\.\t ]*patronal[\.\t ]*:?[\.\t ]*(?P<registro_patronal>[a-z0-9][a-z0-9\-_ ]{7,20}[a-z0-9]|[a-z0-9\-]+)",
+        r"(?i)reg(?:istro)?[\.\t ]*patronal[\.\t ]*:?[\.\t ]*(?P<registro_patronal>[a-z0-9][a-z0-9\-_]{7,15}[a-z0-9]|[a-z0-9\-]+)",
     )?;
     let business_rfc = Regex::new(r"(?i)rfc\s*:\s*(?P<rfc>[a-z0-9\-]+)")?;
+    let business_curp = Regex::new(r"(?i)\bcurp\b\s*[:\t ]*\s*(?P<curp>[a-z0-9\-]{18,22})\b")?;
     let business_area_geografica =
         Regex::new(r"(?is)area\s+geogr[áa]fica\s*:\s*\n?\s*(?P<area>[a-z])\b")?;
     let business_razon_social = Regex::new(
@@ -106,7 +108,7 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
     )?;
 
     let employee_no_seguro_social_nombre_curp_rfc = Regex::new(
-        r"(?m)(?P<no_seguro_social>\d{2}[-\.]?\d{2}[-\.]?\d{2}[-\.]?\d{4}[-\.]?\d)[\t ]+(?P<nombre>.+?)(?:[\t ]+(?P<curp>\w{17,18})|[\t ]+(?P<rfc>\w{3,4}-?\w{6}-?\w{0,3}))?(?:[\t ]+(?P<clave_ubicacion>[\w\(\)]+))?[\t ]*$",
+        r"(?i)(?m)(?P<no_seguro_social>\d{2}[-\.]?\d{2}[-\.]?\d{2}[-\.]?\d{4}[-\.]?\d)[\t ]+(?P<nombre>.+?)(?:(?:[\t ]+(?P<curp>\b[a-z]{4}\d{6}[a-z0-9]{7,8}\b))|(?:[\t ]+(?P<rfc>\b[a-zñ&]{3,4}-?\d{6}(?:-?[a-z0-9]{3})?\b)))?(?:(?:[\t ]+(?P<curp_alt>\b[a-z]{4}\d{6}[a-z0-9]{7,8}\b))|(?:[\t ]+(?P<rfc_alt>\b[a-zñ&]{3,4}-?\d{6}(?:-?[a-z0-9]{3})?\b)))?(?:[\t ]+(?P<clave_ubicacion>[a-z0-9\(\)\-]*\d[a-z0-9\(\)\-]*))?[\t ]*$",
     )?;
 
     let employee_data = Regex::new(
@@ -136,6 +138,7 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
         columns_in_file,
         business_registro_patronal,
         business_rfc,
+        business_curp,
         business_area_geografica,
         business_razon_social,
         business_delegacion,
