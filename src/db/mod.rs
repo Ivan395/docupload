@@ -11,7 +11,7 @@ pub mod schema;
 pub use calendario::*;
 pub use catalogos::*;
 pub use cedulas::{save_cedulas_concurrent, save_cedulas_to_db, CedulasDbStats};
-pub use client::{create_client, create_pool, DbPool, PooledClient};
+pub use client::{create_client, create_pool, diagnose_postgres, DbPool, PooledClient, PostgresDiagnosis};
 pub use nominas::{save_nominas_concurrent, save_nominas_to_db, delete_all_nominas, NominasDbStats};
 pub use nominas_reporte::*;
 pub use reporte_liquidaciones::*;

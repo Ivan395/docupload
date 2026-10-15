@@ -409,7 +409,17 @@ pub fn log_db_simple_error(table: &str, op_name: &str, error: &str) {
 }
 
 
-fn log_general_info(msg: &str) {
+pub fn log_system_info(tag: &str, msg: &str) {
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    enqueue_log(AppLogMessage {
+        timestamp: now,
+        category: LogCategory::General(Level::Info),
+        target: format!("SISTEMA::{}", tag),
+        message: msg.to_string(),
+    });
+}
+
+pub fn log_general_info(msg: &str) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
     enqueue_log(AppLogMessage {
         timestamp: now,
