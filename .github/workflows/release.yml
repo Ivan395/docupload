@@ -102,17 +102,35 @@ jobs:
     name: Publish GitHub Release
     needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: always() && !cancelled() && !contains(needs.*.result, 'failure')
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Release Tag
+        id: release_tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+            TAG="v${VERSION}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using release tag: $TAG"
+
       - name: Download all packages
         uses: actions/download-artifact@v4
         with:
           path: all-packages
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: all-packages/**/*
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: "DocUpload ${{ steps.release_tag.outputs.tag }}"
+          files: all-packages/*
           generate_release_notes: true
           draft: false
           prerelease: false
