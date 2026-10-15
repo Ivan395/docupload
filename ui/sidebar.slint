@@ -635,6 +635,64 @@ export component Sidebar inherits Rectangle {
                         }
                     }
                 }
+
+                Rectangle {
+                    height: 1px;
+                    background: #f1f5f9;
+                }
+
+                // Configuración BD (F11) -> View 11
+                Rectangle {
+                    height: 40px;
+                    border-radius: 8px;
+                    background: AppData.current_view == 11 ? #1e3a8a : (btn_f11.has-hover ? #f8fafc : transparent);
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: "🗄️";
+                                font-size: 14px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: "Configuración BD";
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: AppData.current_view == 11 ? #ffffff : #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            height: 20px;
+                            width: 28px;
+                            border-radius: 4px;
+                            background: AppData.current_view == 11 ? #2563eb : #f1f5f9;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "F11";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: AppData.current_view == 11 ? #ffffff : #64748b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    btn_f11 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            AppLogic.navigate_view(11);
+                        }
+                    }
+                }
             }
 
         }

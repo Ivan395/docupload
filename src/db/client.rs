@@ -1,44 +1,149 @@
-use postgres::{Client, NoTls};
+use postgres::Client;
+use postgres_native_tls::MakeTlsConnector;
 use r2d2::Pool;
 use r2d2_postgres::PostgresConnectionManager;
+#[cfg(target_os = "windows")]
 use std::env;
+use std::sync::{Arc, RwLock};
 
-pub type DbPool = Pool<PostgresConnectionManager<NoTls>>;
-pub type PooledClient = r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
+pub type DbPool = Pool<PostgresConnectionManager<MakeTlsConnector>>;
+pub type PooledClient = r2d2::PooledConnection<PostgresConnectionManager<MakeTlsConnector>>;
+
+static GLOBAL_POOL: RwLock<Option<Arc<DbPool>>> = RwLock::new(None);
+static IS_FALLBACK_ACTIVE: RwLock<bool> = RwLock::new(false);
+
+pub fn is_fallback_active() -> bool {
+    IS_FALLBACK_ACTIVE.read().ok().map(|b| *b).unwrap_or(false)
+}
+
+pub fn set_fallback_active(active: bool) {
+    if let Ok(mut lock) = IS_FALLBACK_ACTIVE.write() {
+        *lock = active;
+    }
+}
+
+pub fn set_global_pool(pool: Arc<DbPool>) {
+    if let Ok(mut lock) = GLOBAL_POOL.write() {
+        *lock = Some(pool);
+    }
+}
+
+pub fn get_global_pool() -> Option<Arc<DbPool>> {
+    GLOBAL_POOL.read().ok().and_then(|guard| guard.clone())
+}
+
+pub fn reload_global_pool(max_size: u32) -> Result<Arc<DbPool>, String> {
+    let pool = create_pool(max_size)?;
+    let arc_pool = Arc::new(pool);
+    set_global_pool(arc_pool.clone());
+    Ok(arc_pool)
+}
 
 pub fn get_connection_string() -> String {
-    if let Ok(url) = env::var("DATABASE_URL") {
-        let trimmed = url.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+    if is_fallback_active() {
+        crate::db::config::get_local_fallback_config().to_connection_string()
+    } else {
+        crate::db::config::get_active_config().to_connection_string()
     }
-
-    let host = env::var("PGHOST").unwrap_or_else(|_| "localhost".to_string());
-    let port = env::var("PGPORT").unwrap_or_else(|_| "5432".to_string());
-    let user = env::var("PGUSER").unwrap_or_else(|_| "ivan395".to_string());
-    let password = env::var("PGPASSWORD").unwrap_or_else(|_| "ABCabc123".to_string());
-    let dbname = env::var("PGDATABASE").unwrap_or_else(|_| "firma_fiscal_acd".to_string());
-
-    format!("postgres://{}:{}@{}:{}/{}", user, password, host, port, dbname)
 }
 
 pub fn create_client() -> Result<Client, postgres::Error> {
-    let conn_str = get_connection_string();
-    Client::connect(&conn_str, NoTls)
+    let primary_cfg = crate::db::config::get_active_config();
+    let connector = crate::db::config::create_tls_connector();
+    let conn_str = primary_cfg.to_connection_string();
+
+    match Client::connect(&conn_str, connector) {
+        Ok(c) => {
+            set_fallback_active(false);
+            Ok(c)
+        }
+        Err(err) => {
+            let is_primary_local = primary_cfg.host == "localhost" || primary_cfg.host == "127.0.0.1";
+            if !is_primary_local {
+                log::warn!("Conexión remota fallida en create_client ({}). Probando fallback local...", err);
+                let local_cfg = crate::db::config::get_local_fallback_config();
+                let local_connector = crate::db::config::create_tls_connector();
+                let local_conn_str = local_cfg.to_connection_string();
+                if let Ok(local_client) = Client::connect(&local_conn_str, local_connector) {
+                    set_fallback_active(true);
+                    return Ok(local_client);
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
-pub fn create_pool(max_size: u32) -> Result<DbPool, String> {
-    let conn_str = get_connection_string();
+pub fn create_pool_for_config(cfg: &crate::db::config::DbConfig, max_size: u32) -> Result<DbPool, String> {
+    let conn_str = cfg.to_connection_string();
     let config: postgres::Config = conn_str
         .parse()
-        .map_err(|e| format!("Error parseando configuración de PostgreSQL: {}", e))?;
-    let manager = PostgresConnectionManager::new(config, NoTls);
+        .map_err(|e| format!("Error parseando configuración PostgreSQL ({}): {}", cfg.host, e))?;
+    let connector = crate::db::config::create_tls_connector();
+    let manager = PostgresConnectionManager::new(config, connector);
     Pool::builder()
         .max_size(max_size)
         .min_idle(Some(1.min(max_size)))
+        .connection_timeout(std::time::Duration::from_secs(7))
         .build(manager)
-        .map_err(|e| format!("Error creando connection pool: {}", e))
+        .map_err(|e| format!("Error creando connection pool ({}): {}", cfg.host, e))
+}
+
+pub fn create_pool(max_size: u32) -> Result<DbPool, String> {
+    let primary_cfg = crate::db::config::get_active_config();
+
+    // Asegurar que la base de datos existe en el destino primario
+    let _ = primary_cfg.ensure_database_exists();
+
+    // 1. Intentar conectar a la base de datos primaria (ej. Aiven Cloud)
+    match create_pool_for_config(&primary_cfg, max_size) {
+        Ok(pool) => {
+            if let Ok(mut client) = pool.get() {
+                if client.query_one("SELECT 1", &[]).is_ok() {
+                    set_fallback_active(false);
+                    log::info!(
+                        "Conectado exitosamente a la base de datos primaria: {} ({}:{})",
+                        primary_cfg.database,
+                        primary_cfg.host,
+                        primary_cfg.port
+                    );
+                    return Ok(pool);
+                }
+            }
+            log::warn!("Connection pool remoto creado pero falló el handshake de prueba.");
+        }
+        Err(e) => {
+            log::warn!("No se pudo conectar a la base de datos primaria ({}): {}", primary_cfg.host, e);
+        }
+    }
+
+    // 2. Si la base primaria no es local, aplicar fallback automático a PostgreSQL local
+    let is_primary_local = primary_cfg.host == "localhost" || primary_cfg.host == "127.0.0.1";
+    if !is_primary_local {
+        log::warn!("Activando fallback automático: Conectando a PostgreSQL local (localhost:5432)...");
+        let local_cfg = crate::db::config::get_local_fallback_config();
+        let _ = local_cfg.ensure_database_exists();
+
+        match create_pool_for_config(&local_cfg, max_size) {
+            Ok(local_pool) => {
+                if let Ok(mut client) = local_pool.get() {
+                    if client.query_one("SELECT 1", &[]).is_ok() {
+                        set_fallback_active(true);
+                        log::info!("Fallback exitoso: Operando con PostgreSQL local (localhost:5432)");
+                        return Ok(local_pool);
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Fallo también en la conexión local de contingencia: {}", e);
+            }
+        }
+    }
+
+    Err(format!(
+        "No se pudo establecer conexión con PostgreSQL en '{}' ({}:{}) ni con la base de datos local de contingencia.",
+        primary_cfg.database, primary_cfg.host, primary_cfg.port
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -50,56 +155,54 @@ pub struct PostgresDiagnosis {
 }
 
 pub fn diagnose_postgres() -> PostgresDiagnosis {
-    let host = env::var("PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = env::var("PGPORT").unwrap_or_else(|_| "5432".to_string());
-    let dbname = env::var("PGDATABASE").unwrap_or_else(|_| "firma_fiscal_acd".to_string());
-    let user = env::var("PGUSER").unwrap_or_else(|_| "ivan395".to_string());
-
-    let norm_host = if host == "localhost" { "127.0.0.1" } else { &host };
-    let addr_str = format!("{}:{}", norm_host, port);
-    let port_open = if let Ok(parsed_addr) = addr_str.parse() {
-        std::net::TcpStream::connect_timeout(&parsed_addr, std::time::Duration::from_millis(600)).is_ok()
+    let fallback = is_fallback_active();
+    let cfg = if fallback {
+        crate::db::config::get_local_fallback_config()
     } else {
-        false
+        crate::db::config::get_active_config()
     };
+    let host = cfg.host.clone();
+    let port = cfg.port.to_string();
 
-    match create_client() {
+    let connector = crate::db::config::create_tls_connector();
+    let conn_str = cfg.to_connection_string();
+
+    match Client::connect(&conn_str, connector) {
         Ok(mut client) => {
             let ver: Result<String, _> = client.query_one("SELECT version()", &[]).map(|r| r.get(0));
             let ver_str = ver.unwrap_or_else(|_| "PostgreSQL".to_string());
             let short_ver = ver_str.split(',').next().unwrap_or("PostgreSQL").trim();
-            PostgresDiagnosis {
-                is_connected: true,
-                is_installed: true,
-                status_text: "Sincronización DB: En línea".to_string(),
-                detail_text: format!("Conectado a {} ({}:{})", short_ver, host, port),
+
+            if fallback {
+                PostgresDiagnosis {
+                    is_connected: true,
+                    is_installed: true,
+                    status_text: "Sincronización DB: Modo Local (Contingencia)".to_string(),
+                    detail_text: format!("Conectado a {} local ({}:{}). La conexión remota no estuvo disponible.", short_ver, host, port),
+                }
+            } else {
+                let is_aiven = host.contains("aivencloud.com");
+                let label = if is_aiven { "En línea (Aiven Cloud)" } else { "En línea" };
+                PostgresDiagnosis {
+                    is_connected: true,
+                    is_installed: true,
+                    status_text: format!("Sincronización DB: {}", label),
+                    detail_text: format!("Conectado a {} ({}:{})", short_ver, host, port),
+                }
             }
         }
         Err(err) => {
             let is_installed = check_if_postgres_installed_on_system();
-            let (status_text, detail_text) = if port_open {
+            let is_local = host == "localhost" || host == "127.0.0.1" || host == "::1";
+            let (status_text, detail_text) = if is_local {
                 (
-                    "Error de autenticación / BD PostgreSQL".to_string(),
-                    format!(
-                        "El puerto {} está abierto, pero falló la conexión con la base '{}' y usuario '{}': {}. Asegúrese de haber creado la base de datos y usuario requeridos.",
-                        port, dbname, user, err
-                    ),
-                )
-            } else if is_installed {
-                (
-                    "PostgreSQL detenido (Servicio apagado)".to_string(),
-                    format!(
-                        "PostgreSQL está instalado en este equipo, pero el servicio no se está ejecutando en el puerto {}. Por favor inicie el servicio de PostgreSQL.",
-                        port
-                    ),
+                    "PostgreSQL local no alcanzable".to_string(),
+                    format!("No se pudo conectar a PostgreSQL local en {}:{}: {}.", host, port, err),
                 )
             } else {
                 (
-                    "PostgreSQL no instalado localmente".to_string(),
-                    format!(
-                        "No se detectó PostgreSQL instalado en esta computadora ni respondiendo en {}:{}. Para guardar clientes, nóminas y cédulas, instale PostgreSQL (versión 14+) o configure la variable de entorno DATABASE_URL.",
-                        host, port
-                    ),
+                    "Servidor PostgreSQL remoto no disponible".to_string(),
+                    format!("No se pudo conectar a PostgreSQL en {}:{}: {}.", host, port, err),
                 )
             };
 
