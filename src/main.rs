@@ -512,6 +512,21 @@ pub fn open_folder_in_os(path: &Path) {
     }
 }
 
+fn populate_db_config_ui(ui: &MainWindow) {
+    let cfg = crate::db::get_active_config();
+    let path = crate::db::get_active_config_path();
+    let app_data = ui.global::<AppData>();
+    app_data.set_db_cfg_host(cfg.host.as_str().into());
+    app_data.set_db_cfg_port(cfg.port.to_string().as_str().into());
+    app_data.set_db_cfg_database(cfg.database.as_str().into());
+    app_data.set_db_cfg_user(cfg.user.as_str().into());
+    app_data.set_db_cfg_password(cfg.password.as_str().into());
+    app_data.set_db_cfg_ssl_mode(cfg.ssl_mode.as_str().into());
+    app_data.set_db_cfg_connection_url(cfg.connection_url.as_str().into());
+    app_data.set_db_cfg_file_path(path.display().to_string().as_str().into());
+    app_data.set_db_cfg_use_custom_url(!cfg.connection_url.trim().is_empty());
+}
+
 fn load_clientes_ui(ui: &MainWindow, pool: &DbPool) {
     let mut client = match pool.get() {
         Ok(c) => c,
@@ -2717,8 +2732,10 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let (db_pool, imss_inhabiles) = match create_pool(8) {
         Ok(pool) => {
+            let arc_pool = Arc::new(pool);
+            crate::db::set_global_pool(arc_pool.clone());
             let mut inhabiles_set = HashSet::new();
-            if let Ok(mut client) = pool.get() {
+            if let Ok(mut client) = arc_pool.get() {
                 if let Err(e) = ensure_schema(&mut client) {
                     eprintln!("Error inicializando esquema de BD: {}", e);
                     log::error!("Error inicializando esquema de BD: {}", e);
@@ -2732,7 +2749,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     inhabiles_set = set;
                 }
             }
-            (Some(Arc::new(pool)), Arc::new(RwLock::new(inhabiles_set)))
+            (Some(arc_pool), Arc::new(RwLock::new(inhabiles_set)))
         }
         Err(e) => {
             eprintln!("Advertencia: No se pudo conectar a PostgreSQL: {}", e);
@@ -2752,11 +2769,25 @@ fn main() -> Result<(), slint::PlatformError> {
     app_data.set_db_status_text(diag.status_text.as_str().into());
     app_data.set_db_status_detail(diag.detail_text.as_str().into());
 
+    // Poblar valores de configuración de PostgreSQL en la UI desde db_config.json
+    populate_db_config_ui(&main_window);
+
     if diag.is_connected {
-        crate::app_logger::log_system_info(
-            "Base de Datos",
-            "PostgreSQL conectado y verificado en línea en localhost:5432.",
-        );
+        if crate::db::is_fallback_active() {
+            show_toast_message(
+                &main_window,
+                "Aviso: Conexión remota no disponible. Operando en modo de contingencia con base de datos local.",
+            );
+            crate::app_logger::log_system_info(
+                "Base de Datos (Fallback)",
+                "PostgreSQL operando en modo local (localhost:5432) por contingencia.",
+            );
+        } else {
+            crate::app_logger::log_system_info(
+                "Base de Datos",
+                &format!("PostgreSQL conectado y verificado en línea: {}", diag.detail_text),
+            );
+        }
     } else {
         crate::app_logger::log_db_simple_error(
             "sistema",
@@ -2790,13 +2821,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_db_connected(diag.is_connected);
                 app_data.set_db_status_text(diag.status_text.as_str().into());
                 app_data.set_db_status_detail(diag.detail_text.as_str().into());
-
-                let msg = if diag.is_connected {
-                    "Base de datos conectada: PostgreSQL en línea (localhost:5432)".to_string()
-                } else {
-                    format!("{}: {}", diag.status_text, diag.detail_text)
-                };
-                show_toast_message(&ui, &msg);
+                // Al hacer clic en el estado de la BD, abre directamente la vista de configuración
+                populate_db_config_ui(&ui);
+                app_data.set_current_view(11);
             }
         });
     }
@@ -2806,6 +2833,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let pool_clone = db_pool.clone();
         app_logic.on_reconnect_db(move || {
             if let Some(ui) = ui_weak.upgrade() {
+                let pool_res = crate::db::reload_global_pool(8);
                 let diag = crate::db::diagnose_postgres();
                 let app_data = ui.global::<AppData>();
                 app_data.set_db_connected(diag.is_connected);
@@ -2813,7 +2841,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_db_status_detail(diag.detail_text.as_str().into());
 
                 if diag.is_connected {
-                    if let Some(ref pool) = pool_clone {
+                    if let Ok(ref new_pool) = pool_res {
+                        if let Ok(mut client) = new_pool.get() {
+                            let _ = ensure_schema(&mut client);
+                        }
+                        load_clientes_ui(&ui, new_pool);
+                        update_global_stats(&ui, new_pool);
+                    } else if let Some(ref pool) = pool_clone {
                         load_clientes_ui(&ui, pool);
                         update_global_stats(&ui, pool);
                     }
@@ -2830,6 +2864,188 @@ fn main() -> Result<(), slint::PlatformError> {
                     );
                     show_toast_message(&ui, &format!("Reconexión fallida: {}", diag.detail_text));
                 }
+            }
+        });
+    }
+
+    // Callbacks de la Vista de Configuración de Base de Datos PostgreSQL
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_load_db_config(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                populate_db_config_ui(&ui);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_reset_db_config_defaults(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let def = crate::db::DbConfig::default();
+                let app_data = ui.global::<AppData>();
+                app_data.set_db_cfg_host(def.host.as_str().into());
+                app_data.set_db_cfg_port(def.port.to_string().as_str().into());
+                app_data.set_db_cfg_database(def.database.as_str().into());
+                app_data.set_db_cfg_user(def.user.as_str().into());
+                app_data.set_db_cfg_password(def.password.as_str().into());
+                app_data.set_db_cfg_ssl_mode(def.ssl_mode.as_str().into());
+                app_data.set_db_cfg_connection_url(def.connection_url.as_str().into());
+                app_data.set_db_cfg_use_custom_url(false);
+                app_data.set_db_cfg_test_status("".into());
+                app_data.set_db_cfg_test_result("".into());
+                show_toast_message(&ui, "Valores predeterminados restaurados en el formulario.");
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_open_db_config_folder(move || {
+            let path = crate::db::get_active_config_path();
+            let folder = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let folder_str = folder.display().to_string();
+
+            #[cfg(target_os = "linux")]
+            let _ = std::process::Command::new("xdg-open").arg(&folder_str).spawn();
+            #[cfg(target_os = "windows")]
+            let _ = std::process::Command::new("explorer").arg(&folder_str).spawn();
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(&folder_str).spawn();
+
+            if let Some(ui) = ui_weak.upgrade() {
+                show_toast_message(&ui, &format!("Ruta de configuración: {}", path.display()));
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_test_db_config(move |host, port, database, user, password, ssl_mode, connection_url| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_db_cfg_is_testing(true);
+                app_data.set_db_cfg_test_status("testing".into());
+                app_data.set_db_cfg_test_result("Verificando conexión con el servidor PostgreSQL...".into());
+
+                let port_num = port.trim().parse::<u16>().unwrap_or(5432);
+                let test_cfg = crate::db::DbConfig {
+                    host: host.trim().to_string(),
+                    port: port_num,
+                    database: database.trim().to_string(),
+                    user: user.trim().to_string(),
+                    password: password.to_string(),
+                    ssl_mode: if ssl_mode.trim().is_empty() { "disable".to_string() } else { ssl_mode.trim().to_string() },
+                    connection_url: connection_url.trim().to_string(),
+                };
+
+                let ui_weak_inner = ui_weak.clone();
+                thread::spawn(move || {
+                    let result = test_cfg.test_connection();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui_inner) = ui_weak_inner.upgrade() {
+                            let data = ui_inner.global::<AppData>();
+                            data.set_db_cfg_is_testing(false);
+                            match result {
+                                Ok(msg) => {
+                                    data.set_db_cfg_test_status("success".into());
+                                    data.set_db_cfg_test_result(msg.into());
+                                }
+                                Err(err) => {
+                                    data.set_db_cfg_test_status("error".into());
+                                    data.set_db_cfg_test_result(err.into());
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        let inhabiles_lock = imss_inhabiles.clone();
+        app_logic.on_save_db_config(move |host, port, database, user, password, ssl_mode, connection_url| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_db_cfg_is_saving(true);
+
+                let port_num = port.trim().parse::<u16>().unwrap_or(5432);
+                let new_cfg = crate::db::DbConfig {
+                    host: host.trim().to_string(),
+                    port: port_num,
+                    database: database.trim().to_string(),
+                    user: user.trim().to_string(),
+                    password: password.to_string(),
+                    ssl_mode: if ssl_mode.trim().is_empty() { "disable".to_string() } else { ssl_mode.trim().to_string() },
+                    connection_url: connection_url.trim().to_string(),
+                };
+
+                // 1. Guardar en disco persistente
+                match crate::db::update_active_config(new_cfg.clone()) {
+                    Ok(path) => {
+                        app_data.set_db_cfg_file_path(path.display().to_string().as_str().into());
+                        crate::app_logger::log_system_info(
+                            "Configuración BD",
+                            &format!("Credenciales guardadas exitosamente en '{}'", path.display()),
+                        );
+                    }
+                    Err(e) => {
+                        app_data.set_db_cfg_is_saving(false);
+                        app_data.set_db_cfg_test_status("error".into());
+                        app_data.set_db_cfg_test_result(format!("Error guardando archivo: {}", e).into());
+                        show_toast_message(&ui, &format!("Error al guardar configuración: {}", e));
+                        return;
+                    }
+                }
+
+                // 2. Reconectar pool e inicializar esquema
+                let ui_weak_inner = ui_weak.clone();
+                let inhabiles_inner = inhabiles_lock.clone();
+                thread::spawn(move || {
+                    let pool_res = crate::db::reload_global_pool(8);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui_inner) = ui_weak_inner.upgrade() {
+                            let data = ui_inner.global::<AppData>();
+                            data.set_db_cfg_is_saving(false);
+
+                            match pool_res {
+                                Ok(new_pool) => {
+                                    if let Ok(mut client) = new_pool.get() {
+                                        let _ = ensure_schema(&mut client);
+                                        if let Ok(set) = fetch_imss_inhabiles(&mut client) {
+                                            if let Ok(mut w) = inhabiles_inner.write() {
+                                                *w = set;
+                                            }
+                                        }
+                                    }
+
+                                    let diag = crate::db::diagnose_postgres();
+                                    data.set_db_connected(diag.is_connected);
+                                    data.set_db_status_text(diag.status_text.as_str().into());
+                                    data.set_db_status_detail(diag.detail_text.as_str().into());
+                                    data.set_db_cfg_test_status("success".into());
+                                    data.set_db_cfg_test_result("Configuración guardada y base de datos conectada con éxito.".into());
+
+                                    load_clientes_ui(&ui_inner, &new_pool);
+                                    update_global_stats(&ui_inner, &new_pool);
+
+                                    show_toast_message(&ui_inner, "Configuración guardada y base de datos conectada exitosamente.");
+                                }
+                                Err(err) => {
+                                    let diag = crate::db::diagnose_postgres();
+                                    data.set_db_connected(false);
+                                    data.set_db_status_text(diag.status_text.as_str().into());
+                                    data.set_db_status_detail(diag.detail_text.as_str().into());
+                                    data.set_db_cfg_test_status("error".into());
+                                    data.set_db_cfg_test_result(format!("Guardado en disco, pero no se pudo conectar: {}", err).into());
+                                    show_toast_message(&ui_inner, "Configuración guardada, pero falló la conexión con el servidor.");
+                                }
+                            }
+                        }
+                    });
+                });
             }
         });
     }
@@ -3532,6 +3748,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     8 => "Calendario",
                     9 => "Reporte Nóminas",
                     10 => "Carga Nóminas",
+                    11 => "Configuración Base de Datos",
                     _ => "Vista Desconocida",
                 };
 
@@ -3631,6 +3848,10 @@ fn main() -> Result<(), slint::PlatformError> {
 
                 if view_idx == 7 {
                     sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &rev_id);
+                }
+
+                if view_idx == 11 {
+                    populate_db_config_ui(&ui);
                 }
 
                 if view_idx == 8 {

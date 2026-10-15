@@ -1,0 +1,9 @@
+{
+  "host": "pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com",
+  "port": 19522,
+  "database": "firma_fiscal_acd",
+  "user": "avnadmin",
+  "password": "",
+  "ssl_mode": "require",
+  "connection_url": ""
+}
