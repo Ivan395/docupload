@@ -12,6 +12,7 @@ pub mod rustfs;
 pub mod reporte_view_logic;
 pub mod sat;
 pub mod sua_export;
+pub mod updater;
 pub mod validation;
 
 use crate::calendario_view_logic::*;
@@ -1750,10 +1751,30 @@ fn handle_cedulas_upload_and_inspect(
             }
         };
 
-        // Asignar a cada archivo el nombre generado en PostgreSQL (Cédula SUA <rp> - <mes>.pdf)
+        // Asignar a cada archivo su nombre (Cédula SUA <rp> - <mes>.pdf o nombre original si desambigua)
+        let mut seen_batch_names: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // gen_name -> hash
         for item in &mut items {
+            let data = fs::read(&item.local_path).unwrap_or_default();
+            let mut h = Sha256::new();
+            h.update(&data);
+            let item_hash = format!("{:x}", h.finalize());
+
             let gen_name = crate::cedulas::view_logic::extract_cedula_pdf_postgres_filename(&item.local_path, &r_reg);
-            item.rel_path = gen_name;
+            if let Some(prev_hash) = seen_batch_names.get(&gen_name) {
+                if *prev_hash != item_hash {
+                    // Contenido diferente: conservar el nombre original del archivo para no colisionar
+                    let orig_name = Path::new(&item.local_path)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| gen_name.clone());
+                    item.rel_path = orig_name;
+                } else {
+                    item.rel_path = gen_name;
+                }
+            } else {
+                seen_batch_names.insert(gen_name.clone(), item_hash);
+                item.rel_path = gen_name;
+            }
         }
 
         if items.is_empty() {
@@ -1767,7 +1788,7 @@ fn handle_cedulas_upload_and_inspect(
 
         let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&revision_id);
 
-        // 1. Obtener archivos existentes en RustFS para esta revisión
+        // 1. Obtener archivos existentes en RustFS estrictamente para esta revisión
         let existing_cards = crate::rustfs::sync_and_load_cedulas_view_files(
             &c_nom,
             &r_reg,
@@ -1796,7 +1817,7 @@ fn handle_cedulas_upload_and_inspect(
             });
         }
 
-        // 3. Consultar estado en PostgreSQL para esta revisión
+        // 3. Consultar estado en PostgreSQL para esta revisión específica
         let mut db_existing_liq_count = 0i64;
         if let Some(ref pool) = pool_clone {
             if let Ok(mut client) = pool.get() {
@@ -1811,7 +1832,7 @@ fn handle_cedulas_upload_and_inspect(
             }
         }
 
-        // 4. Comparar archivos ingresados contra existentes para detectar duplicados
+        // 4. Comparar archivos ingresados contra existentes en esta revisión para detectar duplicados
         let mut duplicates: Vec<(String, String)> = Vec::new(); // (incoming_file, matched_existing_file)
         let mut new_items: Vec<crate::archives::PreparedUploadItem> = Vec::new();
 
@@ -1835,7 +1856,7 @@ fn handle_cedulas_upload_and_inspect(
             if let Some(ex) = matched {
                 duplicates.push((item.rel_path.clone(), ex.rel_path.clone()));
             } else {
-                // Agregar temporalmente a existing_metas para evitar duplicados dentro del mismo lote
+                // Agregar temporalmente a existing_metas para evitar duplicados idénticos dentro del mismo lote
                 existing_metas.push(ExistingFileMeta {
                     rel_path: item.rel_path.clone(),
                     full_sha256: item_hash,
@@ -1847,9 +1868,20 @@ fn handle_cedulas_upload_and_inspect(
         let dup_count = duplicates.len();
         let new_count = new_items.len();
 
-        // 5. Subir únicamente los archivos nuevos a RustFS
+        // 5. Subir únicamente los archivos nuevos a RustFS bajo la revisión específica
         for item in &new_items {
             if let Ok(data) = fs::read(&item.local_path) {
+                if data.len() < 50 {
+                    let _ = crate::rustfs::upload_file_to_rustfs(
+                        &c_nom,
+                        &r_reg,
+                        &rev_nom,
+                        "Cedulas_de_cuotas",
+                        &format!("Trash/{}", item.rel_path),
+                        &data,
+                    );
+                    continue;
+                }
                 if let Err(e) = crate::rustfs::upload_file_to_rustfs(
                     &c_nom,
                     &r_reg,
@@ -2086,6 +2118,22 @@ fn spawn_cedulas_view_worker(
             progress_cb,
         ) {
             Ok((audit_res, businesses, mismatch_report)) => {
+                // Mover a Trash en RustFS todos los archivos que no se pudieron procesar
+                for bad_item in &mismatch_report.items {
+                    if let Err(e) = crate::rustfs::move_file_to_trash(
+                        &client_nombre,
+                        &rp_for_rustfs,
+                        &revision_nombre,
+                        "Cedulas_de_cuotas",
+                        &bad_item.filename,
+                    ) {
+                        log::warn!("No se pudo mover archivo {} a Trash en RustFS: {}", bad_item.filename, e);
+                    } else {
+                        log::info!("Archivo con error {} movido directamente a Trash en RustFS", bad_item.filename);
+                    }
+                    let local_cached = cache_dir.join(&bad_item.filename);
+                    let _ = std::fs::remove_file(&local_cached);
+                }
 
                 // Guardar en Base de Datos PostgreSQL
                 let mut db_saved_summary = String::new();
@@ -2121,11 +2169,15 @@ fn spawn_cedulas_view_worker(
                 let ui_final = ui_w.clone();
                 let session_final = session_w.clone();
                 let pool_stats = pool_w.clone();
+                let cache_dir_clone = cache_dir.clone();
+                let c_nom_clone = client_nombre.clone();
+                let rp_clone = rp_for_rustfs.clone();
+                let rev_clone = revision_nombre.clone();
 
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_final.upgrade() {
-                        let is_mismatch = audit_res.validos_sua == 0 || businesses.is_empty() || !mismatch_report.is_empty();
-                        if is_mismatch {
+                        let is_all_failed = audit_res.validos_sua == 0 || businesses.is_empty();
+                        if is_all_failed {
                             {
                                 let mut sess = session_final.lock().unwrap();
                                 reset_cedulas_ui_to_state_zero(&ui, &mut sess);
@@ -2149,7 +2201,7 @@ fn spawn_cedulas_view_worker(
                             app_data.set_cedulas_mismatch_expected_cliente(mismatch_report.expected_cliente.into());
                             app_data.set_cedulas_mismatch_title("Inconsistencias detectadas en Cédulas".into());
                             app_data.set_cedulas_mismatch_mensaje(
-                                "Los archivos de cédulas seleccionados no corresponden con el Registro Patronal o RFC de la empresa registrada en esta revisión.".into()
+                                "Los archivos de cédulas seleccionados no corresponden con el Registro Patronal o RFC de la empresa registrada en esta revisión (se enviaron a la papelera Trash).".into()
                             );
                             app_data.set_show_cedulas_client_mismatch_modal(true);
                             return;
@@ -2157,6 +2209,14 @@ fn spawn_cedulas_view_worker(
 
                         {
                             let mut sess = session_final.lock().unwrap();
+                            if let Ok(updated_cards) = crate::rustfs::sync_and_load_cedulas_view_files(
+                                &c_nom_clone,
+                                &rp_clone,
+                                &rev_clone,
+                                &cache_dir_clone,
+                            ) {
+                                sess.files = updated_cards;
+                            }
                             sess.audit_res = Some(audit_res);
                             sess.businesses = businesses;
                             sess.current_revision_id = Some(revision_id.clone());
@@ -2259,6 +2319,23 @@ fn spawn_cedulas_view_worker(
                 });
             }
             Err((err_msg, mismatch_report)) => {
+                // Mover a Trash en RustFS todos los archivos que no se pudieron procesar
+                for bad_item in &mismatch_report.items {
+                    if let Err(e) = crate::rustfs::move_file_to_trash(
+                        &client_nombre,
+                        &rp_for_rustfs,
+                        &revision_nombre,
+                        "Cedulas_de_cuotas",
+                        &bad_item.filename,
+                    ) {
+                        log::warn!("No se pudo mover archivo {} a Trash en RustFS: {}", bad_item.filename, e);
+                    } else {
+                        log::info!("Archivo con error {} movido directamente a Trash en RustFS", bad_item.filename);
+                    }
+                    let local_cached = cache_dir.join(&bad_item.filename);
+                    let _ = std::fs::remove_file(&local_cached);
+                }
+
                 let ui_err = ui_w.clone();
                 let session_err = session_w.clone();
                 let is_client_mismatch = err_msg.contains("CLIENT_MISMATCH") || err_msg.contains("no pertenecen a la empresa") || !mismatch_report.is_empty();
@@ -2288,7 +2365,7 @@ fn spawn_cedulas_view_worker(
                             app_data.set_cedulas_mismatch_expected_cliente(mismatch_report.expected_cliente.into());
                             app_data.set_cedulas_mismatch_title("Inconsistencias detectadas en Cédulas".into());
                             app_data.set_cedulas_mismatch_mensaje(
-                                "Los archivos de cédulas seleccionados no corresponden con el Registro Patronal o RFC de la empresa registrada.".into()
+                                "Los archivos de cédulas seleccionados no corresponden con el Registro Patronal o RFC de la empresa registrada (se enviaron a la papelera Trash).".into()
                             );
                             app_data.set_show_cedulas_client_mismatch_modal(true);
                         } else {
@@ -3942,7 +4019,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         Ok(_) => {
                             let client_nom = app_data.get_selected_cliente_nombre().to_string();
                             let rp_reg = app_data.get_selected_rp_registro().to_string();
-                            let rev_nom = item.nombre.clone();
+                            let rev_nom = item.nombre.trim().to_uppercase();
                             thread::spawn(move || {
                                 let _ = crate::rustfs::ensure_revision_structure(&client_nom, &rp_reg, &rev_nom);
                             });
@@ -5998,6 +6075,185 @@ fn main() -> Result<(), slint::PlatformError> {
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
+    }
+
+    // ==========================================
+    // SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS
+    // ==========================================
+    let downloaded_update_file: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let latest_update_info: Arc<Mutex<Option<crate::updater::UpdateInfo>>> = Arc::new(Mutex::new(None));
+
+    // Callback: Abrir modal de actualización
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_open_update_modal(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_update_modal(true);
+            }
+        });
+    }
+
+    // Callback: Cerrar modal de actualización
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_close_update_modal(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                if !app_data.get_update_downloading() {
+                    app_data.set_show_update_modal(false);
+                }
+            }
+        });
+    }
+
+    // Callback: Comprobar actualizaciones manualmente
+    {
+        let ui_weak = main_window.as_weak();
+        let update_info_store = latest_update_info.clone();
+        app_logic.on_check_for_updates(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_update_checking(true);
+            }
+            let ui_weak_thread = ui_weak.clone();
+            let store = update_info_store.clone();
+            std::thread::spawn(move || {
+                let res = crate::updater::check_for_updates();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_thread.upgrade() {
+                        let app_data = ui.global::<AppData>();
+                        app_data.set_update_checking(false);
+                        match res {
+                            Ok(Some(info)) => {
+                                app_data.set_update_available(true);
+                                app_data.set_update_version(info.tag_name.clone().into());
+                                app_data.set_update_notes(info.notes.clone().into());
+                                app_data.set_update_download_url(info.download_url.clone().into());
+                                app_data.set_update_asset_name(info.asset_name.clone().into());
+                                app_data.set_show_update_modal(true);
+                                *store.lock().unwrap() = Some(info);
+                            }
+                            Ok(None) => {
+                                show_toast_message(&ui, "Tu versión de DocuUpload ya está actualizada (v0.5.0)");
+                            }
+                            Err(e) => {
+                                show_toast_message(&ui, &format!("No se pudo verificar actualizaciones: {}", e));
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // Callback: Iniciar descarga de actualización
+    {
+        let ui_weak = main_window.as_weak();
+        let file_store = downloaded_update_file.clone();
+        let info_store = latest_update_info.clone();
+        app_logic.on_start_update_download(move || {
+            let (url, asset_name) = if let Some(info) = info_store.lock().unwrap().as_ref() {
+                (info.download_url.clone(), info.asset_name.clone())
+            } else if let Some(ui) = ui_weak.upgrade() {
+                let ad = ui.global::<AppData>();
+                (ad.get_update_download_url().to_string(), ad.get_update_asset_name().to_string())
+            } else {
+                return;
+            };
+
+            if url.is_empty() {
+                return;
+            }
+
+            if let Some(ui) = ui_weak.upgrade() {
+                let ad = ui.global::<AppData>();
+                ad.set_update_downloading(true);
+                ad.set_update_ready_to_install(false);
+                ad.set_update_progress(0.0);
+                ad.set_update_progress_text("0%".into());
+                ad.set_update_status_msg("Iniciando descarga...".into());
+            }
+
+            let ui_weak_thread = ui_weak.clone();
+            let store = file_store.clone();
+            std::thread::spawn(move || {
+                let ui_weak_progress = ui_weak_thread.clone();
+                let download_res = crate::updater::download_update_file(&url, &asset_name, move |frac, status| {
+                    let st = status.to_string();
+                    let ui_inner = ui_weak_progress.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_inner.upgrade() {
+                            let ad = ui.global::<AppData>();
+                            ad.set_update_progress(frac);
+                            ad.set_update_progress_text(format!("{:.0}%", frac * 100.0).into());
+                            ad.set_update_status_msg(st.into());
+                        }
+                    });
+                });
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_thread.upgrade() {
+                        let ad = ui.global::<AppData>();
+                        ad.set_update_downloading(false);
+                        match download_res {
+                            Ok(path) => {
+                                ad.set_update_ready_to_install(true);
+                                ad.set_update_progress(1.0);
+                                ad.set_update_status_msg("¡Descarga completada con éxito!".into());
+                                *store.lock().unwrap() = Some(path);
+                                show_toast_message(&ui, "✓ Actualización descargada correctamente. Lista para instalar.");
+                            }
+                            Err(e) => {
+                                ad.set_update_ready_to_install(false);
+                                ad.set_update_status_msg(format!("Error: {}", e).into());
+                                show_toast_message(&ui, &format!("Error al descargar actualización: {}", e));
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // Callback: Instalar actualización ahora
+    {
+        let ui_weak = main_window.as_weak();
+        let file_store = downloaded_update_file.clone();
+        app_logic.on_install_update_now(move || {
+            let path_opt = file_store.lock().unwrap().clone();
+            if let Some(path) = path_opt {
+                if let Err(e) = crate::updater::apply_update_now(&path) {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        show_toast_message(&ui, &format!("Error al aplicar actualización: {}", e));
+                    }
+                }
+            } else if let Some(ui) = ui_weak.upgrade() {
+                show_toast_message(&ui, "No se encontró el archivo de actualización para instalar");
+            }
+        });
+    }
+
+    // Verificación automática silenciosa en segundo plano al arrancar la aplicación
+    {
+        let ui_weak_startup = main_window.as_weak();
+        let store = latest_update_info.clone();
+        std::thread::spawn(move || {
+            // Esperar 3 segundos para que la UI termine de inicializarse suavemente
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if let Ok(Some(info)) = crate::updater::check_for_updates() {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_startup.upgrade() {
+                        let app_data = ui.global::<AppData>();
+                        app_data.set_update_available(true);
+                        app_data.set_update_version(info.tag_name.clone().into());
+                        app_data.set_update_notes(info.notes.clone().into());
+                        app_data.set_update_download_url(info.download_url.clone().into());
+                        app_data.set_update_asset_name(info.asset_name.clone().into());
+                        *store.lock().unwrap() = Some(info);
+                    }
+                });
             }
         });
     }

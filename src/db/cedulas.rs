@@ -461,6 +461,109 @@ pub fn resolve_business_context_for_revision(
     })
 }
 
+/// Compara si los renglones de detalle en la base de datos coinciden 100% de forma idéntica
+/// con los renglones que se intentan guardar. Si algo cambia (días, SDI, importes, claves, etc.),
+/// por muy mínimo que sea, retorna false.
+fn are_details_exact_match(db_rows: &[postgres::Row], incoming: &[crate::cedulas::employees::DataEmployee]) -> bool {
+    if db_rows.len() != incoming.len() {
+        return false;
+    }
+
+    let opt_str_eq = |a: Option<String>, b: Option<&str>| -> bool {
+        let ca = a.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+        let cb = b.map(|s| s.trim()).filter(|s| !s.is_empty());
+        match (ca, cb) {
+            (None, None) => true,
+            (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+            _ => false,
+        }
+    };
+
+    let opt_float_eq = |a: Option<f64>, b: Option<f64>| -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(x), Some(y)) => (x - y).abs() < 0.005,
+            (Some(x), None) => x.abs() < 0.005,
+            (None, Some(y)) => y.abs() < 0.005,
+        }
+    };
+
+    let opt_i16_eq = |a: Option<i16>, b: Option<f64>| -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(x), Some(y)) => (x as f64 - y).abs() < 0.005,
+            (Some(x), None) => x == 0,
+            (None, Some(y)) => y.abs() < 0.005,
+        }
+    };
+
+    let mut used = vec![false; db_rows.len()];
+
+    for inc in incoming {
+        let mut matched = false;
+        for (i, row) in db_rows.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+
+            let db_clave: Option<String> = row.get(0);
+            let db_fecha: Option<NaiveDate> = row.get(1);
+            let db_dias: Option<i16> = row.get(2);
+            let db_sdi: Option<f64> = row.get(3);
+            let db_lic: Option<f64> = row.get(4);
+            let db_inc: Option<f64> = row.get(5);
+            let db_aus: Option<f64> = row.get(6);
+            let db_cf: Option<f64> = row.get(7);
+            let db_exc_pat: Option<f64> = row.get(8);
+            let db_exc_obr: Option<f64> = row.get(9);
+            let db_pd_pat: Option<f64> = row.get(10);
+            let db_pd_obr: Option<f64> = row.get(11);
+            let db_gmp_pat: Option<f64> = row.get(12);
+            let db_gmp_obr: Option<f64> = row.get(13);
+            let db_rt: Option<f64> = row.get(14);
+            let db_iv_pat: Option<f64> = row.get(15);
+            let db_iv_obr: Option<f64> = row.get(16);
+            let db_gps: Option<f64> = row.get(17);
+            let db_pat: Option<f64> = row.get(18);
+            let db_obr: Option<f64> = row.get(19);
+            let db_sub: Option<f64> = row.get(20);
+
+            if opt_str_eq(db_clave, inc.clave.as_deref())
+                && db_fecha == inc.fecha
+                && opt_i16_eq(db_dias, inc.dias)
+                && opt_float_eq(db_sdi, inc.sdi)
+                && opt_float_eq(db_lic, inc.lic)
+                && opt_float_eq(db_inc, inc.inc)
+                && opt_float_eq(db_aus, inc.aus)
+                && opt_float_eq(db_cf, inc.cf)
+                && opt_float_eq(db_exc_pat, inc.exc_pat)
+                && opt_float_eq(db_exc_obr, inc.exc_obr)
+                && opt_float_eq(db_pd_pat, inc.pd_pat)
+                && opt_float_eq(db_pd_obr, inc.pd_obr)
+                && opt_float_eq(db_gmp_pat, inc.gmp_pat)
+                && opt_float_eq(db_gmp_obr, inc.gmp_obr)
+                && opt_float_eq(db_rt, inc.rt)
+                && opt_float_eq(db_iv_pat, inc.iv_pat)
+                && opt_float_eq(db_iv_obr, inc.iv_obr)
+                && opt_float_eq(db_gps, inc.gps)
+                && opt_float_eq(db_pat, inc.patronal)
+                && opt_float_eq(db_obr, inc.obrera)
+                && opt_float_eq(db_sub, inc.subtotal)
+            {
+                used[i] = true;
+                matched = true;
+                break;
+            }
+        }
+
+        if !matched {
+            return false;
+        }
+    }
+
+    true
+}
+
 pub fn save_single_cedula_employee_tx(
     tx: &mut Transaction,
     emp: &CedulaEmployee,
@@ -669,41 +772,61 @@ pub fn save_single_cedula_employee_tx(
 
     let nombre_arch = format!("Cédula SUA {} - {}.pdf", ctx.reg_11, mes_norm);
 
-    // Evitar duplicados: verificar si ya existe liquidación para este empleado en esta revisión y período
-    let existing_liq = tx.query_opt(
+    // Evitar duplicados: consultar todas las liquidaciones existentes para este empleado, revisión y período
+    let existing_liqs = tx.query(
         r#"
         SELECT id FROM public.liquidaciones
         WHERE id_revision = $1 AND id_empleado = $2 AND mes_periodo = $3 AND anio_periodo = $4
-        LIMIT 1
         "#,
         &[&ctx.id_revision, &id_empleado, &mes_norm, &anio_norm],
     )?;
 
-    let (id_liquidacion, _is_new_liq) = match existing_liq {
-        Some(row) => (row.get::<_, Uuid>(0), false),
-        None => {
-            let id_liq = Uuid::now_v7();
-            tx.execute(
-                r#"
-                INSERT INTO public.liquidaciones (
-                    id, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6
-                )
-                "#,
-                &[
-                    &id_liq,
-                    &ctx.id_revision,
-                    &id_empleado,
-                    &mes_norm,
-                    &anio_norm,
-                    &truncate_str(Some(&nombre_arch), 350),
-                ],
-            )?;
-            liquidaciones_count += 1;
-            (id_liq, true)
+    // Verificar si alguna liquidación existente coincide 100% de manera idéntica en todos sus renglones de detalle
+    let mut found_exact_duplicate = false;
+    for row in &existing_liqs {
+        let ex_id: Uuid = row.get(0);
+        let det_rows = tx.query(
+            r#"
+            SELECT clave, fecha, dias, sdi, lic, inc, aus, cf,
+                   exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr,
+                   rt, iv_pat, iv_obr, gps, patronal, obrera, subtotal
+            FROM public.detalles_liquidaciones
+            WHERE id_liquidacion = $1
+            "#,
+            &[&ex_id],
+        )?;
+
+        if are_details_exact_match(&det_rows, &emp.data_employee) {
+            found_exact_duplicate = true;
+            break;
         }
-    };
+    }
+
+    // Si todo es exactamente lo mismo, no guardar duplicados
+    if found_exact_duplicate {
+        return Ok((empleados_count, 0, 0, 0, 0));
+    }
+
+    // Si no existe o algo cambió (por muy mínimo que sea), guardarlo
+    let id_liquidacion = Uuid::now_v7();
+    tx.execute(
+        r#"
+        INSERT INTO public.liquidaciones (
+            id, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6
+        )
+        "#,
+        &[
+            &id_liquidacion,
+            &ctx.id_revision,
+            &id_empleado,
+            &mes_norm,
+            &anio_norm,
+            &truncate_str(Some(&nombre_arch), 350),
+        ],
+    )?;
+    liquidaciones_count += 1;
 
     // Determinar si la liquidación cae dentro de los años y meses de las obras de la revisión
     let obra_dates = tx.query(
@@ -752,55 +875,84 @@ pub fn save_single_cedula_employee_tx(
     };
 
     let id_rep_liq_opt = if should_mirror {
-        let rep_opt = tx.query_opt(
-            "SELECT id FROM public.reportes_liquidaciones WHERE id_liquidacion = $1 LIMIT 1",
-            &[&id_liquidacion],
+        let new_id = Uuid::now_v7();
+        tx.execute(
+            r#"
+            INSERT INTO public.reportes_liquidaciones (
+                id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7
+            )
+            "#,
+            &[
+                &new_id,
+                &id_liquidacion,
+                &ctx.id_revision,
+                &id_empleado,
+                &mes_norm,
+                &anio_norm,
+                &truncate_str(Some(&nombre_arch), 350),
+            ],
         )?;
-        let id_rep = match rep_opt {
-            Some(r) => r.get(0),
-            None => {
-                let new_id = Uuid::now_v7();
-                tx.execute(
-                    r#"
-                    INSERT INTO public.reportes_liquidaciones (
-                        id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7
-                    )
-                    "#,
-                    &[
-                        &new_id,
-                        &id_liquidacion,
-                        &ctx.id_revision,
-                        &id_empleado,
-                        &mes_norm,
-                        &anio_norm,
-                        &truncate_str(Some(&nombre_arch), 350),
-                    ],
-                )?;
-                new_id
-            }
-        };
-        Some(id_rep)
+        Some(new_id)
     } else {
         None
     };
 
-    // Detalles Liquidación: insertar solo si no existen previamente para esta liquidación
-    let existing_det_count: i64 = tx.query_one(
-        "SELECT COUNT(*) FROM public.detalles_liquidaciones WHERE id_liquidacion = $1",
-        &[&id_liquidacion],
-    )?.get(0);
+    // Detalles Liquidación
+    for de in &emp.data_employee {
+        let id_det = Uuid::now_v7();
+        let dias_det = de.dias.map(|d| d as i16);
 
-    if existing_det_count == 0 {
+        tx.execute(
+            r#"
+            INSERT INTO public.detalles_liquidaciones (
+                id, id_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
+                exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
+                gps, patronal, obrera, subtotal
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+            )
+            "#,
+            &[
+                &id_det,
+                &id_liquidacion,
+                &truncate_str(de.clave.as_deref(), 17),
+                &de.fecha,
+                &dias_det,
+                &de.sdi,
+                &de.lic,
+                &de.inc,
+                &de.aus,
+                &de.cf,
+                &de.exc_pat,
+                &de.exc_obr,
+                &de.pd_pat,
+                &de.pd_obr,
+                &de.gmp_pat,
+                &de.gmp_obr,
+                &de.rt,
+                &de.iv_pat,
+                &de.iv_obr,
+                &de.gps,
+                &de.patronal,
+                &de.obrera,
+                &de.subtotal,
+            ],
+        )?;
+
+        detalles_count += 1;
+    }
+
+    // Mirror to reportes_detalles_liquidaciones si aplica por filtro de fechas
+    if let Some(id_rep_liq) = id_rep_liq_opt {
         for de in &emp.data_employee {
-            let id_det = Uuid::now_v7();
+            let id_rep_det = Uuid::now_v7();
             let dias_det = de.dias.map(|d| d as i16);
-
             tx.execute(
                 r#"
-                INSERT INTO public.detalles_liquidaciones (
-                    id, id_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
+                INSERT INTO public.reportes_detalles_liquidaciones (
+                    id, id_reporte_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
                     exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
                     gps, patronal, obrera, subtotal
                 ) VALUES (
@@ -808,8 +960,8 @@ pub fn save_single_cedula_employee_tx(
                 )
                 "#,
                 &[
-                    &id_det,
-                    &id_liquidacion,
+                    &id_rep_det,
+                    &id_rep_liq,
                     &truncate_str(de.clave.as_deref(), 17),
                     &de.fecha,
                     &dias_det,
@@ -833,59 +985,6 @@ pub fn save_single_cedula_employee_tx(
                     &de.subtotal,
                 ],
             )?;
-
-            detalles_count += 1;
-        }
-    }
-
-    // Mirror to reportes_detalles_liquidaciones si aplica por filtro de fechas
-    if let Some(id_rep_liq) = id_rep_liq_opt {
-        let rep_det_count: i64 = tx.query_one(
-            "SELECT COUNT(*) FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion = $1",
-            &[&id_rep_liq],
-        )?.get(0);
-
-        if rep_det_count == 0 {
-            for de in &emp.data_employee {
-                let id_rep_det = Uuid::now_v7();
-                let dias_det = de.dias.map(|d| d as i16);
-                tx.execute(
-                    r#"
-                    INSERT INTO public.reportes_detalles_liquidaciones (
-                        id, id_reporte_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
-                        exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
-                        gps, patronal, obrera, subtotal
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
-                    )
-                    "#,
-                    &[
-                        &id_rep_det,
-                        &id_rep_liq,
-                        &truncate_str(de.clave.as_deref(), 17),
-                        &de.fecha,
-                        &dias_det,
-                        &de.sdi,
-                        &de.lic,
-                        &de.inc,
-                        &de.aus,
-                        &de.cf,
-                        &de.exc_pat,
-                        &de.exc_obr,
-                        &de.pd_pat,
-                        &de.pd_obr,
-                        &de.gmp_pat,
-                        &de.gmp_obr,
-                        &de.rt,
-                        &de.iv_pat,
-                        &de.iv_obr,
-                        &de.gps,
-                        &de.patronal,
-                        &de.obrera,
-                        &de.subtotal,
-                    ],
-                )?;
-            }
         }
     }
 

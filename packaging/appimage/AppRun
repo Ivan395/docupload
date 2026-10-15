@@ -7,4 +7,8 @@ export PATH="${HERE}/usr/bin:${PATH}"
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS}"
 
+if [ -d "${HERE}/etc/fonts" ]; then
+    export FONTCONFIG_PATH="${HERE}/etc/fonts:${FONTCONFIG_PATH}"
+fi
+
 exec "${HERE}/usr/bin/docu_ffacd" "$@"

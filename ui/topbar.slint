@@ -116,8 +116,80 @@ export component TopBar inherits Rectangle {
 
         // Derecha: Quick Info, DB Status, Usuario
         HorizontalLayout {
-            spacing: 16px;
+            spacing: 12px;
             alignment: center;
+
+            // Botón / Indicador de Actualización Disponible
+            if AppData.update_available : Rectangle {
+                height: 32px;
+                border-radius: 16px;
+                background: update_badge_touch.has-hover ? #dbeafe : #eff6ff;
+                border-width: 1.5px;
+                border-color: #3b82f6;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 6px;
+                    alignment: center;
+
+                    Text {
+                        text: "🚀";
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "Actualización " + AppData.update_version + " disponible";
+                        font-size: 12px;
+                        font-weight: 800;
+                        color: #1d4ed8;
+                        vertical-alignment: center;
+                    }
+                }
+
+                update_badge_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { AppLogic.open_update_modal(); }
+                }
+            }
+
+            // Botón manual de comprobación de actualizaciones
+            Rectangle {
+                height: 30px;
+                border-radius: 6px;
+                background: btn_check_touch.has-hover ? #f1f5f9 : transparent;
+                border-width: 1px;
+                border-color: btn_check_touch.has-hover ? #cbd5e1 : #e2e8f0;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 6px;
+                    alignment: center;
+
+                    Text {
+                        text: AppData.update_checking ? "⏳" : "🔄";
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: AppData.update_checking ? "Buscando..." : "Actualizaciones";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: #475569;
+                        vertical-alignment: center;
+                    }
+                }
+
+                btn_check_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        if !AppData.update_checking {
+                            AppLogic.check_for_updates();
+                        }
+                    }
+                }
+            }
 
             // DB Sincronizada badge
             Rectangle {

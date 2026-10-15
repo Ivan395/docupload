@@ -805,6 +805,23 @@ export global AppData {
     in-out property <string> toast_icon: "ℹ";
 
     // ==========================================
+    // SISTEMA DE ACTUALIZACIÓN AUTOMÁTICA
+    // ==========================================
+    in-out property <bool> update_available: false;
+    in-out property <string> update_version: "";
+    in-out property <string> update_current_version: "v0.5.0";
+    in-out property <string> update_notes: "";
+    in-out property <string> update_download_url: "";
+    in-out property <string> update_asset_name: "";
+    in-out property <bool> show_update_modal: false;
+    in-out property <bool> update_checking: false;
+    in-out property <bool> update_downloading: false;
+    in-out property <float> update_progress: 0.0;
+    in-out property <string> update_progress_text: "0%";
+    in-out property <string> update_status_msg: "";
+    in-out property <bool> update_ready_to_install: false;
+
+    // ==========================================
     // CÉDULA DE DETERMINACIÓN DE CUOTAS (SUA)
     // ==========================================
     // Estado de la vista: 0 = En blanco / Solo subir, 1 = Archivos seleccionados / Por guardar, 2 = Procesado y Guardado en BD
@@ -1570,4 +1587,11 @@ callback recargar_cedulas_view();
     callback nominas_faltantes_toggle_all(bool);
     callback nominas_faltantes_crear_individual(int);
     callback nominas_faltantes_crear_masivo();
+
+    // Actualizaciones de Software
+    callback check_for_updates();
+    callback open_update_modal();
+    callback close_update_modal();
+    callback start_update_download();
+    callback install_update_now();
 }

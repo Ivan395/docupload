@@ -225,6 +225,7 @@ pub fn inspect_cedula_file(path: &Path) -> CedulaFileCardInfo {
             Ok(raw_text) => {
                 let trimmed = raw_text.trim();
                 let lower = raw_text.to_lowercase();
+                let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
                 let is_sua = lower.contains("cédula de determinación de cuotas")
                     || lower.contains("cedula de determinacion de cuotas")
                     || lower.contains("sistema único de autodeterminación")
@@ -247,14 +248,23 @@ pub fn inspect_cedula_file(path: &Path) -> CedulaFileCardInfo {
                         true,
                         "Sin capa de texto vectorial OCR (escaneo)".to_string(),
                     )
+                } else if is_ema {
+                    (
+                        "Propuesta IMSS (EMA)".to_string(),
+                        pages_label,
+                        "Válido EMA".to_string(),
+                        true,
+                        false,
+                        String::new(),
+                    )
                 } else if !is_sua {
                     (
                         "PDF No Oficial".to_string(),
                         pages_label,
-                        "No Corresponde SUA".to_string(),
+                        "No Corresponde SUA/EMA".to_string(),
                         false,
                         true,
-                        "El encabezado no corresponde a Cédula SUA oficial".to_string(),
+                        "El encabezado no corresponde a Cédula SUA ni EMA oficial".to_string(),
                     )
                 } else {
                     (
@@ -312,6 +322,47 @@ pub fn inspect_cedula_file_with_context(
     let mut card = inspect_cedula_file(path);
     if card.status_is_valid {
         if let Ok(raw_text) = extract_with_layout(path) {
+            // Caso EMA
+            if crate::cedulas::ema::is_ema_document(&raw_text) {
+                if let Some(target_rp) = expected_rp {
+                    let clean_t = canonical_reg(target_rp);
+                    if !clean_t.is_empty() && clean_t != "GENERAL" {
+                        if let Some(ema_rp) = crate::cedulas::ema::extract_ema_rp(&raw_text) {
+                            let clean_found = canonical_reg(&ema_rp);
+                            if !clean_found.is_empty() && clean_found != clean_t {
+                                card.has_warning = true;
+                                card.warning_msg = format!(
+                                    "Registro Patronal EMA '{}' no coincide con el de la revisión ('{}')",
+                                    ema_rp, target_rp
+                                );
+                            }
+                        }
+                    }
+                }
+                if let Some(target_rfc) = expected_rfc {
+                    let clean_t: String = target_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
+                    if !clean_t.is_empty() {
+                        if let Some(ema_rfc) = crate::cedulas::ema::extract_ema_rfc(&raw_text) {
+                            let clean_b: String = ema_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
+                            if !clean_b.is_empty() && clean_b != clean_t {
+                                card.has_warning = true;
+                                let rfc_msg = format!(
+                                    "RFC EMA '{}' no coincide con el RFC registrado ('{}')",
+                                    ema_rfc, target_rfc
+                                );
+                                if card.warning_msg.is_empty() {
+                                    card.warning_msg = rfc_msg;
+                                } else {
+                                    card.warning_msg = format!("{} | {}", card.warning_msg, rfc_msg);
+                                }
+                            }
+                        }
+                    }
+                }
+                return card;
+            }
+
+            // Caso Cédula SUA tradicional
             if let Ok(p) = crate::cedulas::regex_expressions::initialize_patterns() {
                 let cleaned = clean_text(&raw_text.to_lowercase(), &p);
                 // Validar Registro Patronal
@@ -367,6 +418,24 @@ pub fn inspect_cedula_file_with_context(
 /// Extrae el nombre estandarizado de Cédula tal como se genera en PostgreSQL public.liquidaciones.nombre_archivo:
 /// "Cédula SUA <registro_patronal> - <mes>.pdf".
 pub fn extract_cedula_pdf_postgres_filename(path: &Path, default_rp: &str) -> String {
+    let fname = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cedula.pdf".to_string());
+
+    let raw_text = match extract_with_layout(path) {
+        Ok(t) => t,
+        Err(_) => return fname,
+    };
+
+    // Caso 1: Documento EMA
+    if crate::cedulas::ema::is_ema_document(&raw_text) {
+        if let Some(ema_name) = crate::cedulas::ema::extract_ema_postgres_filename(&raw_text, default_rp) {
+            return ema_name;
+        }
+    }
+
+    // Caso 2: Cédula SUA tradicional
     let patterns = crate::cedulas::regex_expressions::initialize_patterns().ok();
     let default_reg = if default_rp.is_empty() || default_rp == "GENERAL" {
         "00000000000"
@@ -374,7 +443,7 @@ pub fn extract_cedula_pdf_postgres_filename(path: &Path, default_rp: &str) -> St
         default_rp
     };
 
-    if let (Some(ref patterns), Ok(raw_text)) = (patterns.as_ref(), extract_with_layout(path)) {
+    if let Some(ref patterns) = patterns {
         let cleaned = clean_text(&raw_text.to_lowercase(), patterns);
         let mut rp_found = None;
         let mut mes_found = None;
@@ -402,12 +471,12 @@ pub fn extract_cedula_pdf_postgres_filename(path: &Path, default_rp: &str) -> St
             }
         }
 
-        let final_rp = rp_found.as_deref().unwrap_or(default_reg);
-        let final_mes = mes_found.as_deref().unwrap_or("ENERO");
-        return format!("Cédula SUA {} - {}.pdf", final_rp, final_mes);
+        if let Some(mes) = mes_found {
+            let final_rp = rp_found.as_deref().unwrap_or(default_reg);
+            return format!("Cédula SUA {} - {}.pdf", final_rp, mes);
+        }
     }
 
-    let fname = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "cedula.pdf".to_string());
     if fname.to_lowercase().ends_with(".pdf") {
         fname
     } else {
@@ -511,6 +580,7 @@ pub fn process_and_audit_cedulas(
             }
         };
 
+        let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
         let lower = raw_text.to_lowercase();
         let is_sua = lower.contains("cédula de determinación de cuotas")
             || lower.contains("cedula de determinacion de cuotas")
@@ -518,101 +588,121 @@ pub fn process_and_audit_cedulas(
             || lower.contains("sistema unico de autodeterminacion")
             || (lower.contains("registro patronal") && (lower.contains("delegación imss") || lower.contains("delegacion imss")));
 
-        if !is_sua || raw_text.trim().len() < 50 {
+        if (!is_sua && !is_ema) || raw_text.trim().len() < 50 {
             no_procesados += 1;
             mismatch_report.items.push(CedulaMismatchItem {
                 filename: file_display_name,
                 error_type: "Formato no válido".to_string(),
-                expected_val: "Cédula SUA oficial (PDF Vectorial)".to_string(),
-                found_val: "Sin formato SUA / Escaneo raster".to_string(),
-                details: "El archivo no contiene el encabezado oficial de Cédula de Cuotas SUA o carece de capa de texto OCR vectorial.".to_string(),
+                expected_val: "Cédula SUA o Propuesta EMA oficial (PDF Vectorial)".to_string(),
+                found_val: "Sin formato SUA/EMA / Escaneo raster".to_string(),
+                details: "El archivo no contiene el encabezado oficial de Cédula de Cuotas SUA / EMA o carece de capa de texto OCR vectorial.".to_string(),
             });
             continue;
         }
 
-        // Dividir en páginas y normalizar/limpiar cada página
-        let mut pages: Vec<String> = raw_text.split('\x0c').map(|s| s.to_string()).collect();
-        if let Some(last) = pages.last() {
-            if last.trim().is_empty() {
-                pages.pop();
-            }
-        }
-
-        for page in &mut pages {
-            *page = clean_text(&page.to_lowercase(), &patterns);
-        }
-
         let mut pdf_sections: Vec<(Business, Vec<Employee>)> = Vec::new();
-        let mut current_biz = Business::new();
-        let mut current_emps = Vec::new();
 
-        for page in &pages {
-            let header_positions: Vec<usize> = patterns
-                .business_registro_patronal
-                .find_iter(page)
-                .filter_map(|m| m.ok().map(|mat| mat.start()))
-                .collect();
-
-            let chunks: Vec<&str> = if header_positions.len() > 1 {
-                let mut chs = Vec::new();
-                for i in 0..header_positions.len() {
-                    let start = if i == 0 { 0 } else { header_positions[i] };
-                    let end = if i + 1 < header_positions.len() { header_positions[i + 1] } else { page.len() };
-                    chs.push(&page[start..end]);
+        if is_ema {
+            match crate::cedulas::ema::parse_ema_document(&raw_text, &file_display_name) {
+                Ok((biz, emps)) => {
+                    pdf_sections.push((biz, emps));
                 }
-                chs
-            } else {
-                vec![page.as_str()]
-            };
-
-            for chunk in chunks {
-                let mut chunk_biz = Business::new();
-                chunk_biz.extract_from_page(chunk, &patterns);
-
-                let has_new_reg = match (&chunk_biz.registro_patronal, &current_biz.registro_patronal) {
-                    (Some(new_r), Some(curr_r)) => canonical_reg(new_r) != canonical_reg(curr_r),
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-
-                let has_new_razon = match (&chunk_biz.razon_social, &current_biz.razon_social) {
-                    (Some(new_rz), Some(curr_rz)) => canonical_razon(new_rz) != canonical_razon(curr_rz),
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-
-                let is_new_section = (has_new_reg || has_new_razon)
-                    && (current_biz.registro_patronal.is_some() || current_biz.razon_social.is_some());
-
-                if is_new_section {
-                    if !current_emps.is_empty() {
-                        pdf_sections.push((current_biz.clone(), current_emps));
-                        current_emps = Vec::new();
-                    }
-                    let mut new_biz = chunk_biz.clone();
-                    if new_biz.razon_social.is_none() {
-                        new_biz.razon_social = current_biz.razon_social.clone();
-                    }
-                    if new_biz.delegacion.is_none() {
-                        new_biz.delegacion = current_biz.delegacion.clone();
-                        new_biz.codigo_delegacion = current_biz.codigo_delegacion.clone();
-                    }
-                    if new_biz.subdelegacion.is_none() {
-                        new_biz.subdelegacion = current_biz.subdelegacion.clone();
-                        new_biz.codigo_subdelegacion = current_biz.codigo_subdelegacion.clone();
-                    }
-                    current_biz = new_biz;
-                } else {
-                    current_biz.merge_with(&chunk_biz, &file_display_name);
+                Err(err_msg) => {
+                    no_procesados += 1;
+                    mismatch_report.items.push(CedulaMismatchItem {
+                        filename: file_display_name,
+                        error_type: "Sin trabajadores".to_string(),
+                        expected_val: "Renglones de trabajadores cotizantes EMA".to_string(),
+                        found_val: "0 trabajadores detectados".to_string(),
+                        details: err_msg,
+                    });
+                    continue;
                 }
-
-                let emps = get_employee_data(chunk, &patterns);
-                current_emps.extend(emps);
             }
-        }
+        } else {
+            // Dividir en páginas y normalizar/limpiar cada página
+            let mut pages: Vec<String> = raw_text.split('\x0c').map(|s| s.to_string()).collect();
+            if let Some(last) = pages.last() {
+                if last.trim().is_empty() {
+                    pages.pop();
+                }
+            }
 
-        if !current_emps.is_empty() {
-            pdf_sections.push((current_biz, current_emps));
+            for page in &mut pages {
+                *page = clean_text(&page.to_lowercase(), &patterns);
+            }
+
+            let mut current_biz = Business::new();
+            let mut current_emps = Vec::new();
+
+            for page in &pages {
+                let header_positions: Vec<usize> = patterns
+                    .business_registro_patronal
+                    .find_iter(page)
+                    .filter_map(|m| m.ok().map(|mat| mat.start()))
+                    .collect();
+
+                let chunks: Vec<&str> = if header_positions.len() > 1 {
+                    let mut chs = Vec::new();
+                    for i in 0..header_positions.len() {
+                        let start = if i == 0 { 0 } else { header_positions[i] };
+                        let end = if i + 1 < header_positions.len() { header_positions[i + 1] } else { page.len() };
+                        chs.push(&page[start..end]);
+                    }
+                    chs
+                } else {
+                    vec![page.as_str()]
+                };
+
+                for chunk in chunks {
+                    let mut chunk_biz = Business::new();
+                    chunk_biz.extract_from_page(chunk, &patterns);
+
+                    let has_new_reg = match (&chunk_biz.registro_patronal, &current_biz.registro_patronal) {
+                        (Some(new_r), Some(curr_r)) => canonical_reg(new_r) != canonical_reg(curr_r),
+                        (Some(_), None) => true,
+                        _ => false,
+                    };
+
+                    let has_new_razon = match (&chunk_biz.razon_social, &current_biz.razon_social) {
+                        (Some(new_rz), Some(curr_rz)) => canonical_razon(new_rz) != canonical_razon(curr_rz),
+                        (Some(_), None) => true,
+                        _ => false,
+                    };
+
+                    let is_new_section = (has_new_reg || has_new_razon)
+                        && (current_biz.registro_patronal.is_some() || current_biz.razon_social.is_some());
+
+                    if is_new_section {
+                        if !current_emps.is_empty() {
+                            pdf_sections.push((current_biz.clone(), current_emps));
+                            current_emps = Vec::new();
+                        }
+                        let mut new_biz = chunk_biz.clone();
+                        if new_biz.razon_social.is_none() {
+                            new_biz.razon_social = current_biz.razon_social.clone();
+                        }
+                        if new_biz.delegacion.is_none() {
+                            new_biz.delegacion = current_biz.delegacion.clone();
+                            new_biz.codigo_delegacion = current_biz.codigo_delegacion.clone();
+                        }
+                        if new_biz.subdelegacion.is_none() {
+                            new_biz.subdelegacion = current_biz.subdelegacion.clone();
+                            new_biz.codigo_subdelegacion = current_biz.codigo_subdelegacion.clone();
+                        }
+                        current_biz = new_biz;
+                    } else {
+                        current_biz.merge_with(&chunk_biz, &file_display_name);
+                    }
+
+                    let emps = get_employee_data(chunk, &patterns);
+                    current_emps.extend(emps);
+                }
+            }
+
+            if !current_emps.is_empty() {
+                pdf_sections.push((current_biz, current_emps));
+            }
         }
 
         if pdf_sections.is_empty() || pdf_sections.iter().all(|(_, emps)| emps.is_empty()) {

@@ -183,7 +183,40 @@ pub fn process_cedulas(
                     });
                 }
 
-                // 3. Check for SUA cédula header markers
+                // 3. Check for EMA or SUA cédula header markers
+                if crate::cedulas::ema::is_ema_document(&raw_text) {
+                    match crate::cedulas::ema::parse_ema_document(&raw_text, &file_display_name) {
+                        Ok((biz, emps)) => {
+                            valid_counter.fetch_add(1, Ordering::Relaxed);
+                            let cur = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            let val = valid_counter.load(Ordering::Relaxed);
+                            let rem = total_files.saturating_sub(cur);
+                            progress_callback(
+                                cur,
+                                total_files,
+                                &format!("{}/{} analizadas ({} válidas SUA/EMA | Faltan {})", cur, total_files, val, rem),
+                            );
+                            return Ok((file_display_name, vec![(biz, emps)]));
+                        }
+                        Err(e) => {
+                            invalid_counter.fetch_add(1, Ordering::Relaxed);
+                            let cur = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            let val = valid_counter.load(Ordering::Relaxed);
+                            let rem = total_files.saturating_sub(cur);
+                            progress_callback(cur, total_files, &format!("{}/{} analizadas ({} válidas | Faltan {})", cur, total_files, val, rem));
+                            return Err(UnprocessedCedula {
+                                filename: file_display_name,
+                                registro_patronal: "N/D".to_string(),
+                                razon_social: "N/D".to_string(),
+                                identifier: "DOCUMENTO EMA".to_string(),
+                                periodo: "N/D".to_string(),
+                                category: "ERROR PARSEO EMA".to_string(),
+                                reason: e,
+                            });
+                        }
+                    }
+                }
+
                 let text_lower = raw_text.to_lowercase();
                 let is_sua_cedula = text_lower.contains("cédula de determinación de cuotas")
                     || text_lower.contains("cedula de determinacion de cuotas")
@@ -203,8 +236,8 @@ pub fn process_cedulas(
                         razon_social: "N/D".to_string(),
                         identifier: "DOCUMENTO".to_string(),
                         periodo: "N/D".to_string(),
-                        category: "NO CORRESPONDE A SUA".to_string(),
-                        reason: "El documento no corresponde al formato oficial de Cédula de Determinación de Cuotas del SUA (faltan encabezados)".to_string(),
+                        category: "NO CORRESPONDE A SUA/EMA".to_string(),
+                        reason: "El documento no corresponde al formato oficial de Cédula de Determinación de Cuotas del SUA ni EMA (faltan encabezados)".to_string(),
                     });
                 }
 
