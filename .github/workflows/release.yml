@@ -23,7 +23,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y rpm zstd libfontconfig1-dev libfreetype6-dev libx11-dev libxext-dev libxrender-dev
+          sudo apt-get install -y rpm zstd libfontconfig1-dev libfreetype6-dev libx11-dev libxext-dev libxrender-dev libfuse2
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -39,10 +39,9 @@ jobs:
 
       - name: Build Linux AppImage (.AppImage)
         run: |
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage -O appimagetool
-          chmod +x appimagetool
           mkdir -p target
-          mv appimagetool target/appimagetool
+          curl -fsSL https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o target/appimagetool
+          chmod +x target/appimagetool
           ./packaging/appimage/build_appimage.sh
 
       - name: Upload Linux Artifacts
@@ -61,6 +60,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress
+
       - name: Build release binary
         run: cargo build --release --locked
 
@@ -76,7 +78,7 @@ jobs:
 
   build-macos:
     name: Build macOS Packages (.app & .dmg)
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
