@@ -191,17 +191,17 @@ export component TopBar inherits Rectangle {
                 }
             }
 
-            // DB Sincronizada badge
+            // DB Sincronizada badge (Verificación dinámica en tiempo real)
             Rectangle {
                 height: 30px;
                 border-radius: 15px;
-                background: #ecfdf5;
+                background: AppData.db_connected ? #ecfdf5 : #fef2f2;
                 border-width: 1px;
-                border-color: #a7f3d0;
+                border-color: AppData.db_connected ? #a7f3d0 : #fecaca;
 
                 HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
+                    padding-left: 12px;
+                    padding-right: 12px;
                     spacing: 6px;
                     alignment: center;
 
@@ -209,15 +209,22 @@ export component TopBar inherits Rectangle {
                         width: 7px;
                         height: 7px;
                         border-radius: 3.5px;
-                        background: #059669;
+                        background: AppData.db_connected ? #059669 : #dc2626;
                         y: (parent.height - self.height) / 2;
                     }
                     Text {
-                        text: "DB Sincronizada";
+                        text: AppData.db_status_text;
                         font-size: 12px;
                         font-weight: 700;
-                        color: #065f46;
+                        color: AppData.db_connected ? #065f46 : #991b1b;
                         vertical-alignment: center;
+                    }
+                }
+
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppLogic.db_status_clicked();
                     }
                 }
             }

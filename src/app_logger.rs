@@ -99,10 +99,46 @@ pub fn init_app_logger() {
 }
 
 fn get_log_dir() -> PathBuf {
-    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    dir.push("logs");
-    let _ = fs::create_dir_all(&dir);
-    dir
+    // 1. Intentar en la subcarpeta ./logs del directorio de trabajo actual (ideal para modo portable o desarrollo)
+    if let Ok(current) = std::env::current_dir() {
+        let local_logs = current.join("logs");
+        if fs::create_dir_all(&local_logs).is_ok() {
+            let test_file = local_logs.join(".write_test");
+            if File::create(&test_file).and_then(|_| fs::remove_file(&test_file)).is_ok() {
+                return local_logs;
+            }
+        }
+    }
+
+    // 2. Si no se puede escribir en la carpeta actual (ej. instalado en Program Files o /usr/bin), usar ruta de usuario
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
+            let p = PathBuf::from(appdata).join("docu_ffacd").join("logs");
+            let _ = fs::create_dir_all(&p);
+            return p;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = PathBuf::from(home).join("Library").join("Logs").join("docu_ffacd");
+            let _ = fs::create_dir_all(&p);
+            return p;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = PathBuf::from(home).join(".local").join("share").join("docu_ffacd").join("logs");
+            let _ = fs::create_dir_all(&p);
+            return p;
+        }
+    }
+
+    PathBuf::from("logs")
 }
 
 fn run_logger_worker(receiver: Receiver<AppLogMessage>) {
@@ -373,7 +409,17 @@ pub fn log_db_simple_error(table: &str, op_name: &str, error: &str) {
 }
 
 
-fn log_general_info(msg: &str) {
+pub fn log_system_info(tag: &str, msg: &str) {
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    enqueue_log(AppLogMessage {
+        timestamp: now,
+        category: LogCategory::General(Level::Info),
+        target: format!("SISTEMA::{}", tag),
+        message: msg.to_string(),
+    });
+}
+
+pub fn log_general_info(msg: &str) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
     enqueue_log(AppLogMessage {
         timestamp: now,

@@ -125,10 +125,9 @@ else
     URLS=(
         "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
         "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-        "https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage"
     )
     for url in "${URLS[@]}"; do
-        if curl -sL "$url" -o "$PROJECT_ROOT/target/appimagetool" 2>/dev/null && [ -s "$PROJECT_ROOT/target/appimagetool" ]; then
+        if curl -fsSL "$url" -o "$PROJECT_ROOT/target/appimagetool" 2>/dev/null && [ -s "$PROJECT_ROOT/target/appimagetool" ]; then
             chmod +x "$PROJECT_ROOT/target/appimagetool"
             APPIMAGETOOL="$PROJECT_ROOT/target/appimagetool"
             break
@@ -142,6 +141,6 @@ if [ -n "$APPIMAGETOOL" ]; then
     echo "==> [AppImage] ¡AppImage generado con éxito con todas sus librerías incluidas en:"
     ls -lh "$OUTPUT_APPIMAGE"
 else
-    echo "==> [AppImage] AppDir preparado correctamente en: $APPDIR"
-    echo "==> Para empaquetar en AppImage, instala appimagetool o ejecuta en un entorno con conexión."
+    echo "==> [ERROR] No se pudo encontrar ni descargar appimagetool" >&2
+    exit 1
 fi

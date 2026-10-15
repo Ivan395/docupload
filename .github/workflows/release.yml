@@ -23,7 +23,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y rpm zstd libfontconfig1-dev libfreetype6-dev libx11-dev libxext-dev libxrender-dev
+          sudo apt-get install -y rpm zstd libfontconfig1-dev libfreetype6-dev libx11-dev libxext-dev libxrender-dev libfuse2
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -39,10 +39,9 @@ jobs:
 
       - name: Build Linux AppImage (.AppImage)
         run: |
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage -O appimagetool
-          chmod +x appimagetool
           mkdir -p target
-          mv appimagetool target/appimagetool
+          curl -fsSL https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o target/appimagetool
+          chmod +x target/appimagetool
           ./packaging/appimage/build_appimage.sh
 
       - name: Upload Linux Artifacts
@@ -61,6 +60,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress
+
       - name: Build release binary
         run: cargo build --release --locked
 
@@ -76,7 +78,7 @@ jobs:
 
   build-macos:
     name: Build macOS Packages (.app & .dmg)
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -100,17 +102,35 @@ jobs:
     name: Publish GitHub Release
     needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: always() && !cancelled() && !contains(needs.*.result, 'failure')
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Release Tag
+        id: release_tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+            TAG="v${VERSION}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using release tag: $TAG"
+
       - name: Download all packages
         uses: actions/download-artifact@v4
         with:
           path: all-packages
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: all-packages/**/*
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: "DocUpload ${{ steps.release_tag.outputs.tag }}"
+          files: all-packages/*
           generate_release_notes: true
           draft: false
           prerelease: false

@@ -224,11 +224,12 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f3 := TouchArea {
-                        enabled: root.can_go_rp;
                         mouse-cursor: root.can_go_rp ? pointer : not-allowed;
                         clicked => {
                             if root.can_go_rp {
                                 AppLogic.navigate_view(2);
+                            } else {
+                                AppLogic.show_navigation_warning("Seleccione primero un Cliente para acceder a Registros Patronales.");
                             }
                         }
                     }
@@ -281,11 +282,12 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f4 := TouchArea {
-                        enabled: root.can_go_revisiones;
                         mouse-cursor: root.can_go_revisiones ? pointer : not-allowed;
                         clicked => {
                             if root.can_go_revisiones {
                                 AppLogic.navigate_view(3);
+                            } else {
+                                AppLogic.show_navigation_warning("Seleccione un Registro Patronal para acceder a sus Revisiones.");
                             }
                         }
                     }
@@ -338,11 +340,12 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f5 := TouchArea {
-                        enabled: root.can_go_obras;
                         mouse-cursor: root.can_go_obras ? pointer : not-allowed;
                         clicked => {
                             if root.can_go_obras {
                                 AppLogic.navigate_view(4);
+                            } else {
+                                AppLogic.show_navigation_warning("Seleccione una Revisión para gestionar sus Registros de Obras.");
                             }
                         }
                     }
@@ -395,11 +398,12 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f6 := TouchArea {
-                        enabled: root.can_go_empleados;
                         mouse-cursor: root.can_go_empleados ? pointer : not-allowed;
                         clicked => {
                             if root.can_go_empleados {
                                 AppLogic.navigate_view(5);
+                            } else {
+                                AppLogic.show_navigation_warning("Seleccione primero un Cliente para ver sus Empleados.");
                             }
                         }
                     }
@@ -452,11 +456,12 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f7 := TouchArea {
-                        enabled: root.can_go_cedulas;
                         mouse-cursor: root.can_go_cedulas ? pointer : not-allowed;
                         clicked => {
                             if root.can_go_cedulas {
                                 AppLogic.navigate_view(6);
+                            } else {
+                                AppLogic.show_navigation_warning("Seleccione una Revisión con Cédulas vinculadas.");
                             }
                         }
                     }
@@ -509,11 +514,12 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f8 := TouchArea {
-                        enabled: root.can_go_reporte;
                         mouse-cursor: root.can_go_reporte ? pointer : not-allowed;
                         clicked => {
                             if root.can_go_reporte {
                                 AppLogic.navigate_view(7);
+                            } else {
+                                AppLogic.show_navigation_warning("Seleccione una Revisión para ver el Reporte de Liquidaciones.");
                             }
                         }
                     }
@@ -619,11 +625,12 @@ export component Sidebar inherits Rectangle {
                     }
 
                     btn_f10 := TouchArea {
-                        enabled: root.can_go_nominas;
                         mouse-cursor: root.can_go_nominas ? pointer : not-allowed;
                         clicked => {
                             if root.can_go_nominas {
                                 AppLogic.navigate_view(9);
+                            } else {
+                                AppLogic.show_navigation_warning("Seleccione una Revisión para ver el Reporte de Nóminas.");
                             }
                         }
                     }
@@ -660,21 +667,32 @@ export component Sidebar inherits Rectangle {
                 }
             }
 
-            HorizontalLayout {
-                spacing: 6px;
-                alignment: start;
-                Rectangle {
-                    width: 7px;
-                    height: 7px;
-                    border-radius: 3.5px;
-                    background: #2563eb;
-                    y: (parent.height - self.height) / 2;
+            Rectangle {
+                border-radius: 4px;
+                background: db_status_area.has-hover ? #f1f5f9 : transparent;
+                HorizontalLayout {
+                    padding: 2px;
+                    spacing: 6px;
+                    alignment: start;
+                    Rectangle {
+                        width: 7px;
+                        height: 7px;
+                        border-radius: 3.5px;
+                        background: AppData.db_connected ? #10b981 : #ef4444;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: AppData.db_status_text != "" ? AppData.db_status_text : (AppData.db_connected ? "Sincronización DB: En línea" : "DB: No instalada localmente");
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: AppData.db_connected ? #15803d : #b91c1c;
+                    }
                 }
-                Text {
-                    text: "Sincronización DB: En línea";
-                    font-size: 11px;
-                    font-weight: 600;
-                    color: #475569;
+                db_status_area := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppLogic.db_status_clicked();
+                    }
                 }
             }
         }

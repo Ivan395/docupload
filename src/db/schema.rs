@@ -468,6 +468,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         -- Column additions to accommodate all fields from cédulas and nóminas
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
+        ALTER TABLE IF EXISTS revision_history.registros_patronales ADD COLUMN IF NOT EXISTS id_rel_del_sub uuid;
+        ALTER TABLE IF EXISTS revision_history.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
+        ALTER TABLE IF EXISTS revision_history.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS clave_ubicacion varchar(50);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS pensionado varchar(10);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS esta_activo boolean DEFAULT true;
@@ -503,15 +506,8 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
           AND rdl.id_registro_obra IS NULL
           AND rvol.id_registro_obra IS NOT NULL;
 
-        -- Reparación específica: caso PUGA LOPEZ FELIX en mayo con reingreso (dias_ced = 21, dias_obra = 22)
-        UPDATE public.reportes_detalles_liquidaciones rdl
-        SET dias = 21, dias_registro_obra = 22
-        FROM public.reportes_liquidaciones rl, public.empleados e
-        WHERE rdl.id_reporte_liquidacion = rl.id
-          AND rl.id_empleado = e.id
-          AND e.nombre ILIKE '%PUGA%FELIX%'
-          AND rl.mes_periodo ILIKE '%MAYO%'
-          AND rdl.clave ILIKE '%reing%';
+        -- Reparación específica previa (deshabilitada tras migración para no activar trigger de validación de tope de días)
+        -- UPDATE public.reportes_detalles_liquidaciones rdl SET dias = 21, dias_registro_obra = 22 ...
 
         -- Ensure imss_inhabiles es_sistema column and unique constraint
         ALTER TABLE public.imss_inhabiles ADD COLUMN IF NOT EXISTS es_sistema boolean DEFAULT false;

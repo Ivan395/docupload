@@ -233,6 +233,7 @@ pub fn apply_update_now(file_path: &Path) -> Result<(), String> {
                 .arg(format!("/select,{}", path_str))
                 .spawn();
         }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -272,6 +273,11 @@ pub fn apply_update_now(file_path: &Path) -> Result<(), String> {
             .arg(file_path)
             .spawn()
             .map_err(|e| format!("Error abriendo paquete .dmg en macOS: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
         Ok(())
     }
 }

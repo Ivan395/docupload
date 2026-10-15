@@ -590,6 +590,11 @@ export global AppData {
     in-out property <int> total_empleados_activos_count: 0;
     in-out property <string> catalogos_loaded_str: "100% (9 Catálogos)";
 
+    // Estado y Diagnóstico de Base de Datos PostgreSQL
+    in-out property <bool> db_connected: false;
+    in-out property <string> db_status_text: "Sincronización DB: Verificando...";
+    in-out property <string> db_status_detail: "";
+
     // Catálogos para Combos
     in-out property <[string]> tipos_personas_combo: ["-- Seleccionar Tipo Persona --", "FÍSICA", "MORAL"];
     in-out property <[string]> regimenes_fiscales_combo: ["-- Seleccione primero Tipo Persona --"];
@@ -1303,6 +1308,11 @@ export global AppLogic {
     callback close_cedulas_duplicate_modal();
     callback select_cliente_for_rp(string, string, string, bool);
     callback select_cliente_for_empleados(string, string, string);
+
+    // Diagnóstico y Sincronización DB
+    callback db_status_clicked();
+    callback reconnect_db();
+    callback show_navigation_warning(string);
 
     // Clientes
     callback reload_clientes();

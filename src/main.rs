@@ -2722,6 +2722,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Err(e) = ensure_schema(&mut client) {
                     eprintln!("Error inicializando esquema de BD: {}", e);
                     log::error!("Error inicializando esquema de BD: {}", e);
+                    crate::app_logger::log_db_simple_error(
+                        "esquema",
+                        "ensure_schema",
+                        &format!("Error inicializando esquema: {}", e),
+                    );
                 }
                 if let Ok(set) = fetch_imss_inhabiles(&mut client) {
                     inhabiles_set = set;
@@ -2731,9 +2736,103 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         Err(e) => {
             eprintln!("Advertencia: No se pudo conectar a PostgreSQL: {}", e);
+            crate::app_logger::log_db_simple_error(
+                "sistema",
+                "create_pool",
+                &format!("No se pudo inicializar el pool de conexiones: {}", e),
+            );
             (None, Arc::new(RwLock::new(HashSet::new())))
         }
     };
+
+    // Diagnóstico y Estado Inicial de Base de Datos PostgreSQL
+    let diag = crate::db::diagnose_postgres();
+    let app_data = main_window.global::<AppData>();
+    app_data.set_db_connected(diag.is_connected);
+    app_data.set_db_status_text(diag.status_text.as_str().into());
+    app_data.set_db_status_detail(diag.detail_text.as_str().into());
+
+    if diag.is_connected {
+        crate::app_logger::log_system_info(
+            "Base de Datos",
+            "PostgreSQL conectado y verificado en línea en localhost:5432.",
+        );
+    } else {
+        crate::app_logger::log_db_simple_error(
+            "sistema",
+            "diagnostico_inicial",
+            &format!("Estado: {} | Detalle: {}", diag.status_text, diag.detail_text),
+        );
+    }
+
+    // Callbacks de Estado de Base de Datos y Navegación
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_show_navigation_warning(move |msg| {
+            if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_event(
+                    "Navegación",
+                    "Sidebar",
+                    "Aviso de Navegación",
+                    msg.as_str(),
+                );
+                show_toast_message(&ui, msg.as_str());
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_db_status_clicked(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let diag = crate::db::diagnose_postgres();
+                let app_data = ui.global::<AppData>();
+                app_data.set_db_connected(diag.is_connected);
+                app_data.set_db_status_text(diag.status_text.as_str().into());
+                app_data.set_db_status_detail(diag.detail_text.as_str().into());
+
+                let msg = if diag.is_connected {
+                    "Base de datos conectada: PostgreSQL en línea (localhost:5432)".to_string()
+                } else {
+                    format!("{}: {}", diag.status_text, diag.detail_text)
+                };
+                show_toast_message(&ui, &msg);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        app_logic.on_reconnect_db(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let diag = crate::db::diagnose_postgres();
+                let app_data = ui.global::<AppData>();
+                app_data.set_db_connected(diag.is_connected);
+                app_data.set_db_status_text(diag.status_text.as_str().into());
+                app_data.set_db_status_detail(diag.detail_text.as_str().into());
+
+                if diag.is_connected {
+                    if let Some(ref pool) = pool_clone {
+                        load_clientes_ui(&ui, pool);
+                        update_global_stats(&ui, pool);
+                    }
+                    crate::app_logger::log_system_info(
+                        "Reconexión BD",
+                        "Conexión con PostgreSQL verificada en línea.",
+                    );
+                    show_toast_message(&ui, "Base de datos conectada exitosamente.");
+                } else {
+                    crate::app_logger::log_db_simple_error(
+                        "sistema",
+                        "reconnect_db",
+                        &format!("{}: {}", diag.status_text, diag.detail_text),
+                    );
+                    show_toast_message(&ui, &format!("Reconexión fallida: {}", diag.detail_text));
+                }
+            }
+        });
+    }
 
     if let Some(ref pool) = db_pool {
         update_global_stats(&main_window, pool);
@@ -4247,7 +4346,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let cliente_id_str = cliente_id.to_string();
 
                 thread::spawn(move || {
-                    if let Some(ref pool) = pool_opt {
+                    let (res, pool_for_ui) = if let Some(ref pool) = pool_opt {
                         let res = match pool.get() {
                             Ok(mut client) => {
                                 let mut cliente_nom = String::new();
@@ -4267,34 +4366,52 @@ fn main() -> Result<(), slint::PlatformError> {
                             }
                             Err(e) => Err(format!("Error obteniendo conexión a la BD: {}", e)),
                         };
+                        (res, Some(pool.clone()))
+                    } else {
+                        let diag = crate::db::diagnose_postgres();
+                        (Err(format!("Base de datos no disponible: {}. {}", diag.status_text, diag.detail_text)), None)
+                    };
 
-                        let pool_for_ui = pool.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = ui_weak2.upgrade() {
-                                match res {
-                                    Ok(_) => {
-                                        let app_data = ui.global::<AppData>();
-                                        if app_data.get_selected_cliente_id().as_str() == cliente_id_str.as_str() {
-                                            app_data.set_selected_cliente_id("".into());
-                                            app_data.set_selected_cliente_nombre("".into());
-                                            app_data.set_selected_cliente_rfc("".into());
-                                            app_data.set_selected_rp_id("".into());
-                                            app_data.set_selected_rp_registro("".into());
-                                            app_data.set_selected_revision_id("".into());
-                                            app_data.set_selected_revision_nombre("".into());
-                                            load_registros_patronales_ui(&ui, &pool_for_ui, "");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak2.upgrade() {
+                            match res {
+                                Ok(_) => {
+                                    let app_data = ui.global::<AppData>();
+                                    if app_data.get_selected_cliente_id().as_str() == cliente_id_str.as_str() {
+                                        app_data.set_selected_cliente_id("".into());
+                                        app_data.set_selected_cliente_nombre("".into());
+                                        app_data.set_selected_cliente_rfc("".into());
+                                        app_data.set_selected_rp_id("".into());
+                                        app_data.set_selected_rp_registro("".into());
+                                        app_data.set_selected_revision_id("".into());
+                                        app_data.set_selected_revision_nombre("".into());
+                                        if let Some(ref p) = pool_for_ui {
+                                            load_registros_patronales_ui(&ui, p, "");
                                         }
-                                        load_clientes_ui(&ui, &pool_for_ui);
-                                        update_global_stats(&ui, &pool_for_ui);
-                                        show_toast_message(&ui, "Cliente y datos asociados eliminados correctamente.");
                                     }
-                                    Err(e) => {
-                                        show_toast_message(&ui, &format!("Error al eliminar cliente: {}", e));
+                                    if let Some(ref p) = pool_for_ui {
+                                        load_clientes_ui(&ui, p);
+                                        update_global_stats(&ui, p);
                                     }
+                                    crate::app_logger::log_ui_event(
+                                        "Clientes",
+                                        "Catálogo",
+                                        "Eliminar Cliente",
+                                        &format!("Cliente '{}' eliminado exitosamente", cliente_id_str),
+                                    );
+                                    show_toast_message(&ui, "Cliente y datos asociados eliminados correctamente.");
+                                }
+                                Err(e) => {
+                                    crate::app_logger::log_db_simple_error(
+                                        "clientes",
+                                        "delete_cliente",
+                                        &format!("Error eliminando cliente {}: {}", cliente_id_str, e),
+                                    );
+                                    show_toast_message(&ui, &format!("Error al eliminar cliente: {}", e));
                                 }
                             }
-                        });
-                    }
+                        }
+                    });
                 });
             }
         });
@@ -4887,6 +5004,14 @@ fn main() -> Result<(), slint::PlatformError> {
                             show_toast_message(&ui, &format!("Error de conexión con la base de datos: {}", e));
                         }
                     }
+                } else {
+                    let diag = crate::db::diagnose_postgres();
+                    crate::app_logger::log_db_simple_error(
+                        "clientes",
+                        "create_cliente",
+                        &format!("No se puede guardar el cliente '{}': {}. {}", nombre, diag.status_text, diag.detail_text),
+                    );
+                    show_toast_message(&ui, &format!("No se puede guardar: {}. {}", diag.status_text, diag.detail_text));
                 }
             }
         });
@@ -4950,6 +5075,9 @@ fn main() -> Result<(), slint::PlatformError> {
                             }
                         }
                     }
+                } else {
+                    let diag = crate::db::diagnose_postgres();
+                    show_toast_message(&ui, &format!("No se puede editar cliente: {}. {}", diag.status_text, diag.detail_text));
                 }
             }
         });
@@ -5085,6 +5213,14 @@ fn main() -> Result<(), slint::PlatformError> {
                             show_toast_message(&ui, &format!("Error de conexión: {}", e));
                         }
                     }
+                } else {
+                    let diag = crate::db::diagnose_postgres();
+                    crate::app_logger::log_db_simple_error(
+                        "clientes",
+                        "update_cliente",
+                        &format!("No se puede actualizar el cliente '{}': {}. {}", nombre, diag.status_text, diag.detail_text),
+                    );
+                    show_toast_message(&ui, &format!("No se puede guardar: {}. {}", diag.status_text, diag.detail_text));
                 }
             }
         });
@@ -5370,6 +5506,14 @@ fn main() -> Result<(), slint::PlatformError> {
                             show_toast_message(&ui, &format!("Error de conexión: {}", e));
                         }
                     }
+                } else {
+                    let diag = crate::db::diagnose_postgres();
+                    crate::app_logger::log_db_simple_error(
+                        "registros_patronales",
+                        "create_rp",
+                        &format!("No se puede guardar el registro patronal '{}': {}. {}", reg, diag.status_text, diag.detail_text),
+                    );
+                    show_toast_message(&ui, &format!("No se puede guardar: {}. {}", diag.status_text, diag.detail_text));
                 }
             }
         });
