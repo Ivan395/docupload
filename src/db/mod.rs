@@ -3,6 +3,7 @@ pub mod catalogos;
 pub mod cedulas;
 pub mod client;
 pub mod config;
+pub mod conexiones;
 pub mod nominas;
 pub mod nominas_reporte;
 pub mod reporte_liquidaciones;
@@ -20,6 +21,7 @@ pub use config::{
     get_active_config, get_active_config_path, update_active_config, DbConfig,
     DEFAULT_CONFIG_FILENAME,
 };
+pub use conexiones::*;
 pub use nominas::{save_nominas_concurrent, save_nominas_to_db, delete_all_nominas, NominasDbStats};
 pub use nominas_reporte::*;
 pub use reporte_liquidaciones::*;

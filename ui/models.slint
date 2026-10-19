@@ -48,6 +48,22 @@ export struct ProcessingSummary {
     cedulas_excel_path: string,
 }
 
+export struct DbConexionItem {
+    id: string,
+    nombre: string,
+    host: string,
+    port: string,
+    db_nombre: string,
+    usuario: string,
+    contrasenia: string,
+    ssl_mode: string,
+    connection_url: string,
+    protocolo: string,
+    es_activo: bool,
+    estado_online: string, // "online", "offline", "checking", "unknown"
+    estado_msg: string,
+}
+
 export struct ClienteCardData {
     id: string,
     nombre: string,
@@ -610,6 +626,28 @@ export global AppData {
     in-out property <string> db_cfg_test_status: ""; // "success", "error", "testing", ""
     in-out property <bool> db_cfg_show_password: false;
     in-out property <bool> db_cfg_use_custom_url: false;
+
+    // Múltiples Conexiones PostgreSQL
+    in-out property <[DbConexionItem]> db_conexiones: [];
+    in-out property <bool> db_conexiones_loading: false;
+    in-out property <string> db_selected_conexion_id: "";
+    in-out property <bool> show_conexion_modal: false;
+    in-out property <bool> is_editing_conexion: false;
+    in-out property <string> form_conexion_id: "";
+    in-out property <string> form_conexion_nombre: "";
+    in-out property <string> form_conexion_host: "localhost";
+    in-out property <string> form_conexion_port: "5432";
+    in-out property <string> form_conexion_db_nombre: "firma_fiscal_acd";
+    in-out property <string> form_conexion_usuario: "postgres";
+    in-out property <string> form_conexion_contrasenia: "";
+    in-out property <string> form_conexion_ssl_mode: "disable";
+    in-out property <string> form_conexion_connection_url: "";
+    in-out property <string> form_conexion_protocolo: "postgres";
+    in-out property <bool> form_conexion_use_url: false;
+    in-out property <bool> form_conexion_show_pwd: false;
+    in-out property <string> form_conexion_test_status: "";
+    in-out property <string> form_conexion_test_msg: "";
+    in-out property <bool> form_conexion_is_testing: false;
 
     // Catálogos para Combos
     in-out property <[string]> tipos_personas_combo: ["-- Seleccionar Tipo Persona --", "FÍSICA", "MORAL"];
@@ -1336,6 +1374,17 @@ export global AppLogic {
     callback reset_db_config_defaults();
     callback load_db_config();
     callback open_db_config_folder();
+
+    // Múltiples Conexiones PostgreSQL
+    callback reload_db_conexiones();
+    callback check_all_conexiones_status();
+    callback open_new_conexion_modal();
+    callback open_edit_conexion_modal(string);
+    callback close_conexion_modal();
+    callback submit_conexion_modal(string, string, string, string, string, string, string, string, string, bool);
+    callback delete_conexion(string);
+    callback select_and_connect_conexion(string);
+    callback test_form_conexion(string, string, string, string, string, string, string, string);
 
     // Clientes
     callback reload_clientes();

@@ -992,7 +992,7 @@ pub fn save_nominas_to_db(
         ) {
             Ok((e_c, c_c, ct_c, n_c, d_c)) => {
                 if let Err(e) = tx.commit() {
-                    stats.errores.push(format!("Error haciendo commit: {}", e));
+                    stats.errores.push(format!("Error haciendo commit: {:?}", e));
                 } else {
                     stats.empleados_guardados += e_c;
                     stats.cfdis_guardados += c_c;

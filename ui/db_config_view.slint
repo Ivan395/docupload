@@ -1,5 +1,5 @@
 import { ScrollView, LineEdit, Button, ComboBox } from "std-widgets.slint";
-import { AppData, AppLogic } from "models.slint";
+import { AppData, AppLogic, DbConexionItem } from "models.slint";
 
 export component DbConfigView inherits Rectangle {
     background: #f8fafc;
@@ -235,7 +235,449 @@ export component DbConfigView inherits Rectangle {
                 }
             }
 
-            // 3. Tarjeta Principal: Formulario de Configuración
+            // 3. Tarjeta de Múltiples Conexiones Guardadas
+            Rectangle {
+                border-radius: 12px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #e2e8f0;
+                drop-shadow-blur: 12px;
+                drop-shadow-color: #0000000a;
+                drop-shadow-offset-y: 2px;
+
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 18px;
+
+                    // Header de la sección de conexiones
+                    HorizontalLayout {
+                        alignment: space-between;
+                        spacing: 16px;
+
+                        VerticalLayout {
+                            spacing: 4px;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+
+                                Text {
+                                    text: "🔗";
+                                    font-size: 18px;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: "Perfiles de Conexión Guardados";
+                                    font-size: 17px;
+                                    font-weight: 800;
+                                    color: #0f172a;
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle {
+                                    height: 22px;
+                                    border-radius: 11px;
+                                    background: #eff6ff;
+                                    border-width: 1px;
+                                    border-color: #bfdbfe;
+                                    y: (parent.height - self.height) / 2;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        alignment: center;
+                                        Text {
+                                            text: "\{AppData.db_conexiones.length} registradas";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #1d4ed8;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: "Gestione y alterne entre sus bases de datos (local, nube o contingencia). Se valida automáticamente cuáles credenciales están disponibles en línea.";
+                                font-size: 12px;
+                                color: #64748b;
+                            }
+                        }
+
+                        // Acciones principales del encabezado
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: end;
+                            y: (parent.height - self.height) / 2;
+
+                            // Botón Validar Todas en Línea
+                            Rectangle {
+                                height: 36px;
+                                border-radius: 8px;
+                                background: btn_check_all.has-hover ? #f1f5f9 : #ffffff;
+                                border-width: 1.5px;
+                                border-color: #cbd5e1;
+
+                                HorizontalLayout {
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 6px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: AppData.db_conexiones_loading ? "⏳" : "🔄";
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: AppData.db_conexiones_loading ? "Comprobando..." : "Validar Disponibilidad";
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        color: #334155;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                btn_check_all := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if !AppData.db_conexiones_loading {
+                                            AppLogic.check_all_conexiones_status();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Botón Nueva Conexión
+                            Rectangle {
+                                height: 36px;
+                                border-radius: 8px;
+                                background: btn_new_conn.has-hover ? #1d4ed8 : #1e3a8a;
+                                drop-shadow-blur: 6px;
+                                drop-shadow-color: #1e3a8a40;
+                                drop-shadow-offset-y: 2px;
+
+                                HorizontalLayout {
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 6px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: "+";
+                                        font-size: 15px;
+                                        font-weight: 800;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: "Nueva Conexión";
+                                        font-size: 12px;
+                                        font-weight: 800;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                btn_new_conn := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        AppLogic.open_new_conexion_modal();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: #f1f5f9;
+                    }
+
+                    // Estado vacío
+                    if AppData.db_conexiones.length == 0 : Rectangle {
+                        height: 100px;
+                        border-radius: 8px;
+                        background: #f8fafc;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+
+                            Text {
+                                text: "No hay conexiones registradas en la base de datos.";
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: #64748b;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "Haga clic en 'Nueva Conexión' para registrar credenciales o guarde la configuración actual.";
+                                font-size: 11.5px;
+                                color: #94a3b8;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Lista de perfiles de conexión
+                    VerticalLayout {
+                        spacing: 12px;
+
+                        for conn[idx] in AppData.db_conexiones : Rectangle {
+                            border-radius: 10px;
+                            background: conn.es_activo ? #f8faff : #ffffff;
+                            border-width: conn.es_activo ? 2px : 1px;
+                            border-color: conn.es_activo ? #3b82f6 : #e2e8f0;
+
+                            HorizontalLayout {
+                                padding: 14px;
+                                spacing: 16px;
+                                alignment: space-between;
+
+                                // Columna izquierda: Información y Estado
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 8px;
+
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        alignment: start;
+
+                                        Text {
+                                            text: conn.nombre;
+                                            font-size: 15px;
+                                            font-weight: 800;
+                                            color: #0f172a;
+                                            vertical-alignment: center;
+                                        }
+
+                                        // Badge Activa
+                                        if conn.es_activo : Rectangle {
+                                            height: 22px;
+                                            border-radius: 6px;
+                                            background: #eff6ff;
+                                            border-width: 1px;
+                                            border-color: #93c5fd;
+
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 4px;
+                                                alignment: center;
+
+                                                Text { text: "★"; font-size: 10px; color: #1d4ed8; vertical-alignment: center; }
+                                                Text {
+                                                    text: "ACTIVA / EN USO";
+                                                    font-size: 10.5px;
+                                                    font-weight: 800;
+                                                    color: #1d4ed8;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+
+                                        // Badge Disponibilidad en línea
+                                        Rectangle {
+                                            height: 22px;
+                                            border-radius: 6px;
+                                            background: conn.estado_online == "online" ? #ecfdf5 : (conn.estado_online == "offline" ? #fef2f2 : (conn.estado_online == "checking" ? #fffbeb : #f1f5f9));
+                                            border-width: 1px;
+                                            border-color: conn.estado_online == "online" ? #a7f3d0 : (conn.estado_online == "offline" ? #fecaca : (conn.estado_online == "checking" ? #fde68a : #e2e8f0));
+
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 5px;
+                                                alignment: center;
+
+                                                Rectangle {
+                                                    width: 7px;
+                                                    height: 7px;
+                                                    border-radius: 3.5px;
+                                                    background: conn.estado_online == "online" ? #059669 : (conn.estado_online == "offline" ? #dc2626 : (conn.estado_online == "checking" ? #d97706 : #94a3b8));
+                                                    y: (parent.height - self.height) / 2;
+                                                }
+
+                                                Text {
+                                                    text: conn.estado_online == "online" ? "DISPONIBLE" : (conn.estado_online == "offline" ? "NO DISPONIBLE" : (conn.estado_online == "checking" ? "COMPROBANDO..." : "SIN VALIDAR"));
+                                                    font-size: 10.5px;
+                                                    font-weight: 800;
+                                                    color: conn.estado_online == "online" ? #065f46 : (conn.estado_online == "offline" ? #991b1b : (conn.estado_online == "checking" ? #92400e : #64748b));
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Parámetros de la conexión
+                                    HorizontalLayout {
+                                        spacing: 16px;
+                                        alignment: start;
+
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            Text { text: "🌐"; font-size: 11px; vertical-alignment: center; }
+                                            Text {
+                                                text: "\{conn.host}:\{conn.port}";
+                                                font-size: 11.5px;
+                                                font-weight: 600;
+                                                color: #475569;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            Text { text: "🗄️"; font-size: 11px; vertical-alignment: center; }
+                                            Text {
+                                                text: conn.db_nombre;
+                                                font-size: 11.5px;
+                                                font-weight: 600;
+                                                color: #475569;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            Text { text: "👤"; font-size: 11px; vertical-alignment: center; }
+                                            Text {
+                                                text: conn.usuario;
+                                                font-size: 11.5px;
+                                                font-weight: 600;
+                                                color: #475569;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            Text { text: "🔒"; font-size: 11px; vertical-alignment: center; }
+                                            Text {
+                                                text: "SSL: \{conn.ssl_mode}";
+                                                font-size: 11.5px;
+                                                color: #64748b;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Mensaje de detalle de estado
+                                    if conn.estado_msg != "" : Text {
+                                        text: conn.estado_msg;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: conn.estado_online == "online" ? #15803d : #b91c1c;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
+                                // Columna derecha: Acciones
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: end;
+                                    y: (parent.height - self.height) / 2;
+
+                                    // Botón Conectar / Activar
+                                    if !conn.es_activo : Rectangle {
+                                        height: 34px;
+                                        border-radius: 6px;
+                                        background: btn_activate.has-hover ? #1d4ed8 : #2563eb;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            spacing: 5px;
+                                            alignment: center;
+
+                                            Text { text: "⚡"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                                            Text {
+                                                text: "Conectar";
+                                                font-size: 11.5px;
+                                                font-weight: 700;
+                                                color: #ffffff;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        btn_activate := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.select_and_connect_conexion(conn.id);
+                                            }
+                                        }
+                                    }
+
+                                    // Botón Editar
+                                    Rectangle {
+                                        height: 34px;
+                                        border-radius: 6px;
+                                        background: btn_edit_conn.has-hover ? #f1f5f9 : #ffffff;
+                                        border-width: 1px;
+                                        border-color: #cbd5e1;
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            spacing: 4px;
+                                            alignment: center;
+
+                                            Text { text: "✏️"; font-size: 11px; vertical-alignment: center; }
+                                            Text {
+                                                text: "Editar";
+                                                font-size: 11.5px;
+                                                font-weight: 700;
+                                                color: #334155;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        btn_edit_conn := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.open_edit_conexion_modal(conn.id);
+                                            }
+                                        }
+                                    }
+
+                                    // Botón Eliminar
+                                    Rectangle {
+                                        height: 34px;
+                                        border-radius: 6px;
+                                        background: btn_del_conn.has-hover ? #fee2e2 : #ffffff;
+                                        border-width: 1px;
+                                        border-color: btn_del_conn.has-hover ? #fca5a5 : #e2e8f0;
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            alignment: center;
+
+                                            Text { text: "🗑️"; font-size: 12px; vertical-alignment: center; }
+                                        }
+
+                                        btn_del_conn := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.delete_conexion(conn.id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Tarjeta Secundaria: Formulario y Parámetros de la Conexión Activa
             Rectangle {
                 border-radius: 12px;
                 background: #ffffff;
@@ -897,6 +1339,385 @@ export component DbConfigView inherits Rectangle {
                                 text: "• La base de datos debe existir previamente en el servidor.\n• Al hacer clic en 'Guardar y Conectar', la aplicación creará las tablas y catálogos requeridos.";
                                 font-size: 11.5px;
                                 color: #475569;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal: Formulario Nueva / Editar Conexión
+    if AppData.show_conexion_modal : Rectangle {
+        background: #00000066;
+
+        TouchArea {
+            // Prevenir interacción con elementos debajo
+        }
+
+        Rectangle {
+            width: 580px;
+            height: 600px;
+            background: #ffffff;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000033;
+            drop-shadow-offset-y: 6px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                // Header del Modal
+                HorizontalLayout {
+                    alignment: space-between;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "🗄️"; font-size: 16px; vertical-alignment: center; }
+                        Text {
+                            text: AppData.is_editing_conexion ? "Editar Perfil de Conexión" : "Nueva Conexión de Base de Datos";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #0f172a;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: btn_close_modal.has-hover ? #fee2e2 : transparent;
+
+                        Text {
+                            text: "✕";
+                            font-size: 13px;
+                            font-weight: 800;
+                            color: btn_close_modal.has-hover ? #dc2626 : #64748b;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        btn_close_modal := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.close_conexion_modal();
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #e2e8f0; }
+
+                // Nombre de la Conexión
+                VerticalLayout {
+                    spacing: 4px;
+                    Text { text: "Nombre Identificador de la Conexión (*):"; font-size: 12px; font-weight: 700; color: #334155; }
+                    LineEdit {
+                        text <=> AppData.form_conexion_nombre;
+                        placeholder-text: "Ej. local, avni, house remoto, contingencia";
+                        height: 36px;
+                    }
+                }
+
+                // Selector de modo
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Rectangle {
+                        height: 28px;
+                        border-radius: 5px;
+                        background: !AppData.form_conexion_use_url ? #1e3a8a : #f1f5f9;
+
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 10px; alignment: center;
+                            Text {
+                                text: "Campos Individuales";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: !AppData.form_conexion_use_url ? #ffffff : #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppData.form_conexion_use_url = false; }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 28px;
+                        border-radius: 5px;
+                        background: AppData.form_conexion_use_url ? #1e3a8a : #f1f5f9;
+
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 10px; alignment: center;
+                            Text {
+                                text: "Cadena URI Completa";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: AppData.form_conexion_use_url ? #ffffff : #475569;
+                                vertical-alignment: center;
+                            }
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppData.form_conexion_use_url = true; }
+                        }
+                    }
+                }
+
+                if !AppData.form_conexion_use_url : VerticalLayout {
+                    spacing: 12px;
+
+                    // Fila Servidor y Puerto
+                    HorizontalLayout {
+                        spacing: 14px;
+
+                        VerticalLayout {
+                            horizontal-stretch: 3;
+                            spacing: 4px;
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Servidor / Host:"; font-size: 12px; font-weight: 700; color: #334155; }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Rectangle {
+                                        height: 18px; border-radius: 3px; background: #eff6ff;
+                                        HorizontalLayout {
+                                            padding-left: 4px; padding-right: 4px;
+                                            Text { text: "localhost"; font-size: 10px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                                        }
+                                        TouchArea { mouse-cursor: pointer; clicked => { AppData.form_conexion_host = "localhost"; } }
+                                    }
+                                    Rectangle {
+                                        height: 18px; border-radius: 3px; background: #eff6ff;
+                                        HorizontalLayout {
+                                            padding-left: 4px; padding-right: 4px;
+                                            Text { text: "127.0.0.1"; font-size: 10px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                                        }
+                                        TouchArea { mouse-cursor: pointer; clicked => { AppData.form_conexion_host = "127.0.0.1"; } }
+                                    }
+                                }
+                            }
+                            LineEdit { text <=> AppData.form_conexion_host; placeholder-text: "localhost o IP"; height: 36px; }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+                            Text { text: "Puerto:"; font-size: 12px; font-weight: 700; color: #334155; }
+                            LineEdit { text <=> AppData.form_conexion_port; placeholder-text: "5432"; height: 36px; }
+                        }
+                    }
+
+                    // Fila BD y SSL
+                    HorizontalLayout {
+                        spacing: 14px;
+
+                        VerticalLayout {
+                            horizontal-stretch: 2;
+                            spacing: 4px;
+                            Text { text: "Base de Datos (*):"; font-size: 12px; font-weight: 700; color: #334155; }
+                            LineEdit { text <=> AppData.form_conexion_db_nombre; placeholder-text: "firma_fiscal_acd"; height: 36px; }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+                            Text { text: "Modo SSL:"; font-size: 12px; font-weight: 700; color: #334155; }
+                            LineEdit { text <=> AppData.form_conexion_ssl_mode; placeholder-text: "disable, require"; height: 36px; }
+                        }
+                    }
+
+                    // Fila Usuario y Contraseña
+                    HorizontalLayout {
+                        spacing: 14px;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+                            Text { text: "Usuario (*):"; font-size: 12px; font-weight: 700; color: #334155; }
+                            LineEdit { text <=> AppData.form_conexion_usuario; placeholder-text: "postgres"; height: 36px; }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Contraseña:"; font-size: 12px; font-weight: 700; color: #334155; }
+                                Rectangle {
+                                    height: 18px;
+                                    HorizontalLayout {
+                                        Text { text: AppData.form_conexion_show_pwd ? "🔒" : "👁️"; font-size: 11px; vertical-alignment: center; }
+                                    }
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppData.form_conexion_show_pwd = !AppData.form_conexion_show_pwd; }
+                                    }
+                                }
+                            }
+                            LineEdit {
+                                text <=> AppData.form_conexion_contrasenia;
+                                placeholder-text: "Contraseña";
+                                input-type: AppData.form_conexion_show_pwd ? InputType.text : InputType.password;
+                                height: 36px;
+                            }
+                        }
+                    }
+                }
+
+                if AppData.form_conexion_use_url : VerticalLayout {
+                    spacing: 4px;
+                    Text { text: "Cadena de Conexión (DATABASE_URL):"; font-size: 12px; font-weight: 700; color: #334155; }
+                    LineEdit {
+                        text <=> AppData.form_conexion_connection_url;
+                        placeholder-text: "postgres://usuario:pass@host:5432/bd?sslmode=disable";
+                        height: 38px;
+                    }
+                }
+
+                // Banner de prueba en formulario
+                if AppData.form_conexion_test_status != "" : Rectangle {
+                    border-radius: 6px;
+                    background: AppData.form_conexion_test_status == "success" ? #f0fdf4 : (AppData.form_conexion_test_status == "testing" ? #eff6ff : #fef2f2);
+                    border-width: 1px;
+                    border-color: AppData.form_conexion_test_status == "success" ? #86efac : (AppData.form_conexion_test_status == "testing" ? #bfdbfe : #fca5a5);
+
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 8px;
+                        Text {
+                            text: AppData.form_conexion_test_status == "success" ? "✓" : (AppData.form_conexion_test_status == "testing" ? "⏳" : "⛔");
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: AppData.form_conexion_test_msg;
+                            font-size: 11.5px;
+                            font-weight: 700;
+                            color: AppData.form_conexion_test_status == "success" ? #15803d : (AppData.form_conexion_test_status == "testing" ? #1d4ed8 : #b91c1c);
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Footer de Acciones
+                HorizontalLayout {
+                    alignment: space-between;
+                    spacing: 12px;
+
+                    // Botón Probar
+                    Rectangle {
+                        height: 38px;
+                        border-radius: 8px;
+                        background: btn_test_modal.has-hover ? #f8fafc : #ffffff;
+                        border-width: 1.5px;
+                        border-color: #2563eb;
+
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 14px; spacing: 6px; alignment: center;
+                            Text { text: AppData.form_conexion_is_testing ? "⏳" : "🔍"; font-size: 12px; vertical-alignment: center; }
+                            Text {
+                                text: AppData.form_conexion_is_testing ? "Probando..." : "Probar";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_test_modal := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if !AppData.form_conexion_is_testing {
+                                    AppLogic.test_form_conexion(
+                                        AppData.form_conexion_host,
+                                        AppData.form_conexion_port,
+                                        AppData.form_conexion_db_nombre,
+                                        AppData.form_conexion_usuario,
+                                        AppData.form_conexion_contrasenia,
+                                        AppData.form_conexion_ssl_mode,
+                                        AppData.form_conexion_use_url ? AppData.form_conexion_connection_url : "",
+                                        AppData.form_conexion_protocolo
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+
+                        // Cancelar
+                        Rectangle {
+                            height: 38px;
+                            border-radius: 8px;
+                            background: btn_cancel_modal.has-hover ? #f1f5f9 : transparent;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+
+                            HorizontalLayout {
+                                padding-left: 14px; padding-right: 14px; alignment: center;
+                                Text {
+                                    text: "Cancelar";
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            btn_cancel_modal := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    AppLogic.close_conexion_modal();
+                                }
+                            }
+                        }
+
+                        // Guardar
+                        Rectangle {
+                            height: 38px;
+                            border-radius: 8px;
+                            background: btn_save_modal.has-hover ? #1d4ed8 : #1e3a8a;
+
+                            HorizontalLayout {
+                                padding-left: 16px; padding-right: 16px; spacing: 6px; alignment: center;
+                                Text { text: "💾"; font-size: 12px; color: #ffffff; vertical-alignment: center; }
+                                Text {
+                                    text: "Guardar Conexión";
+                                    font-size: 12px;
+                                    font-weight: 800;
+                                    color: #ffffff;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            btn_save_modal := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    AppLogic.submit_conexion_modal(
+                                        AppData.form_conexion_id,
+                                        AppData.form_conexion_nombre,
+                                        AppData.form_conexion_host,
+                                        AppData.form_conexion_port,
+                                        AppData.form_conexion_db_nombre,
+                                        AppData.form_conexion_usuario,
+                                        AppData.form_conexion_contrasenia,
+                                        AppData.form_conexion_ssl_mode,
+                                        AppData.form_conexion_use_url ? AppData.form_conexion_connection_url : "",
+                                        AppData.is_editing_conexion
+                                    );
+                                }
                             }
                         }
                     }

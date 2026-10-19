@@ -31,6 +31,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             dia char(10),
             motivo varchar(100),
             es_sistema boolean DEFAULT false,
+            creado_sistema boolean DEFAULT true,
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -87,6 +88,33 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS public.entidades_federativas (
+            id uuid PRIMARY KEY DEFAULT uuidv7(),
+            nombre varchar(150) NOT NULL,
+            created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS public.delegaciones (
+            id uuid PRIMARY KEY DEFAULT uuidv7(),
+            clave char(2) NOT NULL UNIQUE,
+            nombre varchar(150) NOT NULL,
+            created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS public.subdelegaciones (
+            id uuid PRIMARY KEY DEFAULT uuidv7(),
+            clave char(2) NOT NULL UNIQUE,
+            nombre varchar(150) NOT NULL,
+            created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS public.rel_delegacion_subdelegacion (
+            id uuid PRIMARY KEY DEFAULT uuidv7(),
+            id_delegacion uuid REFERENCES public.delegaciones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            id_subdelegacion uuid REFERENCES public.subdelegaciones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS public.registros_patronales (
             id uuid PRIMARY KEY DEFAULT uuidv7(),
             id_cliente uuid NOT NULL REFERENCES public.clientes(id) ON UPDATE CASCADE ON DELETE CASCADE,
@@ -100,6 +128,10 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             delegacion varchar(100),
             subdelegacion varchar(100),
             prima_riesgo double precision,
+            codigo_delegacion varchar(10),
+            codigo_subdelegacion varchar(10),
+            id_entidad_federativa uuid REFERENCES public.entidades_federativas(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            id_rel_del_sub uuid REFERENCES public.rel_delegacion_subdelegacion(id) ON UPDATE CASCADE ON DELETE CASCADE,
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT uq_registros_patronales_id_cliente_registro UNIQUE (id_cliente, registro)
         );
@@ -468,9 +500,70 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         -- Column additions to accommodate all fields from cédulas and nóminas
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
+        ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS id_entidad_federativa uuid REFERENCES public.entidades_federativas(id) ON UPDATE CASCADE ON DELETE CASCADE;
+        ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS id_rel_del_sub uuid REFERENCES public.rel_delegacion_subdelegacion(id) ON UPDATE CASCADE ON DELETE CASCADE;
+        ALTER TABLE IF EXISTS revision_history.registros_patronales ADD COLUMN IF NOT EXISTS id_entidad_federativa uuid;
         ALTER TABLE IF EXISTS revision_history.registros_patronales ADD COLUMN IF NOT EXISTS id_rel_del_sub uuid;
         ALTER TABLE IF EXISTS revision_history.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
         ALTER TABLE IF EXISTS revision_history.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
+        ALTER TABLE public.imss_inhabiles ADD COLUMN IF NOT EXISTS creado_sistema boolean DEFAULT true;
+        ALTER TABLE IF EXISTS revision_history.imss_inhabiles ADD COLUMN IF NOT EXISTS creado_sistema boolean DEFAULT true;
+
+        -- Tablas de historial de revisión y disparadores para nuevos catálogos
+        CREATE TABLE IF NOT EXISTS revision_history.entidades_federativas (
+            id uuid,
+            nombre varchar(150),
+            created_at timestamptz,
+            modified_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+            event_name varchar(10)
+        );
+
+        CREATE TABLE IF NOT EXISTS revision_history.delegaciones (
+            id uuid,
+            clave char(2),
+            nombre varchar(150),
+            created_at timestamptz,
+            modified_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+            event_name varchar(10)
+        );
+
+        CREATE TABLE IF NOT EXISTS revision_history.subdelegaciones (
+            id uuid,
+            clave char(2),
+            nombre varchar(150),
+            created_at timestamptz,
+            modified_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+            event_name varchar(10)
+        );
+
+        CREATE TABLE IF NOT EXISTS revision_history.rel_delegacion_subdelegacion (
+            id uuid,
+            id_delegacion uuid,
+            id_subdelegacion uuid,
+            created_at timestamptz,
+            modified_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+            event_name varchar(10)
+        );
+
+        DROP TRIGGER IF EXISTS trg_entidades_federativas_history ON public.entidades_federativas;
+        CREATE TRIGGER trg_entidades_federativas_history
+        AFTER INSERT OR UPDATE OR DELETE ON public.entidades_federativas
+        FOR EACH ROW EXECUTE FUNCTION public.log_revision_history();
+
+        DROP TRIGGER IF EXISTS trg_delegaciones_history ON public.delegaciones;
+        CREATE TRIGGER trg_delegaciones_history
+        AFTER INSERT OR UPDATE OR DELETE ON public.delegaciones
+        FOR EACH ROW EXECUTE FUNCTION public.log_revision_history();
+
+        DROP TRIGGER IF EXISTS trg_subdelegaciones_history ON public.subdelegaciones;
+        CREATE TRIGGER trg_subdelegaciones_history
+        AFTER INSERT OR UPDATE OR DELETE ON public.subdelegaciones
+        FOR EACH ROW EXECUTE FUNCTION public.log_revision_history();
+
+        DROP TRIGGER IF EXISTS trg_rel_del_sub_history ON public.rel_delegacion_subdelegacion;
+        CREATE TRIGGER trg_rel_del_sub_history
+        AFTER INSERT OR UPDATE OR DELETE ON public.rel_delegacion_subdelegacion
+        FOR EACH ROW EXECUTE FUNCTION public.log_revision_history();
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS clave_ubicacion varchar(50);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS pensionado varchar(10);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS esta_activo boolean DEFAULT true;
@@ -602,6 +695,18 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
                 ALTER TABLE public.lista_conceptos_cfdis ADD CONSTRAINT fk_lista_conceptos_cfdis_id_concepto_cfdi
                     FOREIGN KEY (id_concepto_cfdi) REFERENCES public.conceptos_cfdis(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
             END IF;
+
+            -- Reparar restricción errónea si fk_lista_conceptos_cfdis_id_concepto_cfdi quedó apuntando sobre la columna id_cfdi
+            IF EXISTS (
+                SELECT 1 FROM information_schema.key_column_usage
+                WHERE table_schema = 'public' AND table_name = 'lista_conceptos_cfdis'
+                  AND constraint_name = 'fk_lista_conceptos_cfdis_id_concepto_cfdi'
+                  AND column_name = 'id_cfdi'
+            ) THEN
+                ALTER TABLE public.lista_conceptos_cfdis DROP CONSTRAINT fk_lista_conceptos_cfdis_id_concepto_cfdi;
+                ALTER TABLE public.lista_conceptos_cfdis ADD CONSTRAINT fk_lista_conceptos_cfdis_id_concepto_cfdi
+                    FOREIGN KEY (id_concepto_cfdi) REFERENCES public.conceptos_cfdis(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+            END IF;
         END $$;
 
 
@@ -666,6 +771,30 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_revision ON public.reportes_liquidaciones(id_revision);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_rep ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion);
         CREATE INDEX IF NOT EXISTS idx_reportes_vinc_obras_id_rep ON public.reportes_vinculaciones_obras_liquidaciones(id_reporte_liquidacion);
+        CREATE INDEX IF NOT EXISTS idx_registros_patronales_id_entidad_fed ON public.registros_patronales(id_entidad_federativa);
+        CREATE INDEX IF NOT EXISTS idx_registros_patronales_id_rel_del_sub ON public.registros_patronales(id_rel_del_sub);
+        CREATE INDEX IF NOT EXISTS idx_rel_del_sub_id_del ON public.rel_delegacion_subdelegacion(id_delegacion);
+        CREATE INDEX IF NOT EXISTS idx_rel_del_sub_id_subdel ON public.rel_delegacion_subdelegacion(id_subdelegacion);
+
+        -- Sincronización automática de id_entidad_federativa si coincide con el catálogo
+        UPDATE public.registros_patronales rp
+        SET id_entidad_federativa = ef.id
+        FROM public.entidades_federativas ef
+        WHERE rp.id_entidad_federativa IS NULL
+          AND rp.entidad IS NOT NULL
+          AND TRIM(UPPER(rp.entidad)) = TRIM(UPPER(ef.nombre));
+
+        -- Sincronización automática de id_rel_del_sub si coinciden delegación y subdelegación
+        UPDATE public.registros_patronales rp
+        SET id_rel_del_sub = rds.id
+        FROM public.rel_delegacion_subdelegacion rds
+        JOIN public.delegaciones d ON rds.id_delegacion = d.id
+        JOIN public.subdelegaciones s ON rds.id_subdelegacion = s.id
+        WHERE rp.id_rel_del_sub IS NULL
+          AND ((rp.codigo_delegacion IS NOT NULL AND TRIM(rp.codigo_delegacion) = TRIM(d.clave)
+                AND rp.codigo_subdelegacion IS NOT NULL AND TRIM(rp.codigo_subdelegacion) = TRIM(s.clave))
+               OR (rp.delegacion IS NOT NULL AND TRIM(UPPER(rp.delegacion)) = TRIM(UPPER(d.nombre))
+                AND rp.subdelegacion IS NOT NULL AND TRIM(UPPER(rp.subdelegacion)) = TRIM(UPPER(s.nombre))));
 
         -- Migración: columna creado_usuario en public.registros_obras
         ALTER TABLE public.registros_obras ADD COLUMN IF NOT EXISTS creado_usuario boolean;
@@ -1118,6 +1247,9 @@ WHERE NOT EXISTS (
 
     // 8. Backfill oficial de RENAPO para empleados con CURP nula, vacía o inválida
     backfill_empleados_curp_renapo(client)?;
+
+    // 9. Asegurar tabla public.conexiones, historial y trigger de auditoría
+    crate::db::conexiones::ensure_conexiones_table(client)?;
 
     log::info!("Esquema de base de datos verificado y listo.");
     Ok(())

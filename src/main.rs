@@ -527,6 +527,160 @@ fn populate_db_config_ui(ui: &MainWindow) {
     app_data.set_db_cfg_use_custom_url(!cfg.connection_url.trim().is_empty());
 }
 
+fn load_db_conexiones_ui(ui: &MainWindow) {
+    let ui_weak = ui.as_weak();
+    let pool_opt = crate::db::get_global_pool();
+    let mut conexiones = Vec::new();
+    if let Some(ref p) = pool_opt {
+        if let Ok(mut client) = p.get() {
+            let _ = crate::db::ensure_conexiones_table(&mut client);
+            if let Ok(list) = crate::db::fetch_conexiones(&mut client) {
+                conexiones = list;
+            }
+        }
+    }
+
+    if conexiones.is_empty() {
+        let active_cfg = crate::db::get_active_config();
+        let local_cfg = crate::db::config::get_local_fallback_config();
+        let is_aiven = active_cfg.host.contains("aivencloud.com");
+        let aiven_pwd = if is_aiven {
+            active_cfg.password.clone()
+        } else {
+            std::env::var("AIVEN_PASSWORD")
+                .or_else(|_| std::env::var("DB_PASSWORD"))
+                .unwrap_or_default()
+        };
+        let aiven_url = if !aiven_pwd.is_empty() {
+            format!(
+                "postgres://avnadmin:{}@pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com:19522/firma_fiscal_acd?sslmode=require",
+                aiven_pwd
+            )
+        } else {
+            "postgres://avnadmin@pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com:19522/firma_fiscal_acd?sslmode=require".to_string()
+        };
+
+        conexiones = vec![
+            crate::db::ConexionItem {
+                id: "local_id".to_string(),
+                nombre: "local".to_string(),
+                host: local_cfg.host,
+                port: local_cfg.port as i32,
+                db_nombre: local_cfg.database,
+                usuario: local_cfg.user,
+                contrasenia: local_cfg.password,
+                ssl_mode: "disable".to_string(),
+                connection_url: String::new(),
+                protocolo: "postgres".to_string(),
+                es_activo: !is_aiven,
+                estado_online: "unknown".to_string(),
+                estado_msg: String::new(),
+            },
+            crate::db::ConexionItem {
+                id: "avni_id".to_string(),
+                nombre: "avni".to_string(),
+                host: "pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com".to_string(),
+                port: 19522,
+                db_nombre: "firma_fiscal_acd".to_string(),
+                usuario: "avnadmin".to_string(),
+                contrasenia: aiven_pwd,
+                ssl_mode: "require".to_string(),
+                connection_url: aiven_url,
+                protocolo: "postgres".to_string(),
+                es_activo: is_aiven,
+                estado_online: "unknown".to_string(),
+                estado_msg: String::new(),
+            },
+            crate::db::ConexionItem {
+                id: "house_remoto_id".to_string(),
+                nombre: "house remoto".to_string(),
+                host: "192.168.1.200".to_string(),
+                port: 5432,
+                db_nombre: "firma_fiscal_acd".to_string(),
+                usuario: "remoto_user".to_string(),
+                contrasenia: String::new(),
+                ssl_mode: "disable".to_string(),
+                connection_url: String::new(),
+                protocolo: "postgres".to_string(),
+                es_activo: false,
+                estado_online: "unknown".to_string(),
+                estado_msg: String::new(),
+            },
+        ];
+    }
+
+    let slint_items: Vec<DbConexionItem> = conexiones.iter().map(|c| {
+        DbConexionItem {
+            id: c.id.as_str().into(),
+            nombre: c.nombre.as_str().into(),
+            host: c.host.as_str().into(),
+            port: c.port.to_string().as_str().into(),
+            db_nombre: c.db_nombre.as_str().into(),
+            usuario: c.usuario.as_str().into(),
+            contrasenia: c.contrasenia.as_str().into(),
+            ssl_mode: c.ssl_mode.as_str().into(),
+            connection_url: c.connection_url.as_str().into(),
+            protocolo: c.protocolo.as_str().into(),
+            es_activo: c.es_activo,
+            estado_online: c.estado_online.as_str().into(),
+            estado_msg: c.estado_msg.as_str().into(),
+        }
+    }).collect();
+
+    let app_data = ui.global::<AppData>();
+    app_data.set_db_conexiones(ModelRc::new(VecModel::from(slint_items)));
+
+    trigger_check_conexiones_status(ui_weak, conexiones);
+}
+
+fn trigger_check_conexiones_status(ui_weak: slint::Weak<MainWindow>, conexiones: Vec<crate::db::ConexionItem>) {
+    if let Some(ui) = ui_weak.upgrade() {
+        let app_data = ui.global::<AppData>();
+        app_data.set_db_conexiones_loading(true);
+        let current_models = app_data.get_db_conexiones();
+        let mut updating = Vec::new();
+        for i in 0..current_models.row_count() {
+            if let Some(mut it) = current_models.row_data(i) {
+                it.estado_online = "checking".into();
+                it.estado_msg = "Comprobando disponibilidad...".into();
+                updating.push(it);
+            }
+        }
+        app_data.set_db_conexiones(ModelRc::new(VecModel::from(updating)));
+    }
+
+    thread::spawn(move || {
+        let mut results = Vec::new();
+        for conn in &conexiones {
+            let (is_online, msg) = crate::db::check_conexion_status(conn);
+            let estado = if is_online { "online" } else { "offline" };
+            results.push((conn.id.clone(), estado.to_string(), msg));
+        }
+
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_db_conexiones_loading(false);
+                let current_models = app_data.get_db_conexiones();
+                let mut updated: Vec<DbConexionItem> = Vec::new();
+                for i in 0..current_models.row_count() {
+                    if let Some(mut item) = current_models.row_data(i) {
+                        for (res_id, res_estado, res_msg) in &results {
+                            if item.id == res_id.as_str() {
+                                item.estado_online = res_estado.as_str().into();
+                                item.estado_msg = res_msg.as_str().into();
+                                break;
+                            }
+                        }
+                        updated.push(item);
+                    }
+                }
+                app_data.set_db_conexiones(ModelRc::new(VecModel::from(updated)));
+            }
+        });
+    });
+}
+
 fn load_clientes_ui(ui: &MainWindow, pool: &DbPool) {
     let mut client = match pool.get() {
         Ok(c) => c,
@@ -2771,6 +2925,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Poblar valores de configuración de PostgreSQL en la UI desde db_config.json
     populate_db_config_ui(&main_window);
+    load_db_conexiones_ui(&main_window);
 
     if diag.is_connected {
         if crate::db::is_fallback_active() {
@@ -2823,6 +2978,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_db_status_detail(diag.detail_text.as_str().into());
                 // Al hacer clic en el estado de la BD, abre directamente la vista de configuración
                 populate_db_config_ui(&ui);
+                load_db_conexiones_ui(&ui);
                 app_data.set_current_view(11);
             }
         });
@@ -2874,6 +3030,7 @@ fn main() -> Result<(), slint::PlatformError> {
         app_logic.on_load_db_config(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 populate_db_config_ui(&ui);
+                load_db_conexiones_ui(&ui);
             }
         });
     }
@@ -3030,6 +3187,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
                                     load_clientes_ui(&ui_inner, &new_pool);
                                     update_global_stats(&ui_inner, &new_pool);
+                                    load_db_conexiones_ui(&ui_inner);
 
                                     show_toast_message(&ui_inner, "Configuración guardada y base de datos conectada exitosamente.");
                                 }
@@ -3042,6 +3200,327 @@ fn main() -> Result<(), slint::PlatformError> {
                                     data.set_db_cfg_test_result(format!("Guardado en disco, pero no se pudo conectar: {}", err).into());
                                     show_toast_message(&ui_inner, "Configuración guardada, pero falló la conexión con el servidor.");
                                 }
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    // Callbacks de Múltiples Conexiones PostgreSQL
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_reload_db_conexiones(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                load_db_conexiones_ui(&ui);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_check_all_conexiones_status(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let current = app_data.get_db_conexiones();
+                let mut list = Vec::new();
+                for i in 0..current.row_count() {
+                    if let Some(item) = current.row_data(i) {
+                        list.push(crate::db::ConexionItem {
+                            id: item.id.to_string(),
+                            nombre: item.nombre.to_string(),
+                            host: item.host.to_string(),
+                            port: item.port.parse::<i32>().unwrap_or(5432),
+                            db_nombre: item.db_nombre.to_string(),
+                            usuario: item.usuario.to_string(),
+                            contrasenia: item.contrasenia.to_string(),
+                            ssl_mode: item.ssl_mode.to_string(),
+                            connection_url: item.connection_url.to_string(),
+                            protocolo: item.protocolo.to_string(),
+                            es_activo: item.es_activo,
+                            estado_online: "checking".to_string(),
+                            estado_msg: String::new(),
+                        });
+                    }
+                }
+                trigger_check_conexiones_status(ui_weak.clone(), list);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_open_new_conexion_modal(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_form_conexion_id("".into());
+                app_data.set_form_conexion_nombre("".into());
+                app_data.set_form_conexion_host("localhost".into());
+                app_data.set_form_conexion_port("5432".into());
+                app_data.set_form_conexion_db_nombre("firma_fiscal_acd".into());
+                app_data.set_form_conexion_usuario("postgres".into());
+                app_data.set_form_conexion_contrasenia("".into());
+                app_data.set_form_conexion_ssl_mode("disable".into());
+                app_data.set_form_conexion_connection_url("".into());
+                app_data.set_form_conexion_protocolo("postgres".into());
+                app_data.set_form_conexion_use_url(false);
+                app_data.set_form_conexion_test_status("".into());
+                app_data.set_form_conexion_test_msg("".into());
+                app_data.set_form_conexion_is_testing(false);
+                app_data.set_is_editing_conexion(false);
+                app_data.set_show_conexion_modal(true);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_open_edit_conexion_modal(move |id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let current = app_data.get_db_conexiones();
+                for i in 0..current.row_count() {
+                    if let Some(item) = current.row_data(i) {
+                        if item.id == id {
+                            app_data.set_form_conexion_id(item.id);
+                            app_data.set_form_conexion_nombre(item.nombre);
+                            app_data.set_form_conexion_host(item.host);
+                            app_data.set_form_conexion_port(item.port);
+                            app_data.set_form_conexion_db_nombre(item.db_nombre);
+                            app_data.set_form_conexion_usuario(item.usuario);
+                            app_data.set_form_conexion_contrasenia(item.contrasenia);
+                            app_data.set_form_conexion_ssl_mode(item.ssl_mode);
+                            app_data.set_form_conexion_connection_url(item.connection_url.clone());
+                            app_data.set_form_conexion_protocolo(item.protocolo);
+                            app_data.set_form_conexion_use_url(!item.connection_url.trim().is_empty());
+                            app_data.set_form_conexion_test_status("".into());
+                            app_data.set_form_conexion_test_msg("".into());
+                            app_data.set_form_conexion_is_testing(false);
+                            app_data.set_is_editing_conexion(true);
+                            app_data.set_show_conexion_modal(true);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_close_conexion_modal(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_conexion_modal(false);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_submit_conexion_modal(move |id, nombre, host, port, db_nombre, usuario, contrasenia, ssl_mode, connection_url, is_edit| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let nom_clean = nombre.trim().to_string();
+                if nom_clean.is_empty() {
+                    show_toast_message(&ui, "El nombre de la conexión no puede estar vacío.");
+                    return;
+                }
+
+                let p_num = port.trim().parse::<i32>().unwrap_or(5432);
+                let item = crate::db::ConexionItem {
+                    id: id.to_string(),
+                    nombre: nom_clean.clone(),
+                    host: host.trim().to_string(),
+                    port: p_num,
+                    db_nombre: db_nombre.trim().to_string(),
+                    usuario: usuario.trim().to_string(),
+                    contrasenia: contrasenia.to_string(),
+                    ssl_mode: if ssl_mode.trim().is_empty() { "disable".to_string() } else { ssl_mode.trim().to_string() },
+                    connection_url: connection_url.trim().to_string(),
+                    protocolo: "postgres".to_string(),
+                    es_activo: false,
+                    estado_online: "unknown".to_string(),
+                    estado_msg: String::new(),
+                };
+
+                let mut saved_ok = false;
+                if let Some(pool) = crate::db::get_global_pool() {
+                    if let Ok(mut client) = pool.get() {
+                        let res = if is_edit && !item.id.is_empty() {
+                            crate::db::update_conexion(&mut client, &item)
+                        } else {
+                            crate::db::insert_conexion(&mut client, &item).map(|_| ())
+                        };
+                        match res {
+                            Ok(_) => saved_ok = true,
+                            Err(e) => {
+                                show_toast_message(&ui, &format!("Error en base de datos: {}", e));
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                if !saved_ok {
+                    show_toast_message(&ui, "Aviso: No se pudo conectar a la base de datos para guardar la conexión.");
+                    return;
+                }
+
+                ui.global::<AppData>().set_show_conexion_modal(false);
+                load_db_conexiones_ui(&ui);
+                let action_txt = if is_edit { "actualizada" } else { "creada" };
+                show_toast_message(&ui, &format!("Conexión '{}' {} exitosamente.", nom_clean, action_txt));
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_delete_conexion(move |id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                if let Some(pool) = crate::db::get_global_pool() {
+                    if let Ok(mut client) = pool.get() {
+                        if let Err(e) = crate::db::delete_conexion(&mut client, id.as_str()) {
+                            show_toast_message(&ui, &format!("Error al eliminar conexión: {}", e));
+                            return;
+                        }
+                    }
+                }
+                load_db_conexiones_ui(&ui);
+                show_toast_message(&ui, "Conexión eliminada de la base de datos.");
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_select_and_connect_conexion(move |id| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let current = app_data.get_db_conexiones();
+                let mut selected_conn: Option<crate::db::ConexionItem> = None;
+
+                for i in 0..current.row_count() {
+                    if let Some(item) = current.row_data(i) {
+                        if item.id == id {
+                            selected_conn = Some(crate::db::ConexionItem {
+                                id: item.id.to_string(),
+                                nombre: item.nombre.to_string(),
+                                host: item.host.to_string(),
+                                port: item.port.parse::<i32>().unwrap_or(5432),
+                                db_nombre: item.db_nombre.to_string(),
+                                usuario: item.usuario.to_string(),
+                                contrasenia: item.contrasenia.to_string(),
+                                ssl_mode: item.ssl_mode.to_string(),
+                                connection_url: item.connection_url.to_string(),
+                                protocolo: item.protocolo.to_string(),
+                                es_activo: true,
+                                estado_online: item.estado_online.to_string(),
+                                estado_msg: item.estado_msg.to_string(),
+                            });
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(conn) = selected_conn {
+                    let conn_name = conn.nombre.clone();
+                    let new_cfg = conn.to_db_config();
+
+                    // 1. Guardar en disco persistente (db_config.json)
+                    if let Err(e) = crate::db::update_active_config(new_cfg.clone()) {
+                        show_toast_message(&ui, &format!("Error guardando configuración activa: {}", e));
+                        return;
+                    }
+
+                    // 2. Marcar activa en la tabla public.conexiones
+                    if let Some(pool) = crate::db::get_global_pool() {
+                        if let Ok(mut client) = pool.get() {
+                            let _ = crate::db::set_active_conexion(&mut client, id.as_str());
+                        }
+                    }
+
+                    // 3. Reconectar connection pool en segundo plano
+                    let ui_weak_inner = ui_weak.clone();
+                    thread::spawn(move || {
+                        let pool_res = crate::db::reload_global_pool(8);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui_inner) = ui_weak_inner.upgrade() {
+                                match pool_res {
+                                    Ok(new_pool) => {
+                                        if let Ok(mut client) = new_pool.get() {
+                                            let _ = ensure_schema(&mut client);
+                                        }
+                                        let diag = crate::db::diagnose_postgres();
+                                        let data = ui_inner.global::<AppData>();
+                                        data.set_db_connected(diag.is_connected);
+                                        data.set_db_status_text(diag.status_text.as_str().into());
+                                        data.set_db_status_detail(diag.detail_text.as_str().into());
+
+                                        populate_db_config_ui(&ui_inner);
+                                        load_db_conexiones_ui(&ui_inner);
+                                        load_clientes_ui(&ui_inner, &new_pool);
+                                        update_global_stats(&ui_inner, &new_pool);
+
+                                        show_toast_message(&ui_inner, &format!("Conectado exitosamente a '{}'.", conn_name));
+                                    }
+                                    Err(err) => {
+                                        let diag = crate::db::diagnose_postgres();
+                                        let data = ui_inner.global::<AppData>();
+                                        data.set_db_connected(false);
+                                        data.set_db_status_text(diag.status_text.as_str().into());
+                                        data.set_db_status_detail(diag.detail_text.as_str().into());
+                                        populate_db_config_ui(&ui_inner);
+                                        load_db_conexiones_ui(&ui_inner);
+                                        show_toast_message(&ui_inner, &format!("Fallo al conectar con '{}': {}", conn_name, err));
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_test_form_conexion(move |host, port, db_nombre, usuario, contrasenia, ssl_mode, connection_url, protocolo| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_form_conexion_is_testing(true);
+                app_data.set_form_conexion_test_status("testing".into());
+                app_data.set_form_conexion_test_msg("Comprobando conexión...".into());
+
+                let item = crate::db::ConexionItem {
+                    id: String::new(),
+                    nombre: String::new(),
+                    host: host.trim().to_string(),
+                    port: port.trim().parse::<i32>().unwrap_or(5432),
+                    db_nombre: db_nombre.trim().to_string(),
+                    usuario: usuario.trim().to_string(),
+                    contrasenia: contrasenia.to_string(),
+                    ssl_mode: if ssl_mode.trim().is_empty() { "disable".to_string() } else { ssl_mode.trim().to_string() },
+                    connection_url: connection_url.trim().to_string(),
+                    protocolo: protocolo.trim().to_string(),
+                    es_activo: false,
+                    estado_online: "checking".to_string(),
+                    estado_msg: String::new(),
+                };
+
+                let ui_weak_inner = ui_weak.clone();
+                thread::spawn(move || {
+                    let (ok, msg) = crate::db::check_conexion_status(&item);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui_inner) = ui_weak_inner.upgrade() {
+                            let data = ui_inner.global::<AppData>();
+                            data.set_form_conexion_is_testing(false);
+                            if ok {
+                                data.set_form_conexion_test_status("success".into());
+                                data.set_form_conexion_test_msg(msg.into());
+                            } else {
+                                data.set_form_conexion_test_status("error".into());
+                                data.set_form_conexion_test_msg(msg.into());
                             }
                         }
                     });
