@@ -188,6 +188,7 @@ export component EmpleadosView inherits Rectangle {
                 background: #ffffff;
                 border-width: 1px;
                 border-color: #e2e8f0;
+                clip: true;
 
                 VerticalLayout {
                     padding: 16px;
@@ -215,6 +216,7 @@ export component EmpleadosView inherits Rectangle {
 
                     // Filas de Empleados
                     ScrollView {
+                        content-width: self.width;
                         vertical-stretch: 1;
 
                         VerticalLayout {
@@ -464,6 +466,7 @@ export component EmpleadosView inherits Rectangle {
                 border-color: #cbd5e1;
 
                 ScrollView {
+                    content-width: self.width;
                     VerticalLayout {
                         padding: 20px;
                         spacing: 16px;
