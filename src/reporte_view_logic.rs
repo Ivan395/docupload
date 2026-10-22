@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use chrono::NaiveDate;
 use uuid::Uuid;
-use slint::{ModelRc, VecModel, ComponentHandle, SharedString};
+use slint::{Model, ModelRc, VecModel, ComponentHandle, SharedString};
 
 use crate::{
     MainWindow, AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem,
     ReporteFilterOptionItem, ReporteMesTotalItem, ReporteGuarderiaObraItem,
     ReporteObraUsuarioItem, ReporteSuaObraItem, ReporteBatchWorkerItem,
-    ReporteSelectedItem,
+    ReporteSelectedItem, ReporteBatchObraItem,
 };
 use crate::cedulas::business::month_to_num;
 use crate::db::DbPool;
@@ -46,6 +46,7 @@ pub struct ReporteSessionState {
     pub filter_obra_idx: usize,
     pub filter_periodo_idx: usize,
     pub filter_estado_idx: usize,
+    pub expanded_row_id: Option<Uuid>,
 
     // Ordenamiento multi-criterio
     pub sort_by_obra: bool,
@@ -100,6 +101,7 @@ impl Default for ReporteSessionState {
             filter_obra_idx: 0,
             filter_periodo_idx: 0,
             filter_estado_idx: 0,
+            expanded_row_id: None,
 
             sort_by_obra: false,
             sort_obra_asc: true,
@@ -216,14 +218,16 @@ pub fn get_obra_colors(index: usize) -> (slint::Color, slint::Color, slint::Colo
 }
 
 pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
+    let dias_cedula_f = row.dias_cedula as f64;
     let sum_incidencias = row.lic + row.inc + row.aus;
-    let dias_base = if sum_incidencias > 0.001 {
-        sum_incidencias
-    } else {
-        row.dias_cedula as f64
-    };
+    let dias_efectivos = (dias_cedula_f - sum_incidencias).max(0.0);
 
-    if dias_base <= 0.0001 {
+    // Restricción: Días obra no puede exceder los días efectivos de cédula (dias_cedula - LIC - INC - AUS)
+    if (row.dias_obra as f64) > dias_efectivos {
+        row.dias_obra = dias_efectivos.round() as i16;
+    }
+
+    if dias_cedula_f <= 0.0001 || row.dias_obra <= 0 {
         row.cf = 0.0;
         row.exc_pat = 0.0;
         row.exc_obr = 0.0;
@@ -241,8 +245,9 @@ pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
         return;
     }
 
-    let factor = if row.id_registro_obra.is_some() && dias_base > 0.0 {
-        (row.dias_obra as f64) / dias_base
+    // Regla de tres estricta: Valor_Prorrateado = (Valor_Original / Días_Cédula) * Días_Obra
+    let factor = if row.id_registro_obra.is_some() {
+        (row.dias_obra as f64) / dias_cedula_f
     } else {
         1.0
     };
@@ -489,12 +494,46 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
     app_data.set_reporte_obras_filter_labels(ModelRc::new(VecModel::from(filter_obras_labels)));
     app_data.set_reporte_obras_batch_labels(ModelRc::new(VecModel::from(batch_obras_labels)));
 
-    // 1.1 Obras creadas por el usuario para visualización rápida de vigencias
+    // 1.1 Obras creadas por el usuario para visualización rápida de vigencias y conteo de empleados
     let mut obras_usuario_vec = Vec::new();
+    let current_filtered_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
+        Some(state.obras_options[state.filter_obra_idx - 1].id)
+    } else {
+        None
+    };
+
     for o in state.obras_options.iter().filter(|o| o.creado_usuario) {
         let fi_str = o.fecha_inicio.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_else(|| "--/--/----".to_string());
         let ff_str = o.fecha_fin.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_else(|| "--/--/----".to_string());
         let vigencia = format!("{} al {}", fi_str, ff_str);
+
+        // Contar cuántos empleados únicos (por NSS distinto) tienen asignado actualmente este registro de obra
+        let mut emp_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut row_count = 0;
+        for r in &state.all_rows {
+            if r.id_registro_obra == Some(o.id) {
+                let nss_key = if !r.nss.trim().is_empty() { r.nss.trim().to_string() } else { r.id_empleado.to_string() };
+                emp_set.insert(nss_key);
+                row_count += 1;
+            }
+        }
+        let emp_count = emp_set.len();
+        let emp_count_str = if emp_count == 1 {
+            if row_count > 1 {
+                format!("1 emp. único ({} reg)", row_count)
+            } else {
+                "1 emp. único".to_string()
+            }
+        } else {
+            if row_count > emp_count {
+                format!("{} emps. únicos ({} reg)", emp_count, row_count)
+            } else {
+                format!("{} emps. únicos", emp_count)
+            }
+        };
+
+        let is_selected = current_filtered_obra_id == Some(o.id);
+
         obras_usuario_vec.push(ReporteObraUsuarioItem {
             id: o.id.to_string().into(),
             numero: o.numero.clone().into(),
@@ -502,6 +541,9 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             fecha_inicio: fi_str.into(),
             fecha_fin: ff_str.into(),
             vigencia_str: vigencia.into(),
+            empleados_count: emp_count as i32,
+            empleados_count_str: emp_count_str.into(),
+            selected: is_selected,
         });
     }
     let has_obras_usuario = !obras_usuario_vec.is_empty();
@@ -630,12 +672,80 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             }
         };
 
-        let parent_rows_count = state.all_rows.iter().filter(|x| x.id_parent_reporte_liq == r.id_parent_reporte_liq).count();
+        let sibling_rows: Vec<_> = state.all_rows.iter().filter(|x| x.id_parent_reporte_liq == r.id_parent_reporte_liq).collect();
+        let parent_rows_count = sibling_rows.len();
         let can_delete_split = parent_rows_count > 1;
+        let has_multi_obra = parent_rows_count > 1;
+
+        let sibling_idx = sibling_rows.iter().position(|x| x.id_reporte_liq == r.id_reporte_liq).unwrap_or(0) + 1;
+        let multi_obra_badge = if has_multi_obra {
+            format!("Obra {}/{}", sibling_idx, parent_rows_count)
+        } else {
+            String::new()
+        };
+
+        let total_dias_obras: i32 = sibling_rows.iter().map(|x| x.dias_obra as i32).sum();
+
+        let vinculaciones_resumen = sibling_rows.iter().map(|x| {
+            let num = if x.obra_numero.trim().is_empty() {
+                "S/O".to_string()
+            } else {
+                x.obra_numero.trim().to_string()
+            };
+            format!("{}-{}", num, x.dias_obra)
+        }).collect::<Vec<_>>().join(" ");
+
+        let dias_mismatch = if is_baja {
+            r.dias_obra > 0 || r.subtotal > 0.001
+        } else if is_assigned {
+            total_dias_obras != (r.dias_cedula as i32) || r.dias_obra < 0
+        } else {
+            false
+        };
+
+        let is_expanded = state.expanded_row_id == Some(r.id_reporte_liq);
+        let movimientos_resumen = if is_expanded {
+            let mov_rows: Vec<&ReporteLiquidacionRowDb> = state.all_rows.iter().filter(|x| {
+                x.id_empleado == r.id_empleado
+                    && x.anio_periodo == r.anio_periodo
+                    && x.mes_periodo.trim().eq_ignore_ascii_case(r.mes_periodo.trim())
+            }).collect();
+
+            let mut lines = Vec::new();
+            for (m_idx, m) in mov_rows.iter().enumerate() {
+                let clave_str = if m.clave.trim().is_empty() { "NORMAL / SIN MOVIMIENTO".to_string() } else { m.clave.trim().to_uppercase() };
+                let fecha_str = if m.fecha_str.trim().is_empty() || m.fecha_str == "-" { "Sin fecha".to_string() } else { m.fecha_str.clone() };
+                let sdi_str = if m.sdi > 0.001 { format_curr(m.sdi) } else { "$0.00".to_string() };
+                let inc_sum = m.lic + m.inc + m.aus;
+                let inc_str = if inc_sum > 0.001 {
+                    format!(" | Incidencias: LIC: {:.0}, INC: {:.0}, AUS: {:.0} (Descontados: {:.0} días)", m.lic, m.inc, m.aus, inc_sum)
+                } else {
+                    " | Sin incidencias (0 días LIC/INC/AUS)".to_string()
+                };
+                let obra_info = if let Some(_) = m.id_registro_obra {
+                    format!(" | Obra: {} ({} días obra)", m.obra_label, m.dias_obra)
+                } else {
+                    " | Obra: Sin asignar".to_string()
+                };
+                lines.push(format!(
+                    "• Tramo {}: [{}] - Fecha: {} | SDI: {} | Días Cédula: {}{}{}",
+                    m_idx + 1, clave_str, fecha_str, sdi_str, m.dias_cedula, inc_str, obra_info
+                ));
+            }
+            if lines.is_empty() {
+                format!("• [NORMAL] Sin movimientos registrados en el mes de {}. Días cotizados: {}.", r.mes_periodo, r.dias_cedula)
+            } else {
+                lines.join("\n")
+            }
+        } else {
+            String::new()
+        };
 
         page_rows.push(ReporteLiquidacionRow {
             selected: is_selected,
             can_delete_split,
+            is_expanded,
+            movimientos_resumen: movimientos_resumen.into(),
             is_baja,
             idx: (start_idx + page_offset + 1) as i32,
             id_reporte_liq: r.id_reporte_liq.to_string().into(),
@@ -649,6 +759,11 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             id_registro_obra: r.id_registro_obra.map(|u| u.to_string()).unwrap_or_default().into(),
             obra_numero: r.obra_numero.as_str().into(),
             obra_label: r.obra_label.as_str().into(),
+            vinculaciones_resumen: vinculaciones_resumen.into(),
+            multi_obra_badge: multi_obra_badge.into(),
+            has_multi_obra,
+            dias_mismatch,
+            total_dias_obras,
             is_assigned,
             dias_cedula: r.dias_cedula as i32,
             dias_obra: r.dias_obra as i32,
@@ -881,23 +996,28 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
 
     // 9. Guarderías por Registro de Obra creado por el usuario (Tope 18%)
     let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
-        Some(state.obras_options[state.filter_obra_idx - 1].id)
+        let opt = &state.obras_options[state.filter_obra_idx - 1];
+        if opt.creado_usuario {
+            Some(opt.id)
+        } else {
+            None
+        }
     } else {
         None
     };
 
-    let target_rows = if !state.filtered_rows.is_empty() {
-        &state.filtered_rows
-    } else {
+    let target_rows_for_kpis = if state.filtered_rows.is_empty() {
         &state.all_rows
+    } else {
+        &state.filtered_rows
     };
-
-    let kpis = compute_guarderias_kpis(target_rows, &state.obras_options, filter_obra_id);
+    let kpis = compute_guarderias_kpis(target_rows_for_kpis, &state.obras_options, filter_obra_id);
     let guarderias_vec: Vec<ReporteGuarderiaObraItem> = kpis.into_iter().map(|k| {
         ReporteGuarderiaObraItem {
             id_obra: k.id_obra.to_string().into(),
             obra_numero: k.obra_numero.into(),
             obra_label: k.obra_label.into(),
+            registros_patronales_str: k.registros_patronales_str.into(),
             total_gps: k.total_gps as f32,
             total_gps_str: format_curr(k.total_gps).into(),
             valor_guarderias: k.valor_guarderias as f32,
@@ -943,8 +1063,29 @@ pub fn sync_and_load_reporte_data(
         Err(e) => log::error!("Error sincronizando reporte liquidaciones: {}", e),
     }
 
-    // 2. Consultar filas y opciones de obras
-    let rows = match fetch_reporte_liquidaciones(&mut client, rev_uuid) {
+    // 2. Consultar filas y opciones de obras en paralelo concurrente aprovechando el pool de conexiones
+    let (rows_res, obras_res, all_obras_res) = std::thread::scope(|s| {
+        let pool_ref1 = pool.clone();
+        let pool_ref2 = pool.clone();
+        let pool_ref3 = pool.clone();
+
+        let h1 = s.spawn(move || {
+            let mut c = pool_ref1.get().map_err(|e| format!("Conexión pool: {}", e))?;
+            fetch_reporte_liquidaciones(&mut c, rev_uuid)
+        });
+        let h2 = s.spawn(move || {
+            let mut c = pool_ref2.get().map_err(|e| format!("Conexión pool: {}", e))?;
+            fetch_obras_for_revision(&mut c, rev_uuid)
+        });
+        let h3 = s.spawn(move || {
+            let mut c = pool_ref3.get().map_err(|e| format!("Conexión pool: {}", e))?;
+            fetch_all_obras_for_revision(&mut c, rev_uuid)
+        });
+
+        (h1.join().unwrap(), h2.join().unwrap(), h3.join().unwrap())
+    });
+
+    let rows = match rows_res {
         Ok(r) => r,
         Err(e) => {
             log::error!("Error cargando filas de reporte: {}", e);
@@ -952,7 +1093,7 @@ pub fn sync_and_load_reporte_data(
         }
     };
 
-    let obras = match fetch_obras_for_revision(&mut client, rev_uuid) {
+    let obras = match obras_res {
         Ok(o) => o,
         Err(e) => {
             log::error!("Error cargando obras para reporte: {}", e);
@@ -960,13 +1101,13 @@ pub fn sync_and_load_reporte_data(
         }
     };
 
-    // Conservar en obras_options solamente registros de obras creados por el usuario (creado_usuario = true)
-    let obras: Vec<crate::db::reporte_liquidaciones::ObraOptionDb> = obras
+    // Conservar en obras_options todos los registros de obras creados por el usuario (creado_usuario = true)
+    let mut obras: Vec<crate::db::reporte_liquidaciones::ObraOptionDb> = obras
         .into_iter()
         .filter(|o| o.creado_usuario)
         .collect();
 
-    let mut all_obras = match fetch_all_obras_for_revision(&mut client, rev_uuid) {
+    let mut all_obras = match all_obras_res {
         Ok(o) => o,
         Err(e) => {
             log::error!("Error cargando todas las obras para reporte: {}", e);
@@ -987,6 +1128,15 @@ pub fn sync_and_load_reporte_data(
                     monto: 0.0,
                 });
             }
+        }
+    }
+
+    // Incorporar cualquier obra creada por el usuario o vinculada en filas que provenga de all_obras
+    for o in &all_obras {
+        if (o.creado_usuario || rows.iter().any(|r| r.id_registro_obra == Some(o.id)))
+            && !obras.iter().any(|existing| existing.id == o.id)
+        {
+            obras.push(o.clone());
         }
     }
 
@@ -1234,6 +1384,38 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
+    // 4.1. Seleccionar / Filtrar por Registro de Obra creado por el usuario desde la tarjeta interactiva
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_seleccionar_obra_usuario(move |obra_id_str| {
+            if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_input(
+                    "Reporte Liquidaciones",
+                    "Panel Obras Usuario",
+                    "Tarjeta Obra Clic",
+                    "obra_id",
+                    &obra_id_str,
+                );
+                let mut state = session_clone.lock().unwrap();
+                let obra_id_str = obra_id_str.to_string();
+                if let Ok(target_uuid) = Uuid::parse_str(&obra_id_str) {
+                    if let Some(pos) = state.obras_options.iter().position(|o| o.id == target_uuid) {
+                        let target_idx = pos + 1; // 0 is "Todas las obras"
+                        if state.filter_obra_idx == target_idx {
+                            // Toggle off: volver a todas las obras
+                            state.filter_obra_idx = 0;
+                        } else {
+                            state.filter_obra_idx = target_idx;
+                        }
+                        apply_reporte_filtering(&mut state);
+                        render_reporte_ui(&ui, &state);
+                    }
+                }
+            }
+        });
+    }
+
     // 5. Filtrar por Periodo
     {
         let ui_weak = main_window.as_weak();
@@ -1378,6 +1560,25 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
+    // 9.2. Alternar expansión de fila para ver detalles de movimientos del empleado
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_toggle_expand_row(move |id_str| {
+            if let Some(ui) = ui_weak.upgrade() {
+                if let Ok(id) = Uuid::parse_str(&id_str) {
+                    let mut state = session_clone.lock().unwrap();
+                    if state.expanded_row_id == Some(id) {
+                        state.expanded_row_id = None;
+                    } else {
+                        state.expanded_row_id = Some(id);
+                    }
+                    render_reporte_ui(&ui, &state);
+                }
+            }
+        });
+    }
+
     // 10. Helper interno para abrir modal unificado
     let open_unified_modal = {
         let session_clone = reporte_session.clone();
@@ -1386,6 +1587,13 @@ pub fn wire_reporte_liquidaciones_callbacks(
             let state = session_clone.lock().unwrap();
 
             if let Ok(id) = Uuid::parse_str(id_str) {
+                // Si hay múltiples empleados seleccionados y el clic fue en uno de ellos, abrir modal masivo
+                if state.selected_ids.len() > 1 && state.selected_ids.contains(&id) {
+                    drop(state);
+                    let app_logic = ui.global::<AppLogic>();
+                    app_logic.invoke_reporte_open_batch_edit_modal();
+                    return;
+                }
                 if let Some(r) = state.all_rows.iter().find(|row| row.id_reporte_liq == id) {
                     crate::app_logger::log_ui_event(
                         "Reporte Liquidaciones",
@@ -1502,15 +1710,42 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     };
                     app_data.set_reporte_edit_dias_obra_val(default_dias_obra.to_string().into());
 
-                    // Opciones de obras disponibles de la revisión activa
-                    let mut obras_vec = Vec::with_capacity(state.obras_options.len());
-                    for o in &state.obras_options {
+                    // Menú Contextual: Primero los Registros de Obra creados por el usuario (activos en ese mes)
+                    // y después los otros registros creados automáticamente al cargar las cédulas (también activos en ese mes).
+                    let (m_num, y_num) = parse_month_and_year(&r.mes_periodo, r.anio_periodo, &r.periodo_str).unwrap_or((1, 2024));
+                    let mut sorted_obras = state.obras_options.clone();
+                    sorted_obras.sort_by(|a, b| {
+                        let a_act = calculate_obra_days_in_month(m_num, y_num, a.fecha_inicio, a.fecha_fin).unwrap_or(0) > 0;
+                        let b_act = calculate_obra_days_in_month(m_num, y_num, b.fecha_inicio, b.fecha_fin).unwrap_or(0) > 0;
+                        (b.creado_usuario, b_act, &a.numero).cmp(&(a.creado_usuario, a_act, &b.numero))
+                    });
+
+                    let mut obras_vec = Vec::with_capacity(sorted_obras.len());
+                    for o in &sorted_obras {
+                        let is_act = calculate_obra_days_in_month(m_num, y_num, o.fecha_inicio, o.fecha_fin).unwrap_or(0) > 0;
+                        let tag = if o.creado_usuario {
+                            if is_act { "⭐ [Usuario - Vigente] " } else { "⭐ [Usuario] " }
+                        } else {
+                            if is_act { "📁 [Cédula - Vigente] " } else { "📁 [Cédula] " }
+                        };
                         obras_vec.push(ReporteObraItem {
                             id: o.id.to_string().into(),
                             numero: o.numero.clone().into(),
-                            label: o.label.clone().into(),
+                            label: format!("{}{}", tag, o.label).into(),
                         });
                     }
+                    let sibling_rows: Vec<_> = state.all_rows.iter().filter(|x| x.id_parent_reporte_liq == r.id_parent_reporte_liq).collect();
+                    let total_dias_asignados: i32 = sibling_rows.iter().map(|x| x.dias_obra as i32).sum();
+                    let mut vinc_lines = Vec::new();
+                    vinc_lines.push(format!("Total días cédula: {} | Días vinculados a obras: {} / {}", r.dias_cedula, total_dias_asignados, r.dias_cedula));
+                    for (s_idx, sib) in sibling_rows.iter().enumerate() {
+                        let current_marker = if sib.id_reporte_liq == r.id_reporte_liq { " [Esta Fila]" } else { "" };
+                        let obra_txt = if sib.obra_label.trim().is_empty() { "Sin asignar".to_string() } else { sib.obra_label.clone() };
+                        vinc_lines.push(format!("• Obra {}: {} ({} días){}", s_idx + 1, obra_txt, sib.dias_obra, current_marker));
+                    }
+                    let info_vinc_str = vinc_lines.join("\n");
+                    app_data.set_reporte_edit_vinculaciones_info(info_vinc_str.into());
+
                     app_data.set_reporte_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
                     app_data.set_reporte_edit_dropdown_open(true);
                     app_data.set_reporte_edit_alert_show(false);
@@ -1949,27 +2184,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 crate::show_toast_message(&ui, &err_msg);
                                 return;
                             }
-                            if other.dias_obra > 0 && raw_dias_obr > 0 {
-                                let other_obra = state.obras_options.iter().find(|o| o.id == other_oid);
-                                let other_ini = other_obra.and_then(|o| o.fecha_inicio);
-                                let other_fin = other_obra.and_then(|o| o.fecha_fin);
-                                if crate::db::reporte_liquidaciones::check_obras_date_overlap_in_month(
-                                    &mes_periodo,
-                                    anio_periodo,
-                                    &periodo_str,
-                                    obra_ini,
-                                    obra_fin,
-                                    other_ini,
-                                    other_fin,
-                                ) {
-                                    let err_msg = format!(
-                                        "Las fechas de la obra se superponen con la obra '{}' ya vinculada al trabajador en este periodo.",
-                                        other.obra_numero
-                                    );
-                                    crate::show_toast_message(&ui, &err_msg);
-                                    return;
-                                }
-                            }
                         }
                     }
                 }
@@ -2280,41 +2494,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         };
                         app_data.set_reporte_add_obra_vigencia_info(info.into());
 
-                        // Verificar si se superpone con alguna obra ya vinculada
-                        let mut has_overlap = false;
-                        let mut overlap_name = String::new();
-                        for other in state.all_rows.iter().filter(|r| r.id_parent_reporte_liq == row.id_parent_reporte_liq) {
-                            if let Some(other_oid) = other.id_registro_obra {
-                                if other.dias_obra > 0 {
-                                    let other_o = state.obras_options.iter().find(|o| o.id == other_oid);
-                                    let other_ini = other_o.and_then(|o| o.fecha_inicio);
-                                    let other_fin = other_o.and_then(|o| o.fecha_fin);
-                                    if crate::db::reporte_liquidaciones::check_obras_date_overlap_in_month(
-                                        &row.mes_periodo,
-                                        row.anio_periodo,
-                                        &row.periodo_str,
-                                        new_obra.fecha_inicio,
-                                        new_obra.fecha_fin,
-                                        other_ini,
-                                        other_fin,
-                                    ) {
-                                        has_overlap = true;
-                                        overlap_name = other.obra_numero.clone();
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if has_overlap {
-                            app_data.set_reporte_add_alert_show(true);
-                            app_data.set_reporte_add_alert_text(
-                                format!("⚠️ Las fechas de esta obra se superponen con la obra '{}' ya vinculada al trabajador.", overlap_name).into()
-                            );
-                            app_data.set_reporte_add_alert_type("warning".into());
-                        } else {
-                            app_data.set_reporte_add_alert_show(false);
-                        }
+                        app_data.set_reporte_add_alert_show(false);
 
                         let dias_avail = app_data.get_reporte_add_dias_available();
                         let max_dias = if let Some(d) = dias_en_mes {
@@ -2406,6 +2586,20 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         }
                     };
 
+                    if let Some((m, y)) = parse_month_and_year(&cur_row.mes_periodo, cur_row.anio_periodo, &cur_row.periodo_str) {
+                        if let Some(tope_mes) = calculate_obra_days_in_month(m, y, new_obra.fecha_inicio, new_obra.fecha_fin) {
+                            if dias_obra > tope_mes {
+                                let err_msg = format!("Los días asignados ({}) superan los días activos de la obra en el periodo ({} días).", dias_obra, tope_mes);
+                                let app_data = ui.global::<AppData>();
+                                app_data.set_reporte_add_alert_show(true);
+                                app_data.set_reporte_add_alert_text(err_msg.clone().into());
+                                app_data.set_reporte_add_alert_type("error".into());
+                                crate::show_toast_message(&ui, &err_msg);
+                                return;
+                            }
+                        }
+                    }
+
                     for other in &worker_rows {
                         if let Some(other_oid) = other.id_registro_obra {
                             if other_oid == obra_uuid {
@@ -2416,31 +2610,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 app_data.set_reporte_add_alert_type("error".into());
                                 crate::show_toast_message(&ui, &err_msg);
                                 return;
-                            }
-                            if other.dias_obra > 0 {
-                                let other_o = state.obras_options.iter().find(|o| o.id == other_oid);
-                                let other_ini = other_o.and_then(|o| o.fecha_inicio);
-                                let other_fin = other_o.and_then(|o| o.fecha_fin);
-                                if crate::db::reporte_liquidaciones::check_obras_date_overlap_in_month(
-                                    &cur_row.mes_periodo,
-                                    cur_row.anio_periodo,
-                                    &cur_row.periodo_str,
-                                    new_obra.fecha_inicio,
-                                    new_obra.fecha_fin,
-                                    other_ini,
-                                    other_fin,
-                                ) {
-                                    let err_msg = format!(
-                                        "Las fechas de la obra '{}' se superponen con la obra '{}' ya vinculada en este periodo.",
-                                        new_obra.numero, other.obra_numero
-                                    );
-                                    let app_data = ui.global::<AppData>();
-                                    app_data.set_reporte_add_alert_show(true);
-                                    app_data.set_reporte_add_alert_text(err_msg.clone().into());
-                                    app_data.set_reporte_add_alert_type("error".into());
-                                    crate::show_toast_message(&ui, &err_msg);
-                                    return;
-                                }
                             }
                         }
                     }
@@ -3021,11 +3190,38 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 let batch_workers = compute_batch_workers_list(&state, "__KEEP__", None);
                 let count = batch_workers.len() as i32;
                 let mut obras_vec = Vec::with_capacity(state.obras_options.len());
+                let mut multi_obras_vec = Vec::with_capacity(state.obras_options.len());
                 for o in &state.obras_options {
                     obras_vec.push(ReporteObraItem {
                         id: o.id.to_string().into(),
                         numero: o.numero.clone().into(),
                         label: o.label.clone().into(),
+                    });
+
+                    let vigencia_str = match (o.fecha_inicio, o.fecha_fin) {
+                        (Some(ini), Some(fin)) => format!("{} al {}", ini.format("%d/%m/%Y"), fin.format("%d/%m/%Y")),
+                        (Some(ini), None) => format!("Desde {}", ini.format("%d/%m/%Y")),
+                        (None, Some(fin)) => format!("Hasta {}", fin.format("%d/%m/%Y")),
+                        (None, None) => String::new(),
+                    };
+                    let tope_est = if let Some(first_sel_id) = state.selected_ids.iter().next() {
+                        if let Some(r) = state.all_rows.iter().find(|x| x.id_reporte_liq == *first_sel_id) {
+                            parse_month_and_year(&r.mes_periodo, r.anio_periodo, &r.periodo_str)
+                                .and_then(|(m, y)| calculate_obra_days_in_month(m, y, o.fecha_inicio, o.fecha_fin))
+                                .unwrap_or(30)
+                        } else {
+                            30
+                        }
+                    } else {
+                        30
+                    };
+                    multi_obras_vec.push(ReporteBatchObraItem {
+                        id: o.id.to_string().into(),
+                        numero: o.numero.clone().into(),
+                        label: o.label.clone().into(),
+                        vigencia_str: vigencia_str.into(),
+                        dias_tope_est: tope_est as i32,
+                        selected: false,
                     });
                 }
 
@@ -3033,6 +3229,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 app_data.set_reporte_batch_edit_worker_count(count);
                 app_data.set_reporte_batch_edit_workers(ModelRc::new(VecModel::from(batch_workers)));
                 app_data.set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
+                app_data.set_reporte_batch_edit_obras_multiselect(ModelRc::new(VecModel::from(multi_obras_vec)));
+                app_data.set_reporte_batch_edit_selected_obras_count(0);
+                app_data.set_reporte_batch_edit_multi_obra_enabled(false);
                 app_data.set_reporte_batch_edit_selected_obra_id("__KEEP__".into());
                 app_data.set_reporte_batch_edit_selected_obra_label("🔄 Mantener Obras Actuales (Sin Cambios)".into());
                 app_data.set_reporte_batch_edit_search_query("🔄 Mantener Obras Actuales (Sin Cambios)".into());
@@ -3058,6 +3257,50 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 app_data.set_reporte_batch_edit_alert_show(false);
                 app_data.set_show_reporte_batch_edit_modal(false);
                 app_data.set_reporte_batch_edit_dropdown_open(false);
+            }
+        });
+    }
+
+    // Batch Modal: Alternar modo de asignación 1 obra vs múltiples obras
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_reporte_batch_edit_set_multi_mode(move |enabled| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_reporte_batch_edit_multi_obra_enabled(enabled);
+                if enabled {
+                    app_data.set_reporte_batch_edit_change_obra(true);
+                    app_data.set_reporte_batch_edit_dropdown_open(false);
+                }
+            }
+        });
+    }
+
+    // Batch Modal: Seleccionar/deseleccionar obra en modo multi-obra
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_reporte_batch_edit_toggle_obra(move |obra_id_str| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let current_model = app_data.get_reporte_batch_edit_obras_multiselect();
+                let mut updated_vec = Vec::new();
+                let mut sel_count = 0;
+                for i in 0..current_model.row_count() {
+                    if let Some(mut item) = current_model.row_data(i) {
+                        if item.id == obra_id_str {
+                            item.selected = !item.selected;
+                        }
+                        if item.selected {
+                            sel_count += 1;
+                        }
+                        updated_vec.push(item);
+                    }
+                }
+                app_data.set_reporte_batch_edit_obras_multiselect(ModelRc::new(VecModel::from(updated_vec)));
+                app_data.set_reporte_batch_edit_selected_obras_count(sel_count);
+                if sel_count > 0 {
+                    app_data.set_reporte_batch_edit_alert_show(false);
+                }
             }
         });
     }
@@ -3194,6 +3437,122 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         obra_id_str, change_obra, dias_ced_str, change_ced, dias_obr_str, change_obr
                     ),
                 );
+
+                let app_data = ui.global::<AppData>();
+                let is_multi_obra = app_data.get_reporte_batch_edit_multi_obra_enabled();
+
+                if is_multi_obra {
+                    let multi_model = app_data.get_reporte_batch_edit_obras_multiselect();
+                    let mut selected_obra_uuids = Vec::new();
+                    for i in 0..multi_model.row_count() {
+                        if let Some(item) = multi_model.row_data(i) {
+                            if item.selected {
+                                if let Ok(u) = Uuid::parse_str(&item.id) {
+                                    selected_obra_uuids.push(u);
+                                }
+                            }
+                        }
+                    }
+
+                    if selected_obra_uuids.is_empty() {
+                        app_data.set_reporte_batch_edit_alert_text("Por favor selecciona al menos 1 obra de la lista para vincular.".into());
+                        app_data.set_reporte_batch_edit_alert_type("error".into());
+                        app_data.set_reporte_batch_edit_alert_show(true);
+                        crate::show_toast_message(&ui, "Selecciona al menos 1 obra para vincular a los trabajadores.");
+                        return;
+                    }
+
+                    let target_ced_opt = if change_ced {
+                        match dias_ced_str.trim().parse::<i16>() {
+                            Ok(d) if (1..=31).contains(&d) => Some(d),
+                            _ => {
+                                crate::show_toast_message(&ui, "Los Días Cédula deben ser un número entre 1 y 31.");
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let target_obr_opt = if change_obr {
+                        match dias_obr_str.trim().parse::<i16>() {
+                            Ok(d) if (0..=31).contains(&d) => Some(d),
+                            _ => {
+                                crate::show_toast_message(&ui, "Los Días Obra deben ser un número entre 0 y 31.");
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let (parent_ids, revision_uuid) = {
+                        let state = session_clone.lock().unwrap();
+                        let mut p_set = HashSet::new();
+                        for rid in &state.selected_ids {
+                            if let Some(r) = state.all_rows.iter().find(|x| x.id_reporte_liq == *rid) {
+                                p_set.insert(r.id_parent_reporte_liq);
+                            }
+                        }
+                        let rev_uuid = state.current_revision_id.as_deref().and_then(|id_str| Uuid::parse_str(id_str).ok()).unwrap_or(Uuid::nil());
+                        (p_set.into_iter().collect::<Vec<Uuid>>(), rev_uuid)
+                    };
+
+                    if parent_ids.is_empty() {
+                        crate::show_toast_message(&ui, "No se encontraron empleados base para vincular.");
+                        return;
+                    }
+
+                    if let Some(ref pool) = pool_clone {
+                        let mut client = match pool.get() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                crate::show_toast_message(&ui, &format!("Error conectando a BD: {}", e));
+                                return;
+                            }
+                        };
+
+                        match crate::db::reporte_liquidaciones::batch_assign_multiple_obras_to_employees(
+                            &mut client,
+                            revision_uuid,
+                            &parent_ids,
+                            &selected_obra_uuids,
+                            target_ced_opt,
+                            target_obr_opt,
+                        ) {
+                            Ok(batch_res) => {
+                                match crate::db::reporte_liquidaciones::fetch_reporte_liquidaciones(&mut client, revision_uuid) {
+                                    Ok(refreshed_rows) => {
+                                        let mut state = session_clone.lock().unwrap();
+                                        state.all_rows = refreshed_rows;
+                                        apply_reporte_filtering(&mut state);
+                                        render_reporte_ui(&ui, &state);
+                                    }
+                                    Err(e) => {
+                                        log::error!("Error refrescando filas tras asignación múltiple: {}", e);
+                                    }
+                                }
+
+                                app_data.set_show_reporte_batch_edit_modal(false);
+                                crate::show_toast_message(
+                                    &ui,
+                                    &format!("Se vincularon exitosamente {} obras a {} empleados.",
+                                        batch_res.obras_linked_count, batch_res.employees_updated
+                                    ),
+                                );
+                                return;
+                            }
+                            Err(err_msg) => {
+                                app_data.set_reporte_batch_edit_alert_text(err_msg.clone().into());
+                                app_data.set_reporte_batch_edit_alert_type("error".into());
+                                app_data.set_reporte_batch_edit_alert_show(true);
+                                crate::show_toast_message(&ui, &err_msg);
+                                return;
+                            }
+                        }
+                    }
+                    return;
+                }
 
                 if !change_obra && !change_ced && !change_obr {
                     crate::app_logger::log_ui_error(
@@ -4689,6 +5048,59 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     Err(e) => {
                         log::error!("Error exportando archivos SUA: {}", e);
                         crate::show_toast_message(&ui, &format!("Error exportando SUA: {}", e));
+                    }
+                }
+            }
+        });
+    }
+
+    // 25. Callback para verificar y autocorregir días de obras
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_verificar_y_corregir_dias(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let id_rev_str = {
+                    let state = session_clone.lock().unwrap();
+                    state.current_revision_id.clone()
+                };
+                let id_revision = match id_rev_str.and_then(|s| Uuid::parse_str(&s).ok()) {
+                    Some(id) => id,
+                    None => {
+                        crate::show_toast_message(&ui, "No hay una revisión activa seleccionada.");
+                        return;
+                    }
+                };
+
+                let pool = match pool_clone {
+                    Some(ref p) => p,
+                    None => {
+                        crate::show_toast_message(&ui, "No hay conexión a la base de datos.");
+                        return;
+                    }
+                };
+
+                let mut client = match pool.get() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        crate::show_toast_message(&ui, &format!("Error obteniendo cliente BD: {}", e));
+                        return;
+                    }
+                };
+
+                match crate::db::reporte_liquidaciones::verify_and_autocorrect_employee_obras(&mut client, id_revision) {
+                    Ok(stats) => {
+                        crate::show_toast_message(&ui, &stats.resumen);
+                        if let Ok(fresh_rows) = crate::db::reporte_liquidaciones::fetch_reporte_liquidaciones(&mut client, id_revision) {
+                            let mut state = session_clone.lock().unwrap();
+                            state.all_rows = fresh_rows;
+                            apply_reporte_filtering(&mut state);
+                            render_reporte_ui(&ui, &state);
+                        }
+                    }
+                    Err(e) => {
+                        crate::show_toast_message(&ui, &format!("Error verificando y corrigiendo días: {}", e));
                     }
                 }
             }

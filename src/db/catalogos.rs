@@ -277,10 +277,10 @@ pub fn fetch_clientes(client: &mut Client) -> Result<Vec<ClienteItem>, String> {
                 COALESCE(rf.id::text, ''),
                 (SELECT COUNT(*)::int FROM public.registros_patronales rp WHERE rp.id_cliente = c.id) AS rp_count,
                 (SELECT COUNT(*)::int FROM public.empleados e WHERE e.id_cliente = c.id) AS emp_count,
-                (
-                    EXISTS (SELECT 1 FROM public.empleados e JOIN public.nominas n ON e.id = n.id_empleado WHERE e.id_cliente = c.id)
-                    OR EXISTS (SELECT 1 FROM public.empleados e JOIN public.liquidaciones l ON e.id = l.id_empleado WHERE e.id_cliente = c.id)
-                    OR EXISTS (SELECT 1 FROM public.registros_patronales rp JOIN public.revisiones r ON rp.id = r.id_registro_patronal WHERE rp.id_cliente = c.id)
+                EXISTS (
+                    SELECT 1 FROM public.registros_patronales rp 
+                    JOIN public.revisiones r ON rp.id = r.id_registro_patronal 
+                    WHERE rp.id_cliente = c.id
                 ) AS has_ingested_data
             FROM public.clientes c
             LEFT JOIN public.clasificaciones_clientes cc ON c.id_clasificacion_cliente = cc.id
@@ -618,18 +618,8 @@ pub fn fetch_registros_patronales_by_cliente(
                     JOIN public.revisiones rev ON l.id_revision = rev.id 
                     WHERE rev.id_registro_patronal = rp.id
                 ) AS emp_count,
-                (
-                    EXISTS (SELECT 1 FROM public.revisiones rev WHERE rev.id_registro_patronal = rp.id)
-                    OR EXISTS (
-                        SELECT 1 FROM public.empleados e 
-                        JOIN public.nominas n ON e.id = n.id_empleado 
-                        WHERE e.id_cliente = rp.id_cliente
-                    )
-                    OR EXISTS (
-                        SELECT 1 FROM public.empleados e 
-                        JOIN public.liquidaciones l ON e.id = l.id_empleado 
-                        WHERE e.id_cliente = rp.id_cliente
-                    )
+                EXISTS (
+                    SELECT 1 FROM public.revisiones rev WHERE rev.id_registro_patronal = rp.id
                 ) AS has_ingested_data
             FROM public.registros_patronales rp
             JOIN public.clientes c ON rp.id_cliente = c.id

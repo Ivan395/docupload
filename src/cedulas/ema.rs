@@ -64,7 +64,10 @@ pub fn extract_ema_rp(raw_text: &str) -> Option<String> {
     // 4. Búsqueda fallback con regex general de RP IMSS (1 letra seguida de 9 o 10 números)
     if let Ok(reg) = fancy_regex::Regex::new(r"(?i)\b([A-Z]\d{9,10})\b") {
         if let Ok(Some(mat)) = reg.find(header_text) {
-            return Some(mat.as_str().trim().to_uppercase());
+            let clean: String = mat.as_str().chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
+            if !clean.is_empty() {
+                return Some(clean);
+            }
         }
     }
 
@@ -340,31 +343,45 @@ pub fn parse_ema_business(raw_text: &str) -> Business {
         // Prima R.T.
         if biz.prima.is_none() && lower.contains("prima r.") {
             // La prima puede estar en la misma línea o en la siguiente
-            let prima_str = if let Some(pos) = lower.find("prima r.") {
-                let after = &line[pos..];
-                after
-                    .chars()
-                    .filter(|c| c.is_ascii_digit() || *c == '.')
-                    .collect::<String>()
-            } else {
-                String::new()
-            };
-            if !prima_str.is_empty() {
-                biz.prima = Some(prima_str);
+            // Nota: no se filtran caracteres sueltos porque los puntos de la
+            // etiqueta "PRIMA R. T." producirían un valor inválido como "..".
+            let prima_str = lower
+                .find("prima r.")
+                .and_then(|pos| line.get(pos..))
+                .and_then(first_decimal_number);
+            if let Some(p) = prima_str {
+                biz.prima = Some(p);
             } else if i + 1 < lines.len() {
-                let next_line = lines[i + 1].trim();
-                let candidate_prima: String = next_line
-                    .chars()
-                    .filter(|c| c.is_ascii_digit() || *c == '.')
-                    .collect();
-                if !candidate_prima.is_empty() && candidate_prima.contains('.') {
-                    biz.prima = Some(candidate_prima);
+                if let Some(candidate_prima) = first_decimal_number(lines[i + 1].trim()) {
+                    if candidate_prima.contains('.') {
+                        biz.prima = Some(candidate_prima);
+                    }
                 }
             }
         }
     }
 
     biz
+}
+
+/// Devuelve el primer número (dígitos con un punto decimal opcional) que aparece en `s`.
+/// Ej.: "PRIMA R. T. 7.58875" -> Some("7.58875"), "PRIMA R. T." -> None
+fn first_decimal_number(s: &str) -> Option<String> {
+    let start = s.find(|c: char| c.is_ascii_digit())?;
+    let mut out = String::new();
+    let mut seen_dot = false;
+    for c in s[start..].chars() {
+        if c.is_ascii_digit() {
+            out.push(c);
+        } else if c == '.' && !seen_dot {
+            seen_dot = true;
+            out.push(c);
+        } else {
+            break;
+        }
+    }
+    let out = out.trim_end_matches('.').to_string();
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Parsea todos los trabajadores y sus movimientos desde el documento EMA

@@ -604,14 +604,14 @@ export component CedulaCuotasView inherits Rectangle {
                                 height: 38px;
                                 width: 180px;
                                 border-radius: 6px;
-                                background: btn_save.has-hover ? #022c22 : #064e3b;
+                                background: AppData.cedulas_view_is_processing ? #4b5563 : (btn_save.has-hover ? #022c22 : #064e3b);
 
                                 HorizontalLayout {
                                     alignment: center;
                                     spacing: 8px;
-                                    Text { text: "💾"; font-size: 14px; vertical-alignment: center; }
+                                    Text { text: AppData.cedulas_view_is_processing ? "⏳" : "💾"; font-size: 14px; vertical-alignment: center; }
                                     Text {
-                                        text: "Procesar y Guardar";
+                                        text: AppData.cedulas_view_is_processing ? "Procesando..." : "Procesar y Guardar";
                                         font-size: 12px;
                                         font-weight: 800;
                                         color: #ffffff;
@@ -620,7 +620,8 @@ export component CedulaCuotasView inherits Rectangle {
                                 }
 
                                 btn_save := TouchArea {
-                                    mouse-cursor: pointer;
+                                    enabled: !AppData.cedulas_view_is_processing;
+                                    mouse-cursor: AppData.cedulas_view_is_processing ? not-allowed : pointer;
                                     clicked => { AppLogic.procesar_y_guardar_cedulas(); }
                                 }
                             }

@@ -16,7 +16,7 @@ export component Sidebar inherits Rectangle {
     property <bool> can_go_obras: root.client_selected && root.rp_selected && root.revision_selected;
     property <bool> can_go_empleados: root.client_selected;
     property <bool> can_go_cedulas: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_cedulas || AppData.cedulas_access_allowed);
-    property <bool> can_go_reporte: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_liquidaciones || AppData.reportes_liquidaciones_data_exists);
+    property <bool> can_go_reporte: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_liquidaciones || AppData.revision_has_cedulas || AppData.reportes_liquidaciones_data_exists || AppData.reporte_liquidaciones_access_allowed);
     property <bool> can_go_nominas: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_nominas || AppData.nominas_data_exists || AppData.nominas_access_allowed);
 
     VerticalLayout {
@@ -636,63 +636,6 @@ export component Sidebar inherits Rectangle {
                     }
                 }
 
-                Rectangle {
-                    height: 1px;
-                    background: #f1f5f9;
-                }
-
-                // Configuración BD (F11) -> View 11
-                Rectangle {
-                    height: 40px;
-                    border-radius: 8px;
-                    background: AppData.current_view == 11 ? #1e3a8a : (btn_f11.has-hover ? #f8fafc : transparent);
-
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        alignment: space-between;
-
-                        HorizontalLayout {
-                            spacing: 10px;
-                            alignment: center;
-                            Text {
-                                text: "🗄️";
-                                font-size: 14px;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: "Configuración BD";
-                                font-size: 13px;
-                                font-weight: 700;
-                                color: AppData.current_view == 11 ? #ffffff : #1e293b;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        Rectangle {
-                            height: 20px;
-                            width: 28px;
-                            border-radius: 4px;
-                            background: AppData.current_view == 11 ? #2563eb : #f1f5f9;
-                            y: (parent.height - self.height) / 2;
-                            Text {
-                                text: "F11";
-                                font-size: 10px;
-                                font-weight: 700;
-                                color: AppData.current_view == 11 ? #ffffff : #64748b;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    btn_f11 := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            AppLogic.navigate_view(11);
-                        }
-                    }
-                }
             }
 
         }
@@ -740,7 +683,7 @@ export component Sidebar inherits Rectangle {
                         y: (parent.height - self.height) / 2;
                     }
                     Text {
-                        text: AppData.db_status_text != "" ? AppData.db_status_text : (AppData.db_connected ? "Sincronización DB: En línea" : "DB: No instalada localmente");
+                        text: AppData.db_status_text != "" ? AppData.db_status_text : (AppData.db_connected ? "Base de Datos Local: Conectada" : "DB Local: Desconectada");
                         font-size: 11px;
                         font-weight: 600;
                         color: AppData.db_connected ? #15803d : #b91c1c;

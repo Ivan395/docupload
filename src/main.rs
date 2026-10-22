@@ -512,174 +512,6 @@ pub fn open_folder_in_os(path: &Path) {
     }
 }
 
-fn populate_db_config_ui(ui: &MainWindow) {
-    let cfg = crate::db::get_active_config();
-    let path = crate::db::get_active_config_path();
-    let app_data = ui.global::<AppData>();
-    app_data.set_db_cfg_host(cfg.host.as_str().into());
-    app_data.set_db_cfg_port(cfg.port.to_string().as_str().into());
-    app_data.set_db_cfg_database(cfg.database.as_str().into());
-    app_data.set_db_cfg_user(cfg.user.as_str().into());
-    app_data.set_db_cfg_password(cfg.password.as_str().into());
-    app_data.set_db_cfg_ssl_mode(cfg.ssl_mode.as_str().into());
-    app_data.set_db_cfg_connection_url(cfg.connection_url.as_str().into());
-    app_data.set_db_cfg_file_path(path.display().to_string().as_str().into());
-    app_data.set_db_cfg_use_custom_url(!cfg.connection_url.trim().is_empty());
-}
-
-fn load_db_conexiones_ui(ui: &MainWindow) {
-    let ui_weak = ui.as_weak();
-    let pool_opt = crate::db::get_global_pool();
-    let mut conexiones = Vec::new();
-    if let Some(ref p) = pool_opt {
-        if let Ok(mut client) = p.get() {
-            let _ = crate::db::ensure_conexiones_table(&mut client);
-            if let Ok(list) = crate::db::fetch_conexiones(&mut client) {
-                conexiones = list;
-            }
-        }
-    }
-
-    if conexiones.is_empty() {
-        let active_cfg = crate::db::get_active_config();
-        let local_cfg = crate::db::config::get_local_fallback_config();
-        let is_aiven = active_cfg.host.contains("aivencloud.com");
-        let aiven_pwd = if is_aiven {
-            active_cfg.password.clone()
-        } else {
-            std::env::var("AIVEN_PASSWORD")
-                .or_else(|_| std::env::var("DB_PASSWORD"))
-                .unwrap_or_default()
-        };
-        let aiven_url = if !aiven_pwd.is_empty() {
-            format!(
-                "postgres://avnadmin:{}@pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com:19522/firma_fiscal_acd?sslmode=require",
-                aiven_pwd
-            )
-        } else {
-            "postgres://avnadmin@pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com:19522/firma_fiscal_acd?sslmode=require".to_string()
-        };
-
-        conexiones = vec![
-            crate::db::ConexionItem {
-                id: "local_id".to_string(),
-                nombre: "local".to_string(),
-                host: local_cfg.host,
-                port: local_cfg.port as i32,
-                db_nombre: local_cfg.database,
-                usuario: local_cfg.user,
-                contrasenia: local_cfg.password,
-                ssl_mode: "disable".to_string(),
-                connection_url: String::new(),
-                protocolo: "postgres".to_string(),
-                es_activo: !is_aiven,
-                estado_online: "unknown".to_string(),
-                estado_msg: String::new(),
-            },
-            crate::db::ConexionItem {
-                id: "avni_id".to_string(),
-                nombre: "avni".to_string(),
-                host: "pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com".to_string(),
-                port: 19522,
-                db_nombre: "firma_fiscal_acd".to_string(),
-                usuario: "avnadmin".to_string(),
-                contrasenia: aiven_pwd,
-                ssl_mode: "require".to_string(),
-                connection_url: aiven_url,
-                protocolo: "postgres".to_string(),
-                es_activo: is_aiven,
-                estado_online: "unknown".to_string(),
-                estado_msg: String::new(),
-            },
-            crate::db::ConexionItem {
-                id: "house_remoto_id".to_string(),
-                nombre: "house remoto".to_string(),
-                host: "192.168.1.200".to_string(),
-                port: 5432,
-                db_nombre: "firma_fiscal_acd".to_string(),
-                usuario: "remoto_user".to_string(),
-                contrasenia: String::new(),
-                ssl_mode: "disable".to_string(),
-                connection_url: String::new(),
-                protocolo: "postgres".to_string(),
-                es_activo: false,
-                estado_online: "unknown".to_string(),
-                estado_msg: String::new(),
-            },
-        ];
-    }
-
-    let slint_items: Vec<DbConexionItem> = conexiones.iter().map(|c| {
-        DbConexionItem {
-            id: c.id.as_str().into(),
-            nombre: c.nombre.as_str().into(),
-            host: c.host.as_str().into(),
-            port: c.port.to_string().as_str().into(),
-            db_nombre: c.db_nombre.as_str().into(),
-            usuario: c.usuario.as_str().into(),
-            contrasenia: c.contrasenia.as_str().into(),
-            ssl_mode: c.ssl_mode.as_str().into(),
-            connection_url: c.connection_url.as_str().into(),
-            protocolo: c.protocolo.as_str().into(),
-            es_activo: c.es_activo,
-            estado_online: c.estado_online.as_str().into(),
-            estado_msg: c.estado_msg.as_str().into(),
-        }
-    }).collect();
-
-    let app_data = ui.global::<AppData>();
-    app_data.set_db_conexiones(ModelRc::new(VecModel::from(slint_items)));
-
-    trigger_check_conexiones_status(ui_weak, conexiones);
-}
-
-fn trigger_check_conexiones_status(ui_weak: slint::Weak<MainWindow>, conexiones: Vec<crate::db::ConexionItem>) {
-    if let Some(ui) = ui_weak.upgrade() {
-        let app_data = ui.global::<AppData>();
-        app_data.set_db_conexiones_loading(true);
-        let current_models = app_data.get_db_conexiones();
-        let mut updating = Vec::new();
-        for i in 0..current_models.row_count() {
-            if let Some(mut it) = current_models.row_data(i) {
-                it.estado_online = "checking".into();
-                it.estado_msg = "Comprobando disponibilidad...".into();
-                updating.push(it);
-            }
-        }
-        app_data.set_db_conexiones(ModelRc::new(VecModel::from(updating)));
-    }
-
-    thread::spawn(move || {
-        let mut results = Vec::new();
-        for conn in &conexiones {
-            let (is_online, msg) = crate::db::check_conexion_status(conn);
-            let estado = if is_online { "online" } else { "offline" };
-            results.push((conn.id.clone(), estado.to_string(), msg));
-        }
-
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                app_data.set_db_conexiones_loading(false);
-                let current_models = app_data.get_db_conexiones();
-                let mut updated: Vec<DbConexionItem> = Vec::new();
-                for i in 0..current_models.row_count() {
-                    if let Some(mut item) = current_models.row_data(i) {
-                        for (res_id, res_estado, res_msg) in &results {
-                            if item.id == res_id.as_str() {
-                                item.estado_online = res_estado.as_str().into();
-                                item.estado_msg = res_msg.as_str().into();
-                                break;
-                            }
-                        }
-                        updated.push(item);
-                    }
-                }
-                app_data.set_db_conexiones(ModelRc::new(VecModel::from(updated)));
-            }
-        });
-    });
-}
 
 fn load_clientes_ui(ui: &MainWindow, pool: &DbPool) {
     let mut client = match pool.get() {
@@ -1029,7 +861,7 @@ fn load_obras_ui(ui: &MainWindow, pool: &DbPool, revision_id: &str) {
     app_data.set_obras_superficie_total(total_sup as f32);
     app_data.set_obras_monto_total(total_monto as f32);
     app_data.set_obras_superficie_total_str(format!("{:.2} m²", total_sup).into());
-    app_data.set_obras_monto_total_str(format!("${:.2} MXN", total_monto).into());
+    app_data.set_obras_monto_total_str(format!("${} MXN", format_monto_mexico(total_monto)).into());
 
     let filtered: Vec<RegistroObraData> = obras
         .into_iter()
@@ -1075,7 +907,7 @@ fn load_obras_ui(ui: &MainWindow, pool: &DbPool, revision_id: &str) {
                 superficie_construida: o.superficie_construido as f32,
                 superficie_construida_str: format!("{:.2} m²", o.superficie_construido).into(),
                 monto: o.monto as f32,
-                monto_str: format!("${:.2} MXN", o.monto).into(),
+                monto_str: format!("${} MXN", format_monto_mexico(o.monto)).into(),
                 delegacion: o.delegacion.into(),
                 subdelegacion: o.subdelegacion.into(),
                 created_at_str: o.created_at.into(),
@@ -1090,38 +922,30 @@ fn load_obras_ui(ui: &MainWindow, pool: &DbPool, revision_id: &str) {
 
 fn update_global_stats(ui: &MainWindow, pool: &DbPool) {
     if let Ok(mut client) = pool.get() {
-        if let Ok(bundle) = fetch_catalogos_bundle(&mut client) {
-            let app_data = ui.global::<AppData>();
-            app_data.set_total_clientes_count(bundle.total_clientes);
-            app_data.set_total_rp_count(bundle.total_registros_patronales);
-            app_data.set_total_empleados_activos_count(bundle.total_empleados);
-            app_data.set_catalogos_loaded_str("100% (9 Catálogos)".into());
+        let app_data = ui.global::<AppData>();
 
-            let (rev_cnt, obr_cnt): (i32, i32) = client
-                .query_one(
-                    "SELECT (SELECT COUNT(*) FROM public.revisiones)::int, (SELECT COUNT(*) FROM public.registros_obras WHERE COALESCE(creado_usuario, false) = true)::int",
-                    &[],
-                )
-                .map(|r| (r.get(0), r.get(1)))
-                .unwrap_or((0, 0));
-            app_data.set_total_revisiones_count(rev_cnt);
-            app_data.set_total_obras_count(obr_cnt);
+        // 1. Cargar combos de catálogos estáticos únicamente en la primera llamada
+        let need_combos = app_data.get_tipos_personas_combo().row_count() == 0;
+        if need_combos {
+            if let Ok(bundle) = fetch_catalogos_bundle(&mut client) {
+                app_data.set_catalogos_loaded_str("100% (9 Catálogos)".into());
 
-            // Tipos personas combo
-            let mut tp_strings = vec!["-- Seleccionar Tipo Persona --".to_string()];
-            for tp in bundle.tipos_personas {
-                tp_strings.push(tp.tipo);
+                // Tipos personas combo
+                let mut tp_strings = vec!["-- Seleccionar Tipo Persona --".to_string()];
+                for tp in bundle.tipos_personas {
+                    tp_strings.push(tp.tipo);
+                }
+                let tp_models: Vec<SharedString> = tp_strings.into_iter().map(|s| s.into()).collect();
+                app_data.set_tipos_personas_combo(ModelRc::new(VecModel::from(tp_models)));
+
+                // Clases combo
+                let mut c_strings = vec!["-- Seleccionar Clase --".to_string()];
+                for cl in bundle.clases {
+                    c_strings.push(format!("Clase {} ({})", cl.nombre, cl.descripcion));
+                }
+                let c_models: Vec<SharedString> = c_strings.into_iter().map(|s| s.into()).collect();
+                app_data.set_clases_combo(ModelRc::new(VecModel::from(c_models)));
             }
-            let tp_models: Vec<SharedString> = tp_strings.into_iter().map(|s| s.into()).collect();
-            app_data.set_tipos_personas_combo(ModelRc::new(VecModel::from(tp_models)));
-
-            // Clases combo
-            let mut c_strings = vec!["-- Seleccionar Clase --".to_string()];
-            for cl in bundle.clases {
-                c_strings.push(format!("Clase {} ({})", cl.nombre, cl.descripcion));
-            }
-            let c_models: Vec<SharedString> = c_strings.into_iter().map(|s| s.into()).collect();
-            app_data.set_clases_combo(ModelRc::new(VecModel::from(c_models)));
 
             // Estatus combos
             if let Ok(estatus_opts) = fetch_estatus_options(&mut client) {
@@ -1143,6 +967,31 @@ fn update_global_stats(ui: &MainWindow, pool: &DbPool) {
                 let con_models: Vec<SharedString> = con_strings.into_iter().map(|s| s.into()).collect();
                 app_data.set_conceptos_combo(ModelRc::new(VecModel::from(con_models)));
             }
+        }
+
+        // 2. Consulta única consolidada para todos los contadores globales (1 round-trip veloz)
+        if let Ok(r) = client.query_one(
+            r#"
+            SELECT 
+                (SELECT COUNT(*) FROM public.clientes)::int,
+                (SELECT COUNT(*) FROM public.registros_patronales)::int,
+                (SELECT COUNT(*) FROM public.empleados WHERE COALESCE(esta_activo, true) = true)::int,
+                (SELECT COUNT(*) FROM public.revisiones)::int,
+                (SELECT COUNT(*) FROM public.registros_obras WHERE COALESCE(creado_usuario, false) = true)::int
+            "#,
+            &[],
+        ) {
+            let cli_cnt: i32 = r.get(0);
+            let rp_cnt: i32 = r.get(1);
+            let emp_cnt: i32 = r.get(2);
+            let rev_cnt: i32 = r.get(3);
+            let obr_cnt: i32 = r.get(4);
+
+            app_data.set_total_clientes_count(cli_cnt);
+            app_data.set_total_rp_count(rp_cnt);
+            app_data.set_total_empleados_activos_count(emp_cnt);
+            app_data.set_total_revisiones_count(rev_cnt);
+            app_data.set_total_obras_count(obr_cnt);
         }
     }
 }
@@ -2144,8 +1993,27 @@ fn spawn_cedulas_view_worker(
     let (input_paths, client_rfc, client_nombre, revision_id, revision_nombre) = {
         let Some(ui) = ui_weak.upgrade() else { return; };
         let app_data = ui.global::<AppData>();
-        let session = session_arc.lock().unwrap();
+        let mut session = session_arc.lock().unwrap();
         if session.files.is_empty() {
+            let rev_id = app_data.get_selected_revision_id().to_string();
+            let c_nom = app_data.get_selected_cliente_nombre().to_string();
+            let rp = app_data.get_selected_rp_registro().to_string();
+            let rev_nom = app_data.get_selected_revision_nombre().to_string();
+            if !rev_id.is_empty() && !c_nom.is_empty() {
+                let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&rev_id);
+                let rustfs_cards = crate::rustfs::sync_and_load_cedulas_view_files(
+                    &c_nom,
+                    &rp,
+                    &rev_nom,
+                    &cache_dir,
+                ).unwrap_or_default();
+                if !rustfs_cards.is_empty() {
+                    session.files = rustfs_cards;
+                }
+            }
+        }
+        if session.files.is_empty() {
+            app_data.set_cedulas_view_is_processing(false);
             show_toast_message(&ui, "Por favor agrega al menos un archivo antes de procesar.");
             return;
         }
@@ -2166,7 +2034,7 @@ fn spawn_cedulas_view_worker(
 
     let ui_w = ui_weak.clone();
     let session_w = session_arc.clone();
-    let pool_w = pool_opt.clone();
+    let pool_w = pool_opt.or_else(crate::db::get_global_pool);
 
     thread::spawn(move || {
         let temp_dir_handle = tempfile::Builder::new()
@@ -2237,25 +2105,24 @@ fn spawn_cedulas_view_worker(
             }
         }
 
-        // Sincronizar todos los archivos dentro de la estructura Cedulas_de_cuotas en RustFS omitiendo Trash
+        // Usar los archivos que ya están en memoria/disco local si existen; solo sincronizar de RustFS si está vacío
         let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&revision_id);
-        let rustfs_cards = crate::rustfs::sync_and_load_cedulas_view_files(
-            &client_nombre,
-            &rp_for_rustfs,
-            &revision_nombre,
-            &cache_dir,
-        ).unwrap_or_default();
-
-        let files_to_process: Vec<PathBuf> = if !rustfs_cards.is_empty() {
-            rustfs_cards.iter().map(|c| c.path.clone()).collect()
-        } else {
+        let files_to_process: Vec<PathBuf> = if !input_paths.is_empty() {
             input_paths.clone()
+        } else {
+            let rustfs_cards = crate::rustfs::sync_and_load_cedulas_view_files(
+                &client_nombre,
+                &rp_for_rustfs,
+                &revision_nombre,
+                &cache_dir,
+            ).unwrap_or_default();
+            rustfs_cards.iter().map(|c| c.path.clone()).collect()
         };
 
         let ui_for_cb = ui_w.clone();
         let progress_cb = move |current: usize, total: usize, msg: &str| {
             let frac = if total > 0 {
-                (current as f32 / total as f32).clamp(0.02, 0.98)
+                0.05 + (current as f32 / total as f32) * 0.55
             } else {
                 0.05
             };
@@ -2304,11 +2171,29 @@ fn spawn_cedulas_view_worker(
                     let _ = std::fs::remove_file(&local_cached);
                 }
 
-                // Guardar en Base de Datos PostgreSQL
+                // Guardar en Base de Datos PostgreSQL con progreso interactivo en la UI
                 let mut db_saved_summary = String::new();
                 let mut saved_stats_opt: Option<CedulasDbStats> = None;
                 if let Some(ref pool) = pool_w {
-                    match save_cedulas_audit_to_db(pool, &revision_id, &businesses) {
+                    let ui_for_db_cb = ui_w.clone();
+                    let db_progress_cb = move |current: usize, total: usize, msg: &str| {
+                        let frac = if total > 0 {
+                            0.60 + (current as f32 / total as f32) * 0.35
+                        } else {
+                            0.75
+                        };
+                        let text = msg.to_string();
+                        let ui_clone = ui_for_db_cb.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_clone.upgrade() {
+                                let app_data = ui.global::<AppData>();
+                                app_data.set_cedulas_view_progress_fraction(frac);
+                                app_data.set_cedulas_view_progress_text(text.into());
+                            }
+                        });
+                    };
+
+                    match save_cedulas_audit_to_db(pool, &revision_id, &businesses, Some(&db_progress_cb)) {
                         Ok(stats) => {
                             db_saved_summary = format!(
                                 "Guardadas {} liquidaciones y {} detalles de cédulas.",
@@ -2338,10 +2223,6 @@ fn spawn_cedulas_view_worker(
                 let ui_final = ui_w.clone();
                 let session_final = session_w.clone();
                 let pool_stats = pool_w.clone();
-                let cache_dir_clone = cache_dir.clone();
-                let c_nom_clone = client_nombre.clone();
-                let rp_clone = rp_for_rustfs.clone();
-                let rev_clone = revision_nombre.clone();
 
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_final.upgrade() {
@@ -2378,14 +2259,8 @@ fn spawn_cedulas_view_worker(
 
                         {
                             let mut sess = session_final.lock().unwrap();
-                            if let Ok(updated_cards) = crate::rustfs::sync_and_load_cedulas_view_files(
-                                &c_nom_clone,
-                                &rp_clone,
-                                &rev_clone,
-                                &cache_dir_clone,
-                            ) {
-                                sess.files = updated_cards;
-                            }
+                            let bad_names: HashSet<String> = mismatch_report.items.iter().map(|it| it.filename.clone()).collect();
+                            sess.files.retain(|f| !bad_names.contains(&f.filename));
                             sess.audit_res = Some(audit_res);
                             sess.businesses = businesses;
                             sess.current_revision_id = Some(revision_id.clone());
@@ -2393,6 +2268,7 @@ fn spawn_cedulas_view_worker(
                         }
                         let app_data = ui.global::<AppData>();
                         app_data.set_cedulas_view_is_processing(false);
+                        app_data.set_cedulas_view_state(2);
                         app_data.set_cedulas_view_progress_fraction(1.0);
                         app_data.set_cedulas_view_progress_text("¡Procesamiento y guardado completado!".into());
                         app_data.set_reporte_liquidaciones_access_allowed(true);
@@ -2410,6 +2286,13 @@ fn spawn_cedulas_view_worker(
                                         
                                         let all_data = has_obras && has_cedulas && has_nominas && has_liquidaciones;
                                         app_data.set_revision_has_all_data(all_data);
+
+                                        if has_nominas {
+                                            app_data.set_nominas_access_allowed(true);
+                                        }
+                                        if has_liquidaciones || has_cedulas {
+                                            app_data.set_reporte_liquidaciones_access_allowed(true);
+                                        }
                                     }
                                 }
                             }
@@ -2557,7 +2440,8 @@ fn sync_and_load_cedulas_view_data(
         return;
     }
 
-    let Some(pool) = pool_opt else { return; };
+    let pool_to_use = pool_opt.as_ref().cloned().or_else(crate::db::get_global_pool);
+    let Some(pool) = pool_to_use.as_ref() else { return; };
     let mut client = match pool.get() {
         Ok(c) => c,
         Err(e) => {
@@ -2684,11 +2568,12 @@ fn handle_confirmar_borrar_todas_cedulas(
         let mut r_reg = rp_registro;
         let mut rev_nom = revision_nombre;
 
-        if let Some(ref pool) = pool_clone {
+        let pool_to_use = pool_clone.or_else(crate::db::get_global_pool);
+        if let Some(ref pool) = pool_to_use {
             if let Ok(mut client) = pool.get() {
                 if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
                     if let Ok(Some(row)) = client.query_opt(
-                        "SELECT c.nombre, rp.registro_patronal, r.nombre_revision
+                        "SELECT c.nombre, rp.registro, r.nombre
                          FROM revisiones r
                          JOIN registros_patronales rp ON r.id_registro_patronal = rp.id
                          JOIN clientes c ON rp.id_cliente = c.id
@@ -2730,7 +2615,7 @@ fn handle_confirmar_borrar_todas_cedulas(
         let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&revision_id);
         let _ = std::fs::remove_dir_all(&cache_dir);
 
-        let pool_for_ui = pool_clone.clone();
+        let pool_for_ui = pool_to_use.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 if let Some(err) = error_msg {
@@ -2923,26 +2808,11 @@ fn main() -> Result<(), slint::PlatformError> {
     app_data.set_db_status_text(diag.status_text.as_str().into());
     app_data.set_db_status_detail(diag.detail_text.as_str().into());
 
-    // Poblar valores de configuración de PostgreSQL en la UI desde db_config.json
-    populate_db_config_ui(&main_window);
-    load_db_conexiones_ui(&main_window);
-
     if diag.is_connected {
-        if crate::db::is_fallback_active() {
-            show_toast_message(
-                &main_window,
-                "Aviso: Conexión remota no disponible. Operando en modo de contingencia con base de datos local.",
-            );
-            crate::app_logger::log_system_info(
-                "Base de Datos (Fallback)",
-                "PostgreSQL operando en modo local (localhost:5432) por contingencia.",
-            );
-        } else {
-            crate::app_logger::log_system_info(
-                "Base de Datos",
-                &format!("PostgreSQL conectado y verificado en línea: {}", diag.detail_text),
-            );
-        }
+        crate::app_logger::log_system_info(
+            "Base de Datos",
+            &format!("PostgreSQL conectado y verificado: {}", diag.detail_text),
+        );
     } else {
         crate::app_logger::log_db_simple_error(
             "sistema",
@@ -2976,10 +2846,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_db_connected(diag.is_connected);
                 app_data.set_db_status_text(diag.status_text.as_str().into());
                 app_data.set_db_status_detail(diag.detail_text.as_str().into());
-                // Al hacer clic en el estado de la BD, abre directamente la vista de configuración
-                populate_db_config_ui(&ui);
-                load_db_conexiones_ui(&ui);
-                app_data.set_current_view(11);
+                show_toast_message(&ui, &format!("Estado de BD: {}", diag.detail_text));
             }
         });
     }
@@ -3024,510 +2891,6 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Callbacks de la Vista de Configuración de Base de Datos PostgreSQL
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_load_db_config(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                populate_db_config_ui(&ui);
-                load_db_conexiones_ui(&ui);
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_reset_db_config_defaults(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let def = crate::db::DbConfig::default();
-                let app_data = ui.global::<AppData>();
-                app_data.set_db_cfg_host(def.host.as_str().into());
-                app_data.set_db_cfg_port(def.port.to_string().as_str().into());
-                app_data.set_db_cfg_database(def.database.as_str().into());
-                app_data.set_db_cfg_user(def.user.as_str().into());
-                app_data.set_db_cfg_password(def.password.as_str().into());
-                app_data.set_db_cfg_ssl_mode(def.ssl_mode.as_str().into());
-                app_data.set_db_cfg_connection_url(def.connection_url.as_str().into());
-                app_data.set_db_cfg_use_custom_url(false);
-                app_data.set_db_cfg_test_status("".into());
-                app_data.set_db_cfg_test_result("".into());
-                show_toast_message(&ui, "Valores predeterminados restaurados en el formulario.");
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_open_db_config_folder(move || {
-            let path = crate::db::get_active_config_path();
-            let folder = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-            let folder_str = folder.display().to_string();
-
-            #[cfg(target_os = "linux")]
-            let _ = std::process::Command::new("xdg-open").arg(&folder_str).spawn();
-            #[cfg(target_os = "windows")]
-            let _ = std::process::Command::new("explorer").arg(&folder_str).spawn();
-            #[cfg(target_os = "macos")]
-            let _ = std::process::Command::new("open").arg(&folder_str).spawn();
-
-            if let Some(ui) = ui_weak.upgrade() {
-                show_toast_message(&ui, &format!("Ruta de configuración: {}", path.display()));
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_test_db_config(move |host, port, database, user, password, ssl_mode, connection_url| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                app_data.set_db_cfg_is_testing(true);
-                app_data.set_db_cfg_test_status("testing".into());
-                app_data.set_db_cfg_test_result("Verificando conexión con el servidor PostgreSQL...".into());
-
-                let port_num = port.trim().parse::<u16>().unwrap_or(5432);
-                let test_cfg = crate::db::DbConfig {
-                    host: host.trim().to_string(),
-                    port: port_num,
-                    database: database.trim().to_string(),
-                    user: user.trim().to_string(),
-                    password: password.to_string(),
-                    ssl_mode: if ssl_mode.trim().is_empty() { "disable".to_string() } else { ssl_mode.trim().to_string() },
-                    connection_url: connection_url.trim().to_string(),
-                };
-
-                let ui_weak_inner = ui_weak.clone();
-                thread::spawn(move || {
-                    let result = test_cfg.test_connection();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui_inner) = ui_weak_inner.upgrade() {
-                            let data = ui_inner.global::<AppData>();
-                            data.set_db_cfg_is_testing(false);
-                            match result {
-                                Ok(msg) => {
-                                    data.set_db_cfg_test_status("success".into());
-                                    data.set_db_cfg_test_result(msg.into());
-                                }
-                                Err(err) => {
-                                    data.set_db_cfg_test_status("error".into());
-                                    data.set_db_cfg_test_result(err.into());
-                                }
-                            }
-                        }
-                    });
-                });
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        let inhabiles_lock = imss_inhabiles.clone();
-        app_logic.on_save_db_config(move |host, port, database, user, password, ssl_mode, connection_url| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                app_data.set_db_cfg_is_saving(true);
-
-                let port_num = port.trim().parse::<u16>().unwrap_or(5432);
-                let new_cfg = crate::db::DbConfig {
-                    host: host.trim().to_string(),
-                    port: port_num,
-                    database: database.trim().to_string(),
-                    user: user.trim().to_string(),
-                    password: password.to_string(),
-                    ssl_mode: if ssl_mode.trim().is_empty() { "disable".to_string() } else { ssl_mode.trim().to_string() },
-                    connection_url: connection_url.trim().to_string(),
-                };
-
-                // 1. Guardar en disco persistente
-                match crate::db::update_active_config(new_cfg.clone()) {
-                    Ok(path) => {
-                        app_data.set_db_cfg_file_path(path.display().to_string().as_str().into());
-                        crate::app_logger::log_system_info(
-                            "Configuración BD",
-                            &format!("Credenciales guardadas exitosamente en '{}'", path.display()),
-                        );
-                    }
-                    Err(e) => {
-                        app_data.set_db_cfg_is_saving(false);
-                        app_data.set_db_cfg_test_status("error".into());
-                        app_data.set_db_cfg_test_result(format!("Error guardando archivo: {}", e).into());
-                        show_toast_message(&ui, &format!("Error al guardar configuración: {}", e));
-                        return;
-                    }
-                }
-
-                // 2. Reconectar pool e inicializar esquema
-                let ui_weak_inner = ui_weak.clone();
-                let inhabiles_inner = inhabiles_lock.clone();
-                thread::spawn(move || {
-                    let pool_res = crate::db::reload_global_pool(8);
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui_inner) = ui_weak_inner.upgrade() {
-                            let data = ui_inner.global::<AppData>();
-                            data.set_db_cfg_is_saving(false);
-
-                            match pool_res {
-                                Ok(new_pool) => {
-                                    if let Ok(mut client) = new_pool.get() {
-                                        let _ = ensure_schema(&mut client);
-                                        if let Ok(set) = fetch_imss_inhabiles(&mut client) {
-                                            if let Ok(mut w) = inhabiles_inner.write() {
-                                                *w = set;
-                                            }
-                                        }
-                                    }
-
-                                    let diag = crate::db::diagnose_postgres();
-                                    data.set_db_connected(diag.is_connected);
-                                    data.set_db_status_text(diag.status_text.as_str().into());
-                                    data.set_db_status_detail(diag.detail_text.as_str().into());
-                                    data.set_db_cfg_test_status("success".into());
-                                    data.set_db_cfg_test_result("Configuración guardada y base de datos conectada con éxito.".into());
-
-                                    load_clientes_ui(&ui_inner, &new_pool);
-                                    update_global_stats(&ui_inner, &new_pool);
-                                    load_db_conexiones_ui(&ui_inner);
-
-                                    show_toast_message(&ui_inner, "Configuración guardada y base de datos conectada exitosamente.");
-                                }
-                                Err(err) => {
-                                    let diag = crate::db::diagnose_postgres();
-                                    data.set_db_connected(false);
-                                    data.set_db_status_text(diag.status_text.as_str().into());
-                                    data.set_db_status_detail(diag.detail_text.as_str().into());
-                                    data.set_db_cfg_test_status("error".into());
-                                    data.set_db_cfg_test_result(format!("Guardado en disco, pero no se pudo conectar: {}", err).into());
-                                    show_toast_message(&ui_inner, "Configuración guardada, pero falló la conexión con el servidor.");
-                                }
-                            }
-                        }
-                    });
-                });
-            }
-        });
-    }
-
-    // Callbacks de Múltiples Conexiones PostgreSQL
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_reload_db_conexiones(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                load_db_conexiones_ui(&ui);
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_check_all_conexiones_status(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                let current = app_data.get_db_conexiones();
-                let mut list = Vec::new();
-                for i in 0..current.row_count() {
-                    if let Some(item) = current.row_data(i) {
-                        list.push(crate::db::ConexionItem {
-                            id: item.id.to_string(),
-                            nombre: item.nombre.to_string(),
-                            host: item.host.to_string(),
-                            port: item.port.parse::<i32>().unwrap_or(5432),
-                            db_nombre: item.db_nombre.to_string(),
-                            usuario: item.usuario.to_string(),
-                            contrasenia: item.contrasenia.to_string(),
-                            ssl_mode: item.ssl_mode.to_string(),
-                            connection_url: item.connection_url.to_string(),
-                            protocolo: item.protocolo.to_string(),
-                            es_activo: item.es_activo,
-                            estado_online: "checking".to_string(),
-                            estado_msg: String::new(),
-                        });
-                    }
-                }
-                trigger_check_conexiones_status(ui_weak.clone(), list);
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_open_new_conexion_modal(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                app_data.set_form_conexion_id("".into());
-                app_data.set_form_conexion_nombre("".into());
-                app_data.set_form_conexion_host("localhost".into());
-                app_data.set_form_conexion_port("5432".into());
-                app_data.set_form_conexion_db_nombre("firma_fiscal_acd".into());
-                app_data.set_form_conexion_usuario("postgres".into());
-                app_data.set_form_conexion_contrasenia("".into());
-                app_data.set_form_conexion_ssl_mode("disable".into());
-                app_data.set_form_conexion_connection_url("".into());
-                app_data.set_form_conexion_protocolo("postgres".into());
-                app_data.set_form_conexion_use_url(false);
-                app_data.set_form_conexion_test_status("".into());
-                app_data.set_form_conexion_test_msg("".into());
-                app_data.set_form_conexion_is_testing(false);
-                app_data.set_is_editing_conexion(false);
-                app_data.set_show_conexion_modal(true);
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_open_edit_conexion_modal(move |id| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                let current = app_data.get_db_conexiones();
-                for i in 0..current.row_count() {
-                    if let Some(item) = current.row_data(i) {
-                        if item.id == id {
-                            app_data.set_form_conexion_id(item.id);
-                            app_data.set_form_conexion_nombre(item.nombre);
-                            app_data.set_form_conexion_host(item.host);
-                            app_data.set_form_conexion_port(item.port);
-                            app_data.set_form_conexion_db_nombre(item.db_nombre);
-                            app_data.set_form_conexion_usuario(item.usuario);
-                            app_data.set_form_conexion_contrasenia(item.contrasenia);
-                            app_data.set_form_conexion_ssl_mode(item.ssl_mode);
-                            app_data.set_form_conexion_connection_url(item.connection_url.clone());
-                            app_data.set_form_conexion_protocolo(item.protocolo);
-                            app_data.set_form_conexion_use_url(!item.connection_url.trim().is_empty());
-                            app_data.set_form_conexion_test_status("".into());
-                            app_data.set_form_conexion_test_msg("".into());
-                            app_data.set_form_conexion_is_testing(false);
-                            app_data.set_is_editing_conexion(true);
-                            app_data.set_show_conexion_modal(true);
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_close_conexion_modal(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.global::<AppData>().set_show_conexion_modal(false);
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_submit_conexion_modal(move |id, nombre, host, port, db_nombre, usuario, contrasenia, ssl_mode, connection_url, is_edit| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let nom_clean = nombre.trim().to_string();
-                if nom_clean.is_empty() {
-                    show_toast_message(&ui, "El nombre de la conexión no puede estar vacío.");
-                    return;
-                }
-
-                let p_num = port.trim().parse::<i32>().unwrap_or(5432);
-                let item = crate::db::ConexionItem {
-                    id: id.to_string(),
-                    nombre: nom_clean.clone(),
-                    host: host.trim().to_string(),
-                    port: p_num,
-                    db_nombre: db_nombre.trim().to_string(),
-                    usuario: usuario.trim().to_string(),
-                    contrasenia: contrasenia.to_string(),
-                    ssl_mode: if ssl_mode.trim().is_empty() { "disable".to_string() } else { ssl_mode.trim().to_string() },
-                    connection_url: connection_url.trim().to_string(),
-                    protocolo: "postgres".to_string(),
-                    es_activo: false,
-                    estado_online: "unknown".to_string(),
-                    estado_msg: String::new(),
-                };
-
-                let mut saved_ok = false;
-                if let Some(pool) = crate::db::get_global_pool() {
-                    if let Ok(mut client) = pool.get() {
-                        let res = if is_edit && !item.id.is_empty() {
-                            crate::db::update_conexion(&mut client, &item)
-                        } else {
-                            crate::db::insert_conexion(&mut client, &item).map(|_| ())
-                        };
-                        match res {
-                            Ok(_) => saved_ok = true,
-                            Err(e) => {
-                                show_toast_message(&ui, &format!("Error en base de datos: {}", e));
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                if !saved_ok {
-                    show_toast_message(&ui, "Aviso: No se pudo conectar a la base de datos para guardar la conexión.");
-                    return;
-                }
-
-                ui.global::<AppData>().set_show_conexion_modal(false);
-                load_db_conexiones_ui(&ui);
-                let action_txt = if is_edit { "actualizada" } else { "creada" };
-                show_toast_message(&ui, &format!("Conexión '{}' {} exitosamente.", nom_clean, action_txt));
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_delete_conexion(move |id| {
-            if let Some(ui) = ui_weak.upgrade() {
-                if let Some(pool) = crate::db::get_global_pool() {
-                    if let Ok(mut client) = pool.get() {
-                        if let Err(e) = crate::db::delete_conexion(&mut client, id.as_str()) {
-                            show_toast_message(&ui, &format!("Error al eliminar conexión: {}", e));
-                            return;
-                        }
-                    }
-                }
-                load_db_conexiones_ui(&ui);
-                show_toast_message(&ui, "Conexión eliminada de la base de datos.");
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_select_and_connect_conexion(move |id| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                let current = app_data.get_db_conexiones();
-                let mut selected_conn: Option<crate::db::ConexionItem> = None;
-
-                for i in 0..current.row_count() {
-                    if let Some(item) = current.row_data(i) {
-                        if item.id == id {
-                            selected_conn = Some(crate::db::ConexionItem {
-                                id: item.id.to_string(),
-                                nombre: item.nombre.to_string(),
-                                host: item.host.to_string(),
-                                port: item.port.parse::<i32>().unwrap_or(5432),
-                                db_nombre: item.db_nombre.to_string(),
-                                usuario: item.usuario.to_string(),
-                                contrasenia: item.contrasenia.to_string(),
-                                ssl_mode: item.ssl_mode.to_string(),
-                                connection_url: item.connection_url.to_string(),
-                                protocolo: item.protocolo.to_string(),
-                                es_activo: true,
-                                estado_online: item.estado_online.to_string(),
-                                estado_msg: item.estado_msg.to_string(),
-                            });
-                            break;
-                        }
-                    }
-                }
-
-                if let Some(conn) = selected_conn {
-                    let conn_name = conn.nombre.clone();
-                    let new_cfg = conn.to_db_config();
-
-                    // 1. Guardar en disco persistente (db_config.json)
-                    if let Err(e) = crate::db::update_active_config(new_cfg.clone()) {
-                        show_toast_message(&ui, &format!("Error guardando configuración activa: {}", e));
-                        return;
-                    }
-
-                    // 2. Marcar activa en la tabla public.conexiones
-                    if let Some(pool) = crate::db::get_global_pool() {
-                        if let Ok(mut client) = pool.get() {
-                            let _ = crate::db::set_active_conexion(&mut client, id.as_str());
-                        }
-                    }
-
-                    // 3. Reconectar connection pool en segundo plano
-                    let ui_weak_inner = ui_weak.clone();
-                    thread::spawn(move || {
-                        let pool_res = crate::db::reload_global_pool(8);
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui_inner) = ui_weak_inner.upgrade() {
-                                match pool_res {
-                                    Ok(new_pool) => {
-                                        if let Ok(mut client) = new_pool.get() {
-                                            let _ = ensure_schema(&mut client);
-                                        }
-                                        let diag = crate::db::diagnose_postgres();
-                                        let data = ui_inner.global::<AppData>();
-                                        data.set_db_connected(diag.is_connected);
-                                        data.set_db_status_text(diag.status_text.as_str().into());
-                                        data.set_db_status_detail(diag.detail_text.as_str().into());
-
-                                        populate_db_config_ui(&ui_inner);
-                                        load_db_conexiones_ui(&ui_inner);
-                                        load_clientes_ui(&ui_inner, &new_pool);
-                                        update_global_stats(&ui_inner, &new_pool);
-
-                                        show_toast_message(&ui_inner, &format!("Conectado exitosamente a '{}'.", conn_name));
-                                    }
-                                    Err(err) => {
-                                        let diag = crate::db::diagnose_postgres();
-                                        let data = ui_inner.global::<AppData>();
-                                        data.set_db_connected(false);
-                                        data.set_db_status_text(diag.status_text.as_str().into());
-                                        data.set_db_status_detail(diag.detail_text.as_str().into());
-                                        populate_db_config_ui(&ui_inner);
-                                        load_db_conexiones_ui(&ui_inner);
-                                        show_toast_message(&ui_inner, &format!("Fallo al conectar con '{}': {}", conn_name, err));
-                                    }
-                                }
-                            }
-                        });
-                    });
-                }
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_test_form_conexion(move |host, port, db_nombre, usuario, contrasenia, ssl_mode, connection_url, protocolo| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                app_data.set_form_conexion_is_testing(true);
-                app_data.set_form_conexion_test_status("testing".into());
-                app_data.set_form_conexion_test_msg("Comprobando conexión...".into());
-
-                let item = crate::db::ConexionItem {
-                    id: String::new(),
-                    nombre: String::new(),
-                    host: host.trim().to_string(),
-                    port: port.trim().parse::<i32>().unwrap_or(5432),
-                    db_nombre: db_nombre.trim().to_string(),
-                    usuario: usuario.trim().to_string(),
-                    contrasenia: contrasenia.to_string(),
-                    ssl_mode: if ssl_mode.trim().is_empty() { "disable".to_string() } else { ssl_mode.trim().to_string() },
-                    connection_url: connection_url.trim().to_string(),
-                    protocolo: protocolo.trim().to_string(),
-                    es_activo: false,
-                    estado_online: "checking".to_string(),
-                    estado_msg: String::new(),
-                };
-
-                let ui_weak_inner = ui_weak.clone();
-                thread::spawn(move || {
-                    let (ok, msg) = crate::db::check_conexion_status(&item);
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui_inner) = ui_weak_inner.upgrade() {
-                            let data = ui_inner.global::<AppData>();
-                            data.set_form_conexion_is_testing(false);
-                            if ok {
-                                data.set_form_conexion_test_status("success".into());
-                                data.set_form_conexion_test_msg(msg.into());
-                            } else {
-                                data.set_form_conexion_test_status("error".into());
-                                data.set_form_conexion_test_msg(msg.into());
-                            }
-                        }
-                    });
-                });
-            }
-        });
-    }
 
     if let Some(ref pool) = db_pool {
         update_global_stats(&main_window, pool);
@@ -4227,7 +3590,6 @@ fn main() -> Result<(), slint::PlatformError> {
                     8 => "Calendario",
                     9 => "Reporte Nóminas",
                     10 => "Carga Nóminas",
-                    11 => "Configuración Base de Datos",
                     _ => "Vista Desconocida",
                 };
 
@@ -4294,16 +3656,27 @@ fn main() -> Result<(), slint::PlatformError> {
                     app_data.set_current_view(if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
+                if view_idx == 7 {
+                    app_data.set_reporte_liquidaciones_access_allowed(true);
+                }
+
                 // View 9 (Reporte Nóminas) requiere que existan nóminas cargadas
-                if view_idx == 9 && !app_data.get_nominas_access_allowed() {
+                let can_access_nominas = app_data.get_nominas_access_allowed()
+                    || app_data.get_revision_has_nominas()
+                    || app_data.get_nominas_data_exists();
+
+                if view_idx == 9 && !can_access_nominas {
                     crate::app_logger::log_ui_error(
                         "Navegación",
                         "Sidebar / Menú",
                         "Acceso Denegado a Vista",
                         &format!("No se puede acceder a {} (ID {}): acceso a nóminas no permitido", view_name, view_idx),
                     );
-                    app_data.set_current_view(0);
+                    app_data.set_current_view(if !rev_id.is_empty() { 4 } else if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
                     return;
+                }
+                if view_idx == 9 {
+                    app_data.set_nominas_access_allowed(true);
                 }
 
                 app_data.set_current_view(view_idx);
@@ -4329,9 +3702,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &rev_id);
                 }
 
-                if view_idx == 11 {
-                    populate_db_config_ui(&ui);
-                }
+
 
                 if view_idx == 8 {
                     if let Some(ref pool) = pool_clone {
@@ -4518,6 +3889,13 @@ fn main() -> Result<(), slint::PlatformError> {
                                 // La revisión está completa si tiene obras, cédulas, nóminas y liquidaciones
                                 let all_data = has_obras && has_cedulas && has_nominas && has_liquidaciones;
                                 app_data.set_revision_has_all_data(all_data);
+
+                                if has_nominas {
+                                    app_data.set_nominas_access_allowed(true);
+                                }
+                                if has_liquidaciones || has_cedulas {
+                                    app_data.set_reporte_liquidaciones_access_allowed(true);
+                                }
                             }
                         }
                     }
@@ -4706,6 +4084,13 @@ fn main() -> Result<(), slint::PlatformError> {
                                         
                                         let all_data = has_obras && has_cedulas && has_nominas && has_liquidaciones;
                                         app_data.set_revision_has_all_data(all_data);
+
+                                        if has_nominas {
+                                            app_data.set_nominas_access_allowed(true);
+                                        }
+                                        if has_liquidaciones || has_cedulas {
+                                            app_data.set_reporte_liquidaciones_access_allowed(true);
+                                        }
                                     }
                                 }
                             }
@@ -5288,6 +4673,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_obra_form_ubicacion("".into());
                 app_data.set_obra_form_superficie("".into());
                 app_data.set_obra_form_monto("".into());
+                app_data.set_obra_form_monto_preview("".into());
                 app_data.set_obra_form_delegacion(app_data.get_selected_rp_delegacion());
                 app_data.set_obra_form_subdelegacion(app_data.get_selected_rp_subdelegacion());
                 app_data.set_show_obra_modal(true);
@@ -5329,7 +4715,10 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_obra_form_fecha_fin(format_date_opt(o.fecha_fin).into());
                                 app_data.set_obra_form_ubicacion(o.ubicacion.into());
                                 app_data.set_obra_form_superficie(format!("{:.2}", o.superficie_construido).into());
-                                app_data.set_obra_form_monto(format!("{:.2}", o.monto).into());
+                                let monto_fmt = if o.monto > 0.0 { format_monto_mexico(o.monto) } else { "".to_string() };
+                                let monto_preview = if o.monto > 0.0 { format!("${} MXN", monto_fmt) } else { "".to_string() };
+                                app_data.set_obra_form_monto(monto_fmt.into());
+                                app_data.set_obra_form_monto_preview(monto_preview.into());
                                 app_data.set_obra_form_delegacion(o.delegacion.into());
                                 app_data.set_obra_form_subdelegacion(o.subdelegacion.into());
                                 app_data.set_show_obra_modal(true);
@@ -5381,7 +4770,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
 
                 let sup: f64 = sup_str.trim().parse().unwrap_or(0.0);
-                let monto: f64 = monto_str.trim().parse().unwrap_or(0.0);
+                let clean_monto_str = monto_str.replace(',', "");
+                let monto: f64 = clean_monto_str.trim().parse().unwrap_or(0.0);
 
                 if let Some(ref pool) = pool_clone {
                     let mut client = match pool.get() {
@@ -5438,6 +4828,41 @@ fn main() -> Result<(), slint::PlatformError> {
                             show_toast_message(&ui, &format!("Error al guardar obra: {}", e));
                         }
                     }
+                }
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_obra_form_monto_changed(move |text| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let formatted = format_monto_input_realtime(text.as_str());
+                app_data.set_obra_form_monto(formatted.clone().into());
+                let preview = if formatted.is_empty() {
+                    "".to_string()
+                } else {
+                    let clean = formatted.replace(',', "");
+                    let val: f64 = clean.trim().parse().unwrap_or(0.0);
+                    format!("${} MXN", format_monto_mexico(val))
+                };
+                app_data.set_obra_form_monto_preview(preview.into());
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_obra_form_monto_accepted(move |text| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let final_str = format_monto_final_from_str(text.as_str());
+                app_data.set_obra_form_monto(final_str.clone().into());
+                if !final_str.is_empty() {
+                    app_data.set_obra_form_monto_preview(format!("${} MXN", final_str).into());
+                } else {
+                    app_data.set_obra_form_monto_preview("".into());
                 }
             }
         });
@@ -6605,11 +6030,12 @@ fn main() -> Result<(), slint::PlatformError> {
                     let mut r_reg = rp_registro;
                     let mut rev_nom = revision_nombre;
 
-                    if let (Some(rev_id), Some(pool)) = (rev_id_opt, pool_for_thread) {
+                    let pool_to_use = pool_for_thread.or_else(crate::db::get_global_pool);
+                    if let (Some(rev_id), Some(pool)) = (rev_id_opt, pool_to_use) {
                         if let Ok(mut client) = pool.get() {
                             if let Ok(rev_uuid) = uuid::Uuid::parse_str(&rev_id) {
                                 if let Ok(Some(row)) = client.query_opt(
-                                    "SELECT c.nombre, rp.registro_patronal, r.nombre_revision
+                                    "SELECT c.nombre, rp.registro, r.nombre
                                      FROM revisiones r
                                      JOIN registros_patronales rp ON r.id_registro_patronal = rp.id
                                      JOIN clientes c ON rp.id_cliente = c.id
@@ -6659,7 +6085,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let session_clone = cedulas_session.clone();
         let pool_clone = db_pool.clone();
         app_logic.on_procesar_y_guardar_cedulas(move || {
-            spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
+            let pool = crate::db::get_global_pool().or_else(|| pool_clone.clone());
+            spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool);
         });
     }
 

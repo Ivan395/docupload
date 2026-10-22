@@ -13,7 +13,7 @@ import { ReporteLiquidacionesView } from "reporte_liquidaciones_view.slint";
 import { CalendarioView } from "calendario_view.slint";
 import { NominasView } from "nominas_view.slint";
 import { NominasUploadView } from "nominas_upload_view.slint";
-import { DbConfigView } from "db_config_view.slint";
+
 import { UploadCard } from "upload_card.slint";
 import { ActionPanel } from "action_panel.slint";
 import { ResultsPanel } from "results_panel.slint";
@@ -256,11 +256,6 @@ export component MainWindow inherits Window {
 
             // VISTA 10: Carga y Procesamiento de Nóminas
             if AppData.current_view == 10 : NominasUploadView {
-                vertical-stretch: 1;
-            }
-
-            // VISTA 11: Configuración de Base de Datos PostgreSQL (F11)
-            if AppData.current_view == 11 : DbConfigView {
                 vertical-stretch: 1;
             }
 

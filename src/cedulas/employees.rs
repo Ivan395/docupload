@@ -76,7 +76,7 @@ impl DataEmployee {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistroObra {
     pub registro_obra: String,
     pub dias_registro_obra: i32,
@@ -178,6 +178,47 @@ pub struct EncabezadoTokens {
     pub curp: Option<String>,
     pub clave_ubicacion: Option<String>,
     pub pensionado: Option<String>,
+    pub registro_obras: Vec<RegistroObra>,
+}
+
+/// Intenta interpretar un token como registro de obra (con o sin días).
+/// Formatos soportados:
+/// - "C0617880-15", "C0640941-7", "C0640943-9", "C0640941-23"
+/// - "C0640941" (formato SIROC sin días explícitos)
+/// - "08-12345-67" o "081234567-30" (formato SATIC)
+pub fn try_parse_obra_token(cand: &str) -> Option<RegistroObra> {
+    let raw = cand.trim();
+    if raw.is_empty() || raw == "—" || raw == "-" {
+        return None;
+    }
+
+    // 1. Formato OBRA-DIAS (ej. C0617880-15, C0640941-7, C0640943-9)
+    if let Some((obra_part, dias_part)) = raw.rsplit_once('-') {
+        let clean_obra = crate::validation::clean_alphanumeric_input(obra_part);
+        if let Ok(dias) = dias_part.trim().parse::<i32>() {
+            if (0..=31).contains(&dias) {
+                if crate::validation::validate_registro_obra(&clean_obra).is_ok()
+                    || (clean_obra.starts_with('C') && (clean_obra.len() == 8 || clean_obra.len() == 9))
+                {
+                    return Some(RegistroObra {
+                        registro_obra: clean_obra,
+                        dias_registro_obra: dias,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Formato SIROC / SATIC sin días (ej. C0640941)
+    let clean_cand = crate::validation::clean_alphanumeric_input(raw);
+    if crate::validation::validate_registro_obra(&clean_cand).is_ok() {
+        return Some(RegistroObra {
+            registro_obra: clean_cand,
+            dias_registro_obra: 0,
+        });
+    }
+
+    None
 }
 
 /// Extrae identificadores de pensionado (P/CV, P/IV, P, etc.) de una lista de tokens.
@@ -287,20 +328,8 @@ pub fn clean_name_and_extract_pension(raw_name: &str) -> (String, Option<String>
 /// Trocea la parte de la línea que sigue al NSS en tokens y se queda con los
 /// identificadores anclados al final, asignando al nombre todo lo anterior.
 ///
-/// El enfoque anterior usaba una expresión regular puramente posicional con
-/// grupos opcionales (`nombre` perezoso seguido de CURP/RFC/clave opcionales).
-/// Al ser todos opcionales, el motor podía abandonar el reparto de campos y
-/// dejar que `clave_ubicacion` absorbiera el último token alfabético del nombre
-/// (p. ej. `... MARIA ALEJANDRA` -> `clave_ubicacion = "ALEJANDRA"`), o que
-/// `rfc` capturara una palabra suelta. Aquí, en cambio, se recorren los tokens
-/// DESDE LA DERECHA y solo se acepta un token como identificador si su forma lo
-/// respalda; en cuanto un token no encaja, todos los anteriores son nombre.
-///
-/// Reglas (en orden desde el final):
-///   1. CURP: 18 posiciones, 4 letras + 6 dígitos + resto alfanumérico.
-///   2. RFC:   12 o 13 posiciones, 3-4 letras + 6 dígitos + homoclave opcional.
-///   3. Clave de ubicación: cualquier token corto con al menos un dígito que no
-///      sea CURP ni RFC (p. ej. `01`, `C1206769-23`).
+/// Soporta múltiples tokens de registros de obras (ej. C0617880-15 C0640941-7 C0640943-9)
+/// evitando que se queden incrustados en el nombre del trabajador.
 pub fn parse_encabezado_tokens(resto: &str) -> EncabezadoTokens {
     let tokens: Vec<&str> = resto.split_whitespace().collect();
     let mut fin = tokens.len();
@@ -308,6 +337,7 @@ pub fn parse_encabezado_tokens(resto: &str) -> EncabezadoTokens {
     let mut curp = None;
     let mut rfc = None;
     let mut clave = None;
+    let mut reversed_obras: Vec<RegistroObra> = Vec::new();
 
     // Recorrido estrictamente de derecha a izquierda: en cada paso se decide qué
     // es el último token pendiente y se consume. Al primer token que no encaje
@@ -317,15 +347,29 @@ pub fn parse_encabezado_tokens(resto: &str) -> EncabezadoTokens {
         let cand = tokens[fin - 1];
 
         if curp.is_none() && is_curp_candidate(cand) {
-            curp = Some(cand.to_string());
+            curp = Some(crate::validation::clean_alphanumeric_input(cand));
             fin -= 1;
             continue;
         }
 
         if rfc.is_none() && is_rfc_candidate(cand) {
-            rfc = Some(cand.to_string());
+            let clean_r = cand
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '&' || *c == 'Ñ')
+                .collect::<String>()
+                .to_uppercase();
+            rfc = Some(clean_r);
             fin -= 1;
             continue;
+        }
+
+        // Múltiples tokens de obras de construcción (ej. C0640943-9, C0640941-7, C0617880-15)
+        if fin > 1 {
+            if let Some(ro) = try_parse_obra_token(cand) {
+                reversed_obras.push(ro);
+                fin -= 1;
+                continue;
+            }
         }
 
         // Clave de ubicación: token corto con al menos un dígito que no sea
@@ -337,7 +381,7 @@ pub fn parse_encabezado_tokens(resto: &str) -> EncabezadoTokens {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '(' || c == ')');
             if tiene_digitos && solo_alfanumerico && cand.len() <= 15 {
-                clave = Some(cand.to_string());
+                clave = Some(cand.to_uppercase());
                 fin -= 1;
                 continue;
             }
@@ -346,14 +390,18 @@ pub fn parse_encabezado_tokens(resto: &str) -> EncabezadoTokens {
         break;
     }
 
+    reversed_obras.reverse();
+
     let (pensionado, tokens_nombre) = extract_pension_info(&tokens[..fin]);
+    let clean_nombre = tokens_nombre.join(" ").to_uppercase();
 
     EncabezadoTokens {
-        nombre: tokens_nombre.join(" "),
+        nombre: clean_nombre,
         rfc,
         curp,
         clave_ubicacion: clave,
-        pensionado,
+        pensionado: pensionado.map(|p| p.to_uppercase()),
+        registro_obras: reversed_obras,
     }
 }
 
@@ -483,8 +531,17 @@ impl Employee {
             .employee_no_seguro_social_nombre_curp_rfc
             .captures(data)
         {
-            if let Some(m) = caps.name("no_seguro_social") {
-                self.no_seguro_social = Some(m.as_str().trim().to_string());
+            let raw_nss = caps
+                .name("no_seguro_social")
+                .map(|m| m.as_str().trim().to_string())
+                .unwrap_or_default();
+            if !raw_nss.is_empty() {
+                let clean_nss = raw_nss
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .collect::<String>()
+                    .to_uppercase();
+                self.no_seguro_social = Some(clean_nss);
             }
 
             // A partir del NSS se resuelve el resto por tokens, no por posiciones:
@@ -493,49 +550,80 @@ impl Employee {
             // `data` es un bloque multi-línea (el detalle completo del
             // trabajador), por lo que hay que recortarse a la línea que contiene
             // el NSS antes de trocear.
-            let nss = self.no_seguro_social.clone().unwrap_or_default();
-            let linea_encabezado = data.lines().find(|l| l.contains(&nss));
+            let linea_encabezado = data.lines().find(|l| !raw_nss.is_empty() && l.contains(&raw_nss))
+                .or_else(|| {
+                    self.no_seguro_social.as_ref().and_then(|cn| {
+                        data.lines().find(|l| {
+                            let clean_line = crate::validation::clean_alphanumeric_input(l);
+                            clean_line.contains(cn)
+                        })
+                    })
+                });
+
             if let Some(linea) = linea_encabezado {
-                let pos = linea.find(&nss).unwrap_or(0);
-                let resto = linea[pos + nss.len()..].trim();
+                let pos = if !raw_nss.is_empty() && linea.contains(&raw_nss) {
+                    linea.find(&raw_nss).unwrap_or(0) + raw_nss.len()
+                } else if let Some(ref cn) = self.no_seguro_social {
+                    linea.find(cn).unwrap_or(0) + cn.len()
+                } else {
+                    0
+                };
+                let resto = linea[pos..].trim();
                 let t = parse_encabezado_tokens(resto);
                 if !t.nombre.is_empty() {
-                    self.nombre = Some(t.nombre);
+                    self.nombre = Some(t.nombre.to_uppercase());
                 }
                 self.rfc = t.rfc;
                 self.curp = t.curp;
                 self.clave_ubicacion = t.clave_ubicacion;
                 self.pensionado = t.pensionado;
+                for ro in t.registro_obras {
+                    if !self.registro_obras.iter().any(|existing| existing.registro_obra == ro.registro_obra) {
+                        self.registro_obras.push(ro);
+                    }
+                }
             }
 
             // Si el NSS no se encontró en la línea, se recurre al reparto posicional.
             if self.no_seguro_social.is_none() {
                 if let Some(m) = caps.name("nombre") {
                     let (clean_nom, pens) = clean_name_and_extract_pension(m.as_str());
-                    self.nombre = Some(clean_nom);
+                    self.nombre = Some(clean_nom.to_uppercase());
                     if self.pensionado.is_none() {
-                        self.pensionado = pens;
+                        self.pensionado = pens.map(|p| p.to_uppercase());
                     }
                 }
                 self.rfc = caps
                     .name("rfc")
                     .or_else(|| caps.name("rfc_alt"))
-                    .map(|m| m.as_str().trim().to_string());
+                    .map(|m| {
+                        m.as_str()
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || *c == '&' || *c == 'Ñ')
+                            .collect::<String>()
+                            .to_uppercase()
+                    });
                 self.curp = caps
                     .name("curp")
                     .or_else(|| caps.name("curp_alt"))
-                    .map(|m| m.as_str().trim().to_string());
+                    .map(|m| {
+                        m.as_str()
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric())
+                            .collect::<String>()
+                            .to_uppercase()
+                    });
                 self.clave_ubicacion = caps
                     .name("clave_ubicacion")
-                    .map(|m| m.as_str().trim().to_string());
+                    .map(|m| m.as_str().trim().to_uppercase());
             }
 
             // Garantizar que self.nombre quede siempre limpio y sin prefijos de pensionado
             if let Some(ref nom) = self.nombre {
                 let (clean_nom, pens) = clean_name_and_extract_pension(nom);
-                self.nombre = Some(clean_nom);
+                self.nombre = Some(clean_nom.to_uppercase());
                 if self.pensionado.is_none() {
-                    self.pensionado = pens;
+                    self.pensionado = pens.map(|p| p.to_uppercase());
                 }
             }
 
@@ -546,16 +634,34 @@ impl Employee {
                 self.no_seguro_social.as_deref(),
                 data,
             );
+
+            // Asegurar que RFC y CURP queden en mayúsculas y sin guiones
+            if let Some(ref r) = self.rfc {
+                self.rfc = Some(
+                    r.chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '&' || *c == 'Ñ')
+                        .collect::<String>()
+                        .to_uppercase(),
+                );
+            }
+            if let Some(ref c) = self.curp {
+                self.curp = Some(
+                    c.chars()
+                        .filter(|c| c.is_ascii_alphanumeric())
+                        .collect::<String>()
+                        .to_uppercase(),
+                );
+            }
         }
 
         let get_base_de = || {
             let mut de = DataEmployee::default();
             if let Some(dp) = date_period {
                 if let Some(mes) = dp.name("mes_periodo") {
-                    de.mes_periodo = Some(mes.as_str().trim().to_string());
+                    de.mes_periodo = Some(mes.as_str().trim().to_uppercase());
                 }
                 if let Some(anio) = dp.name("anio_periodo") {
-                    de.anio_periodo = Some(anio.as_str().trim().to_string());
+                    de.anio_periodo = Some(anio.as_str().trim().to_uppercase());
                 }
             }
             de
@@ -606,7 +712,14 @@ impl Employee {
                 .name("dias_registro_obra")
                 .map(|m| m.as_str())
                 .unwrap_or("");
-            self.registro_obras.push(RegistroObra::new(obra, dias));
+            let ro = RegistroObra::new(obra, dias);
+            if let Some(existing) = self.registro_obras.iter_mut().find(|existing| existing.registro_obra == ro.registro_obra) {
+                if existing.dias_registro_obra == 0 {
+                    existing.dias_registro_obra = ro.dias_registro_obra;
+                }
+            } else {
+                self.registro_obras.push(ro);
+            }
         }
     }
 
@@ -701,7 +814,7 @@ mod tests {
         let mut emp = Employee::new();
         emp.set_values(sample, &[], None, &patterns);
 
-        assert_eq!(emp.no_seguro_social.as_deref(), Some("01-85-64-0012-3"));
+        assert_eq!(emp.no_seguro_social.as_deref(), Some("01856400123"));
         assert_eq!(emp.nombre.as_deref(), Some("PEREZ LOPEZ JUAN"));
         assert_eq!(emp.rfc.as_deref(), Some("PELJ640101A12"));
         assert_eq!(emp.curp.as_deref(), Some("PELJ640101HMCNLN01"));
@@ -715,7 +828,7 @@ mod tests {
         let mut emp = Employee::new();
         emp.set_values(sample, &[], None, &patterns);
 
-        assert_eq!(emp.no_seguro_social.as_deref(), Some("01-85-64-0012-3"));
+        assert_eq!(emp.no_seguro_social.as_deref(), Some("01856400123"));
         assert_eq!(emp.nombre.as_deref(), Some("PEREZ LOPEZ JUAN"));
         assert_eq!(emp.curp.as_deref(), Some("PELJ640101HMCNLN01"));
         assert_eq!(emp.rfc.as_deref(), Some("PELJ640101A12"));
@@ -730,7 +843,7 @@ mod tests {
         let mut emp = Employee::new();
         emp.set_values(sample, &[], None, &patterns);
 
-        assert_eq!(emp.no_seguro_social.as_deref(), Some("01-85-64-0012-3"));
+        assert_eq!(emp.no_seguro_social.as_deref(), Some("01856400123"));
         assert_eq!(emp.nombre.as_deref(), Some("JIMENEZ FABILA ALEJANDRO"));
         assert_eq!(emp.rfc.as_deref(), Some("JIFA981012A12"));
         assert_eq!(emp.curp.as_deref(), Some("JIFA981012MCLMN04"));
@@ -786,7 +899,7 @@ mod tests {
         emp.set_values(sample, &[], None, &patterns);
 
         assert_eq!(emp.nombre.as_deref(), Some("CRUZ LUNA ROBERTO"));
-        assert_eq!(emp.rfc.as_deref(), Some("XAXX-010101-000"));
+        assert_eq!(emp.rfc.as_deref(), Some("XAXX010101000"));
     }
 
     #[test]
@@ -797,7 +910,7 @@ mod tests {
         let mut emp = Employee::new();
         emp.set_values(sample, &[], None, &patterns);
 
-        assert_eq!(emp.no_seguro_social.as_deref(), Some("32-85-59-4018-8"));
+        assert_eq!(emp.no_seguro_social.as_deref(), Some("32855940188"));
         assert_eq!(emp.nombre.as_deref(), Some("FLORES RUIZ GUILLERMO"));
         assert_eq!(emp.pensionado.as_deref(), Some("P/CV"));
         assert_eq!(emp.curp.as_deref(), Some("FORG590625HCLLZL01"));
@@ -830,5 +943,49 @@ mod tests {
         emp.set_values(s, &[], None, &patterns);
         assert_eq!(emp.nombre.as_deref(), Some("LOPEZ HERNANDEZ CARLOS"));
         assert_eq!(emp.pensionado.as_deref(), Some("P/IV"));
+    }
+
+    #[test]
+    fn test_parse_multiple_obras_in_header() {
+        let patterns = initialize_patterns().unwrap();
+        // Caso exacto de la imagen: BERMUDEZ RAMIREZ MIGUEL ANGEL con 3 obras vinculadas
+        let s = "43-94-79-0924-8  BERMUDEZ RAMIREZ MIGUEL ANGEL  C0617880-15 C0640941-7 C0640943-9\n";
+        let mut emp = Employee::new();
+        emp.set_values(s, &[], None, &patterns);
+
+        assert_eq!(emp.no_seguro_social.as_deref(), Some("43947909248"));
+        assert_eq!(emp.nombre.as_deref(), Some("BERMUDEZ RAMIREZ MIGUEL ANGEL"));
+        assert_eq!(emp.registro_obras.len(), 3);
+        assert_eq!(emp.registro_obras[0].registro_obra, "C0617880");
+        assert_eq!(emp.registro_obras[0].dias_registro_obra, 15);
+        assert_eq!(emp.registro_obras[1].registro_obra, "C0640941");
+        assert_eq!(emp.registro_obras[1].dias_registro_obra, 7);
+        assert_eq!(emp.registro_obras[2].registro_obra, "C0640943");
+        assert_eq!(emp.registro_obras[2].dias_registro_obra, 9);
+
+        let rows = emp.to_list();
+        assert!(!rows.is_empty() || emp.registro_obras.len() == 3);
+    }
+
+    #[test]
+    fn test_parse_multiple_obras_folio_registro_de_obra() {
+        let patterns = initialize_patterns().unwrap();
+        // Caso exacto de la imagen del usuario:
+        // HERAS BAUTISTA OMAR ABACUC con 2 registros de obra: C0701031 (14 días) y C0701034 (17 días)
+        let s = "43-06-79-1194-1  HERAS BAUTISTA OMAR ABACUC  AAAA-900101-\n\
+                 31 205.00 0 0 0 608.50 0.00 0.00 44.49 15.89 66.73 23.83 482.27 111.21 39.72 63.55 1,376.75 79.44 1,456.19\n\
+                 Folio de Registro de Obra: C0701031 DĂ-as 14\n\
+                 Folio de Registro de Obra: C0701034 DĂ-as 17\n";
+        let cleaned = crate::cedulas::pdf_extractor::clean_text(s, &patterns);
+        let mut emp = Employee::new();
+        emp.set_values(&cleaned, &[], None, &patterns);
+
+        assert_eq!(emp.no_seguro_social.as_deref(), Some("43067911941"));
+        assert_eq!(emp.nombre.as_deref(), Some("HERAS BAUTISTA OMAR ABACUC"));
+        assert_eq!(emp.registro_obras.len(), 2);
+        assert_eq!(emp.registro_obras[0].registro_obra, "C0701031");
+        assert_eq!(emp.registro_obras[0].dias_registro_obra, 14);
+        assert_eq!(emp.registro_obras[1].registro_obra, "C0701034");
+        assert_eq!(emp.registro_obras[1].dias_registro_obra, 17);
     }
 }

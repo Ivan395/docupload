@@ -452,41 +452,39 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     // 3. Ensure custom columns and fixes
     client.batch_execute(
         r#"
-        -- Update log_revision_history trigger function to dynamically match column names before altering tables
+        -- Update log_revision_history trigger function to dynamically match column names using pg_attribute
+        -- for maximum performance (avoids information_schema view joins on every row)
         CREATE OR REPLACE FUNCTION public.log_revision_history()
         RETURNS TRIGGER AS $$
         DECLARE
-            history_table_name TEXT := format('revision_history.%I', TG_TABLE_NAME);
-            record_to_insert RECORD;
             cols TEXT;
             select_cols TEXT;
             statement TEXT;
         BEGIN
-            IF (TG_OP = 'INSERT' OR TG_OP = 'UPDATE') THEN
-                record_to_insert := NEW;
-            ELSEIF (TG_OP = 'DELETE') THEN
-                record_to_insert := OLD;
-            END IF;
-
             SELECT 
-                string_agg(quote_ident(c_pub.column_name), ', ' ORDER BY c_pub.ordinal_position),
-                string_agg(format('($1).%I', c_pub.column_name), ', ' ORDER BY c_pub.ordinal_position)
+                string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum),
+                string_agg(format('($1).%I', a.attname), ', ' ORDER BY a.attnum)
             INTO cols, select_cols
-            FROM information_schema.columns c_pub
-            INNER JOIN information_schema.columns c_hist
-                ON c_pub.column_name = c_hist.column_name
-                AND c_hist.table_schema = 'revision_history'
-                AND c_hist.table_name = TG_TABLE_NAME
-            WHERE c_pub.table_schema = 'public' AND c_pub.table_name = TG_TABLE_NAME;
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_class ch ON ch.relname = c.relname
+            JOIN pg_namespace nh ON nh.oid = ch.relnamespace AND nh.nspname = 'revision_history'
+            JOIN pg_attribute h ON h.attrelid = ch.oid AND h.attname = a.attname AND h.attnum > 0 AND NOT h.attisdropped
+            WHERE n.nspname = 'public' AND c.relname = TG_TABLE_NAME AND a.attnum > 0 AND NOT a.attisdropped;
 
             IF cols IS NOT NULL AND select_cols IS NOT NULL THEN
                 statement := format(
-                    'INSERT INTO %s (%s, modified_at, event_name) SELECT %s, NOW(), $2',
-                    history_table_name,
+                    'INSERT INTO revision_history.%I (%s, modified_at, event_name) SELECT %s, NOW(), $2',
+                    TG_TABLE_NAME,
                     cols,
                     select_cols
                 );
-                EXECUTE statement USING record_to_insert, TG_OP;
+                IF (TG_OP = 'DELETE') THEN
+                    EXECUTE statement USING OLD, TG_OP;
+                ELSE
+                    EXECUTE statement USING NEW, TG_OP;
+                END IF;
             END IF;
 
             IF (TG_OP = 'DELETE') THEN
@@ -496,6 +494,20 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             END IF;
         END;
         $$ LANGUAGE plpgsql;
+
+        -- Ensure revision_history.clasificaciones_clientes has matching column name
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'revision_history'
+                  AND table_name = 'clasificaciones_clientes'
+                  AND column_name = 'id_regimen_persona'
+            ) THEN
+                ALTER TABLE revision_history.clasificaciones_clientes
+                RENAME COLUMN id_regimen_persona TO id_regimen_fiscal;
+            END IF;
+        END $$;
 
         -- Column additions to accommodate all fields from cédulas and nóminas
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
@@ -769,12 +781,29 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_empleado ON public.reportes_nominas(id_empleado);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_nominas_id_rep ON public.reportes_detalles_nominas(id_reporte_nomina);
         CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_revision ON public.reportes_liquidaciones(id_revision);
+        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_liq ON public.reportes_liquidaciones(id_liquidacion);
+        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_rev_periodo ON public.reportes_liquidaciones(id_revision, anio_periodo, mes_periodo);
+        CREATE INDEX IF NOT EXISTS idx_liquidaciones_rev_periodo ON public.liquidaciones(id_revision, anio_periodo, mes_periodo);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_rep ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion);
+        CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_obra ON public.reportes_detalles_liquidaciones(id_registro_obra);
         CREATE INDEX IF NOT EXISTS idx_reportes_vinc_obras_id_rep ON public.reportes_vinculaciones_obras_liquidaciones(id_reporte_liquidacion);
+        CREATE INDEX IF NOT EXISTS idx_reportes_vinc_obras_id_obra ON public.reportes_vinculaciones_obras_liquidaciones(id_registro_obra);
+        CREATE INDEX IF NOT EXISTS idx_detalles_liq_id_clave_fecha ON public.detalles_liquidaciones(id_liquidacion, clave, fecha);
+        CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_clave_fecha ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion, clave, fecha);
+        CREATE INDEX IF NOT EXISTS idx_nominas_emp_fecha ON public.nominas(id_empleado, fecha_pago DESC NULLS LAST);
+        CREATE INDEX IF NOT EXISTS idx_nominas_emp_rev ON public.nominas(id_empleado, id_revision);
+        CREATE INDEX IF NOT EXISTS idx_liquidaciones_emp_rev ON public.liquidaciones(id_empleado, id_revision);
         CREATE INDEX IF NOT EXISTS idx_registros_patronales_id_entidad_fed ON public.registros_patronales(id_entidad_federativa);
         CREATE INDEX IF NOT EXISTS idx_registros_patronales_id_rel_del_sub ON public.registros_patronales(id_rel_del_sub);
         CREATE INDEX IF NOT EXISTS idx_rel_del_sub_id_del ON public.rel_delegacion_subdelegacion(id_delegacion);
         CREATE INDEX IF NOT EXISTS idx_rel_del_sub_id_subdel ON public.rel_delegacion_subdelegacion(id_subdelegacion);
+        CREATE INDEX IF NOT EXISTS idx_empleados_cliente_nss ON public.empleados(id_cliente, nss);
+        CREATE INDEX IF NOT EXISTS idx_empleados_cliente_curp ON public.empleados(id_cliente, curp);
+        CREATE INDEX IF NOT EXISTS idx_empleados_cliente_rfc ON public.empleados(id_cliente, rfc);
+        CREATE INDEX IF NOT EXISTS idx_empleados_cliente_nombre ON public.empleados(id_cliente, nombre);
+        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_rev_emp ON public.reportes_liquidaciones(id_revision, id_empleado);
+        CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_combo ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion, id_registro_obra);
+        CREATE INDEX IF NOT EXISTS idx_reportes_detalles_nom_rep ON public.reportes_detalles_nominas(id_reporte_nomina, id_concepto);
 
         -- Sincronización automática de id_entidad_federativa si coincide con el catálogo
         UPDATE public.registros_patronales rp
@@ -1217,14 +1246,6 @@ WHERE NOT EXISTS (
                                 IF r_other.id_registro_obra = NEW.id_registro_obra THEN
                                     RAISE EXCEPTION 'El trabajador ya se encuentra vinculado a la obra % en este periodo.', r_other.numero;
                                 END IF;
-
-                                IF (v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL) AND (r_other.fecha_inicio IS NOT NULL OR r_other.fecha_fin IS NOT NULL) THEN
-                                    v_oth_s := GREATEST(v_month_start, COALESCE(r_other.fecha_inicio, v_month_start));
-                                    v_oth_e := LEAST(v_month_end, COALESCE(r_other.fecha_fin, v_month_end));
-                                    IF GREATEST(v_obra_start, v_oth_s) <= LEAST(v_obra_end, v_oth_e) THEN
-                                        RAISE EXCEPTION 'Las fechas de la obra se superponen con la obra % ya vinculada al trabajador en este periodo.', r_other.numero;
-                                    END IF;
-                                END IF;
                             END LOOP;
                         END;
                     END IF;
@@ -1239,6 +1260,108 @@ WHERE NOT EXISTS (
         CREATE TRIGGER trg_check_reportes_detalles_liquidaciones_tope
         BEFORE INSERT OR UPDATE ON public.reportes_detalles_liquidaciones
         FOR EACH ROW EXECUTE FUNCTION public.check_reportes_detalles_liquidaciones_tope_dias();
+
+        -- Triggers y migraciones para garantizar que TODA la información se guarde en MAYÚSCULAS
+        -- y que NSS, RFC y CURP queden completamente limpios (sin '-' ni caracteres inválidos)
+        CREATE OR REPLACE FUNCTION public.clean_and_uppercase_entity_fields()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            IF TG_TABLE_NAME = 'empleados' THEN
+                IF NEW.nss IS NOT NULL THEN
+                    NEW.nss := UPPER(REGEXP_REPLACE(NEW.nss, '[^A-Za-z0-9]', '', 'g'));
+                END IF;
+                IF NEW.rfc IS NOT NULL THEN
+                    NEW.rfc := UPPER(REGEXP_REPLACE(NEW.rfc, '[^A-Za-z0-9&Ññ]', '', 'g'));
+                END IF;
+                IF NEW.curp IS NOT NULL THEN
+                    NEW.curp := UPPER(REGEXP_REPLACE(NEW.curp, '[^A-Za-z0-9]', '', 'g'));
+                END IF;
+                IF NEW.nombre IS NOT NULL THEN
+                    NEW.nombre := UPPER(NEW.nombre);
+                END IF;
+                IF NEW.pensionado IS NOT NULL THEN
+                    NEW.pensionado := UPPER(NEW.pensionado);
+                END IF;
+                IF NEW.clave_ubicacion IS NOT NULL THEN
+                    NEW.clave_ubicacion := UPPER(NEW.clave_ubicacion);
+                END IF;
+            ELSIF TG_TABLE_NAME = 'clientes' THEN
+                IF NEW.rfc IS NOT NULL THEN
+                    NEW.rfc := UPPER(REGEXP_REPLACE(NEW.rfc, '[^A-Za-z0-9&Ññ]', '', 'g'));
+                END IF;
+                IF NEW.curp IS NOT NULL THEN
+                    NEW.curp := UPPER(REGEXP_REPLACE(NEW.curp, '[^A-Za-z0-9]', '', 'g'));
+                END IF;
+                IF NEW.nombre IS NOT NULL THEN
+                    NEW.nombre := UPPER(NEW.nombre);
+                END IF;
+                IF NEW.razon_social IS NOT NULL THEN
+                    NEW.razon_social := UPPER(NEW.razon_social);
+                END IF;
+            ELSIF TG_TABLE_NAME = 'registros_patronales' THEN
+                IF NEW.registro IS NOT NULL THEN
+                    NEW.registro := UPPER(REGEXP_REPLACE(NEW.registro, '[^A-Za-z0-9]', '', 'g'));
+                END IF;
+                IF NEW.actividad IS NOT NULL THEN
+                    NEW.actividad := UPPER(NEW.actividad);
+                END IF;
+                IF NEW.domicilio IS NOT NULL THEN
+                    NEW.domicilio := UPPER(NEW.domicilio);
+                END IF;
+            ELSIF TG_TABLE_NAME = 'registros_obras' THEN
+                IF NEW.numero IS NOT NULL THEN
+                    NEW.numero := UPPER(NEW.numero);
+                END IF;
+                IF NEW.tipo_obra IS NOT NULL THEN
+                    NEW.tipo_obra := UPPER(NEW.tipo_obra);
+                END IF;
+            ELSIF TG_TABLE_NAME = 'revisiones' THEN
+                IF NEW.nombre IS NOT NULL THEN
+                    NEW.nombre := UPPER(NEW.nombre);
+                END IF;
+                IF NEW.folio IS NOT NULL THEN
+                    NEW.folio := UPPER(NEW.folio);
+                END IF;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS trg_clean_empleados ON public.empleados;
+        CREATE TRIGGER trg_clean_empleados
+        BEFORE INSERT OR UPDATE ON public.empleados
+        FOR EACH ROW EXECUTE FUNCTION public.clean_and_uppercase_entity_fields();
+
+        DROP TRIGGER IF EXISTS trg_clean_clientes ON public.clientes;
+        CREATE TRIGGER trg_clean_clientes
+        BEFORE INSERT OR UPDATE ON public.clientes
+        FOR EACH ROW EXECUTE FUNCTION public.clean_and_uppercase_entity_fields();
+
+        DROP TRIGGER IF EXISTS trg_clean_rp ON public.registros_patronales;
+        CREATE TRIGGER trg_clean_rp
+        BEFORE INSERT OR UPDATE ON public.registros_patronales
+        FOR EACH ROW EXECUTE FUNCTION public.clean_and_uppercase_entity_fields();
+
+        DROP TRIGGER IF EXISTS trg_clean_obras ON public.registros_obras;
+        CREATE TRIGGER trg_clean_obras
+        BEFORE INSERT OR UPDATE ON public.registros_obras
+        FOR EACH ROW EXECUTE FUNCTION public.clean_and_uppercase_entity_fields();
+
+        DROP TRIGGER IF EXISTS trg_clean_rev ON public.revisiones;
+        CREATE TRIGGER trg_clean_rev
+        BEFORE INSERT OR UPDATE ON public.revisiones
+        FOR EACH ROW EXECUTE FUNCTION public.clean_and_uppercase_entity_fields();
+
+        -- Limpieza retroactiva de datos existentes
+        UPDATE public.empleados SET
+            nss = UPPER(REGEXP_REPLACE(nss, '[^A-Za-z0-9]', '', 'g')),
+            rfc = UPPER(REGEXP_REPLACE(rfc, '[^A-Za-z0-9&Ññ]', '', 'g')),
+            curp = UPPER(REGEXP_REPLACE(curp, '[^A-Za-z0-9]', '', 'g')),
+            nombre = UPPER(nombre)
+        WHERE (nss IS NOT NULL AND nss ~ '[^A-Za-z0-9]')
+           OR (rfc IS NOT NULL AND rfc ~ '[^A-Za-z0-9&Ññ]')
+           OR (curp IS NOT NULL AND curp ~ '[^A-Za-z0-9]')
+           OR (nombre IS NOT NULL AND nombre != UPPER(nombre));
         "#,
     )?;
 
@@ -1248,8 +1371,13 @@ WHERE NOT EXISTS (
     // 8. Backfill oficial de RENAPO para empleados con CURP nula, vacía o inválida
     backfill_empleados_curp_renapo(client)?;
 
-    // 9. Asegurar tabla public.conexiones, historial y trigger de auditoría
-    crate::db::conexiones::ensure_conexiones_table(client)?;
+    // 9. Eliminar tabla public.conexiones y su historial si existían previamente
+    let _ = client.batch_execute(
+        r#"
+        DROP TABLE IF EXISTS public.conexiones CASCADE;
+        DROP TABLE IF EXISTS revision_history.conexiones CASCADE;
+        "#,
+    );
 
     log::info!("Esquema de base de datos verificado y listo.");
     Ok(())
@@ -1261,6 +1389,16 @@ pub fn backfill_empleados_rfc_sat(client: &mut Client) -> Result<usize, postgres
     let emp_rows = client.query(
         "SELECT id, nombre, curp, nss, rfc FROM public.empleados WHERE (rfc IS NULL OR TRIM(rfc) = '' OR TRIM(rfc) = 'XAXX010101000' OR LENGTH(TRIM(rfc)) < 13)",
         &[],
+    )?;
+
+    if emp_rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = client.transaction()?;
+    let update_stmt = tx.prepare("UPDATE public.empleados SET rfc = $1 WHERE id = $2")?;
+    let fallback_stmt = tx.prepare(
+        "UPDATE public.empleados SET rfc = 'XAXX010101000' WHERE id = $1 AND (rfc IS NULL OR TRIM(rfc) = '' OR LENGTH(TRIM(rfc)) < 13)",
     )?;
 
     let mut count = 0;
@@ -1285,21 +1423,16 @@ pub fn backfill_empleados_rfc_sat(client: &mut Client) -> Result<usize, postgres
                     "XAXX010101000".to_string()
                 };
                 if rfc_actual.as_deref() != Some(&target_rfc) {
-                    let _ = client.execute(
-                        "UPDATE public.empleados SET rfc = $1 WHERE id = $2",
-                        &[&target_rfc, &id],
-                    )?;
+                    let _ = tx.execute(&update_stmt, &[&target_rfc, &id])?;
                     count += 1;
                 }
                 continue;
             }
         }
         // En caso de no poder, asegurar que aparezca el RFC genérico aceptado por el SUA
-        let _ = client.execute(
-            "UPDATE public.empleados SET rfc = 'XAXX010101000' WHERE id = $1 AND (rfc IS NULL OR TRIM(rfc) = '' OR LENGTH(TRIM(rfc)) < 13)",
-            &[&id],
-        )?;
+        let _ = tx.execute(&fallback_stmt, &[&id])?;
     }
+    tx.commit()?;
     if count > 0 {
         log::info!("Se procesaron {} RFCs para empleados.", count);
     }
@@ -1312,6 +1445,16 @@ pub fn backfill_empleados_curp_renapo(client: &mut Client) -> Result<usize, post
     let emp_rows = client.query(
         "SELECT id, nombre, rfc, nss FROM public.empleados WHERE (curp IS NULL OR TRIM(curp) = '' OR TRIM(curp) = 'XAXX010101000' OR LENGTH(TRIM(curp)) < 18)",
         &[],
+    )?;
+
+    if emp_rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = client.transaction()?;
+    let update_stmt = tx.prepare("UPDATE public.empleados SET curp = $1 WHERE id = $2")?;
+    let fallback_stmt = tx.prepare(
+        "UPDATE public.empleados SET curp = NULL WHERE id = $1 AND (TRIM(curp) = 'XAXX010101000' OR LENGTH(TRIM(curp)) < 18)",
     )?;
 
     let mut count = 0;
@@ -1332,21 +1475,16 @@ pub fn backfill_empleados_curp_renapo(client: &mut Client) -> Result<usize, post
                     None,
                 );
                 if !nueva_curp.is_empty() && crate::cedulas::curp_renapo::validar_curp_formato(&nueva_curp) {
-                    let _ = client.execute(
-                        "UPDATE public.empleados SET curp = $1 WHERE id = $2",
-                        &[&nueva_curp, &id],
-                    )?;
+                    let _ = tx.execute(&update_stmt, &[&nueva_curp, &id])?;
                     count += 1;
                     continue;
                 }
             }
         }
         // Si no se puede determinar con los datos del empleado, dejar en blanco (NULL)
-        let _ = client.execute(
-            "UPDATE public.empleados SET curp = NULL WHERE id = $1 AND (TRIM(curp) = 'XAXX010101000' OR LENGTH(TRIM(curp)) < 18)",
-            &[&id],
-        )?;
+        let _ = tx.execute(&fallback_stmt, &[&id])?;
     }
+    tx.commit()?;
     if count > 0 {
         log::info!("Se actualizaron {} CURPs oficiales de RENAPO para empleados.", count);
     }

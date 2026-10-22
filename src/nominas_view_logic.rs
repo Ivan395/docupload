@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use crate::db::nominas_reporte::{
     check_empleado_tiene_baja_periodo, create_bulk_missing_nominas,
-    create_nomina_from_template, fetch_conceptos_nomina_detalle,
-    fetch_nominas_faltantes, fetch_nominas_reporte, fetch_percepcion_conceptos,
-    fetch_percepciones_nomina, fetch_percepciones_por_nomina,
+    create_nomina_from_template, export_reporte_nominas_to_excel,
+    fetch_conceptos_nomina_detalle, fetch_nominas_faltantes, fetch_nominas_reporte,
+    fetch_percepcion_conceptos, fetch_percepciones_nomina, fetch_percepciones_por_nomina,
     fetch_totales_dias_cedula_por_registro_patronal, summarize_nominas,
     update_dias_y_conceptos_nomina, NominaConceptoEditableDb, NominaFaltanteCreateRequest,
     NominaFaltanteDb, NominaReporteRowDb, RegistroPatronalTotalDb,
@@ -864,9 +864,66 @@ pub fn wire_nominas_callbacks(
     });
 
     let ui_weak_excel = main_window.as_weak();
+    let s_excel = session.clone();
     app_logic.on_nominas_export_excel(move || {
-        if let Some(win) = ui_weak_excel.upgrade() {
-            win.global::<AppData>().set_nominas_show_percepciones(false);
+        let Some(win) = ui_weak_excel.upgrade() else { return };
+        win.global::<AppData>().set_nominas_show_percepciones(false);
+
+        let st = match s_excel.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+
+        if st.all_rows.is_empty() {
+            crate::show_toast_message(&win, "No hay datos de nóminas para exportar.");
+            return;
+        }
+
+        let rows_to_export = if !st.filtered_rows.is_empty() {
+            &st.filtered_rows
+        } else {
+            &st.all_rows
+        };
+
+        let output_dir = std::path::PathBuf::from("output");
+        if let Err(e) = std::fs::create_dir_all(&output_dir) {
+            crate::show_toast_message(&win, &format!("Error creando carpeta output: {}", e));
+            return;
+        }
+
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let client_name = win.global::<AppData>().get_selected_cliente_nombre().to_string();
+        let clean_client: String = client_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .collect();
+        let clean_client = if clean_client.trim().is_empty() || clean_client == "Todos_los_Clientes" {
+            "Empresa".to_string()
+        } else {
+            clean_client
+        };
+        let filename = format!("Reporte_Nominas_{}_{}.xlsx", clean_client, timestamp);
+        let out_file = output_dir.join(&filename);
+
+        match export_reporte_nominas_to_excel(
+            &out_file,
+            rows_to_export,
+            &st.percepcion_headers,
+            &st.percepciones_por_nomina,
+            &st.totales_por_rp,
+            if client_name.trim().is_empty() || client_name == "Todos los Clientes" { "Empresa" } else { client_name.trim() },
+        ) {
+            Ok(_) => {
+                crate::show_toast_message(
+                    &win,
+                    &format!("Excel generado exitosamente: {}", filename),
+                );
+                crate::open_folder_in_os(&output_dir);
+            }
+            Err(e) => {
+                log::error!("Error exportando excel de nóminas: {}", e);
+                crate::show_toast_message(&win, &format!("Error exportando Excel: {}", e));
+            }
         }
     });
 

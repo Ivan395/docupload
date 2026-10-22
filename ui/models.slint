@@ -48,21 +48,7 @@ export struct ProcessingSummary {
     cedulas_excel_path: string,
 }
 
-export struct DbConexionItem {
-    id: string,
-    nombre: string,
-    host: string,
-    port: string,
-    db_nombre: string,
-    usuario: string,
-    contrasenia: string,
-    ssl_mode: string,
-    connection_url: string,
-    protocolo: string,
-    es_activo: bool,
-    estado_online: string, // "online", "offline", "checking", "unknown"
-    estado_msg: string,
-}
+
 
 export struct ClienteCardData {
     id: string,
@@ -216,6 +202,7 @@ export struct ReporteGuarderiaObraItem {
     limite_18_obra_str: string,
     supera_18: bool,
     empleados_count: int,
+    registros_patronales_str: string,
 }
 
 export struct ReporteObraItem {
@@ -238,6 +225,9 @@ export struct ReporteObraUsuarioItem {
     fecha_inicio: string,
     fecha_fin: string,
     vigencia_str: string,
+    empleados_count: int,
+    empleados_count_str: string,
+    selected: bool,
 }
 
 export struct ReporteSuaObraItem {
@@ -259,6 +249,15 @@ export struct ReporteBatchWorkerItem {
     dias_cedula: int,
     dias_obra: int,
     tope_max: int,
+}
+
+export struct ReporteBatchObraItem {
+    id: string,
+    numero: string,
+    label: string,
+    vigencia_str: string,
+    dias_tope_est: int,
+    selected: bool,
 }
 
 export struct ReporteSelectedItem {
@@ -285,6 +284,8 @@ export struct ReporteMesTotalItem {
 export struct ReporteLiquidacionRow {
     selected: bool,
     can_delete_split: bool,
+    is_expanded: bool,
+    movimientos_resumen: string,
     idx: int,
     id_reporte_liq: string,
     id_liquidacion: string,
@@ -297,6 +298,11 @@ export struct ReporteLiquidacionRow {
     id_registro_obra: string,
     obra_numero: string,
     obra_label: string,
+    vinculaciones_resumen: string,
+    multi_obra_badge: string,
+    has_multi_obra: bool,
+    dias_mismatch: bool,
+    total_dias_obras: int,
     is_assigned: bool,
     dias_cedula: int,
     dias_obra: int,
@@ -612,42 +618,7 @@ export global AppData {
     in-out property <string> db_status_detail: "";
 
     // Configuración y Credenciales de PostgreSQL
-    in-out property <string> db_cfg_host: "localhost";
-    in-out property <string> db_cfg_port: "5432";
-    in-out property <string> db_cfg_database: "firma_fiscal_acd";
-    in-out property <string> db_cfg_user: "ivan395";
-    in-out property <string> db_cfg_password: "";
-    in-out property <string> db_cfg_ssl_mode: "disable";
-    in-out property <string> db_cfg_connection_url: "";
-    in-out property <string> db_cfg_file_path: "db_config.json";
-    in-out property <bool> db_cfg_is_testing: false;
-    in-out property <bool> db_cfg_is_saving: false;
-    in-out property <string> db_cfg_test_result: "";
-    in-out property <string> db_cfg_test_status: ""; // "success", "error", "testing", ""
-    in-out property <bool> db_cfg_show_password: false;
-    in-out property <bool> db_cfg_use_custom_url: false;
 
-    // Múltiples Conexiones PostgreSQL
-    in-out property <[DbConexionItem]> db_conexiones: [];
-    in-out property <bool> db_conexiones_loading: false;
-    in-out property <string> db_selected_conexion_id: "";
-    in-out property <bool> show_conexion_modal: false;
-    in-out property <bool> is_editing_conexion: false;
-    in-out property <string> form_conexion_id: "";
-    in-out property <string> form_conexion_nombre: "";
-    in-out property <string> form_conexion_host: "localhost";
-    in-out property <string> form_conexion_port: "5432";
-    in-out property <string> form_conexion_db_nombre: "firma_fiscal_acd";
-    in-out property <string> form_conexion_usuario: "postgres";
-    in-out property <string> form_conexion_contrasenia: "";
-    in-out property <string> form_conexion_ssl_mode: "disable";
-    in-out property <string> form_conexion_connection_url: "";
-    in-out property <string> form_conexion_protocolo: "postgres";
-    in-out property <bool> form_conexion_use_url: false;
-    in-out property <bool> form_conexion_show_pwd: false;
-    in-out property <string> form_conexion_test_status: "";
-    in-out property <string> form_conexion_test_msg: "";
-    in-out property <bool> form_conexion_is_testing: false;
 
     // Catálogos para Combos
     in-out property <[string]> tipos_personas_combo: ["-- Seleccionar Tipo Persona --", "FÍSICA", "MORAL"];
@@ -813,6 +784,7 @@ export global AppData {
     in-out property <string> obra_form_ubicacion: "";
     in-out property <string> obra_form_superficie: "";
     in-out property <string> obra_form_monto: "";
+    in-out property <string> obra_form_monto_preview: "";
     in-out property <string> obra_form_delegacion: "";
     in-out property <string> obra_form_subdelegacion: "";
 
@@ -1113,6 +1085,7 @@ export global AppData {
     in-out property <string> reporte_edit_aus_info: "0";
     in-out property <int> reporte_edit_dias_max: 0;
     in-out property <string> reporte_edit_obra_vigencia_info: "";
+    in-out property <string> reporte_edit_vinculaciones_info: "";
     in-out property <bool> reporte_edit_alert_show: false;
     in-out property <string> reporte_edit_alert_text: "";
     in-out property <string> reporte_edit_alert_type: "error";
@@ -1134,6 +1107,9 @@ export global AppData {
     in-out property <bool> reporte_batch_edit_alert_show: false;
     in-out property <string> reporte_batch_edit_alert_text: "";
     in-out property <string> reporte_batch_edit_alert_type: "error";
+    in-out property <[ReporteBatchObraItem]> reporte_batch_edit_obras_multiselect: [];
+    in-out property <int> reporte_batch_edit_selected_obras_count: 0;
+    in-out property <bool> reporte_batch_edit_multi_obra_enabled: false;
 
     // Modal para Vincular Trabajador a Otra Obra Adicional
     in-out property <bool> show_reporte_add_obra_modal: false;
@@ -1226,6 +1202,7 @@ export global AppData {
 
     // Análisis de Guarderías (Tope 18% por Registro de Obra del Usuario)
     in-out property <[ReporteGuarderiaObraItem]> reporte_guarderias_obras: [];
+    in-out property <string> reporte_expanded_row_id: "";
 
     // Calendario Fiscal & Revisiones IMSS
     in-out property <int> cal_view_year: 2026;
@@ -1368,23 +1345,7 @@ export global AppLogic {
     callback reconnect_db();
     callback show_navigation_warning(string);
 
-    // Configuración de Base de Datos PostgreSQL
-    callback test_db_config(string, string, string, string, string, string, string);
-    callback save_db_config(string, string, string, string, string, string, string);
-    callback reset_db_config_defaults();
-    callback load_db_config();
-    callback open_db_config_folder();
 
-    // Múltiples Conexiones PostgreSQL
-    callback reload_db_conexiones();
-    callback check_all_conexiones_status();
-    callback open_new_conexion_modal();
-    callback open_edit_conexion_modal(string);
-    callback close_conexion_modal();
-    callback submit_conexion_modal(string, string, string, string, string, string, string, string, string, bool);
-    callback delete_conexion(string);
-    callback select_and_connect_conexion(string);
-    callback test_form_conexion(string, string, string, string, string, string, string, string);
 
     // Clientes
     callback reload_clientes();
@@ -1441,6 +1402,8 @@ export global AppLogic {
     callback open_delete_obra_dialog(string, string);
     callback close_delete_obra_dialog();
     callback confirm_delete_obra(string);
+    callback obra_form_monto_changed(string);
+    callback obra_form_monto_accepted(string);
     callback filter_obras_search();
     callback filter_obras_tab(int);
 
@@ -1521,6 +1484,7 @@ callback recargar_cedulas_view();
     callback reload_reporte_liquidaciones();
     callback reporte_filtrar_busqueda(string);
     callback reporte_filtrar_obra(int);
+    callback reporte_seleccionar_obra_usuario(string);
     callback reporte_filtrar_periodo(int);
     callback reporte_filtrar_estado(int);
     callback reporte_limpiar_todos_filtros();
@@ -1528,6 +1492,7 @@ callback recargar_cedulas_view();
     callback reporte_toggle_select_row(string);
     callback reporte_toggle_select_all(bool);
     callback reporte_limpiar_seleccion();
+    callback reporte_toggle_expand_row(string);
     callback reporte_open_obra_picker(string);
     callback reporte_filter_obra_picker(string);
     callback reporte_select_obra_picker(string, string);
@@ -1561,6 +1526,8 @@ callback recargar_cedulas_view();
     callback reporte_select_batch_edit_obra(string, string);
     callback reporte_toggle_batch_edit_dropdown();
     callback reporte_batch_edit_dias_cedula_changed(string);
+    callback reporte_batch_edit_toggle_obra(string);
+    callback reporte_batch_edit_set_multi_mode(bool);
     callback reporte_submit_batch_edit(string, bool, string, bool, string, bool);
 
     callback reporte_batch_apply(int, string, string, bool);
@@ -1580,6 +1547,9 @@ callback recargar_cedulas_view();
     callback reporte_toggle_sort_criterion(string);
     callback reporte_toggle_sort_direction(string);
     callback reporte_reset_sorting();
+
+    // Verificación y autocorrección de días y obras
+    callback reporte_verificar_y_corregir_dias();
 
     // Callbacks de filtro y selección de empleados
     callback reporte_open_empleados_filter_modal();

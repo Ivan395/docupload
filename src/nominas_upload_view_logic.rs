@@ -728,6 +728,13 @@ pub fn wire_nominas_upload_callbacks(
                                     
                                     let all_data = has_obras && has_cedulas && has_nominas && has_liquidaciones;
                                     app_data.set_revision_has_all_data(all_data);
+
+                                    if has_nominas {
+                                        app_data.set_nominas_access_allowed(true);
+                                    }
+                                    if has_liquidaciones || has_cedulas {
+                                        app_data.set_reporte_liquidaciones_access_allowed(true);
+                                    }
                                 }
                             }
                         }

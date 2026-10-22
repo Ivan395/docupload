@@ -264,14 +264,29 @@ impl Business {
                     if s.ends_with("RFC") {
                         s = s.trim_end_matches("RFC").trim().to_string();
                     }
-                    self.registro_patronal = Some(s);
+                    let clean_rp: String = s
+                        .chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .collect::<String>()
+                        .to_uppercase();
+                    if !clean_rp.is_empty() {
+                        self.registro_patronal = Some(clean_rp);
+                    }
                 }
             }
         }
         if self.rfc.is_none() {
             if let Ok(Some(caps)) = patterns.business_rfc.captures(page) {
                 if let Some(m) = caps.name("rfc") {
-                    self.rfc = Some(m.as_str().trim().to_uppercase());
+                    let clean_rfc: String = m
+                        .as_str()
+                        .chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .collect::<String>()
+                        .to_uppercase();
+                    if !clean_rfc.is_empty() {
+                        self.rfc = Some(clean_rfc);
+                    }
                 }
             }
         }
