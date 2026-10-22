@@ -35,8 +35,8 @@ export component MainWindow inherits Window {
         padding: 0px;
         spacing: 0px;
 
-        // 1. Barra Lateral de Navegación (Sidebar)
-        Sidebar {}
+        // 1. Barra Lateral de Navegación (Sidebar Colapsable)
+        if AppData.is_sidebar_open : Sidebar {}
 
         // 2. Contenedor Principal Derecho (TopBar + Vista Activa + BottomBar)
         VerticalLayout {

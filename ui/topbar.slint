@@ -16,6 +16,37 @@ export component TopBar inherits Rectangle {
             spacing: 12px;
             alignment: center;
 
+            // Botón Hamburguesa ☰ para mostrar el Sidebar cuando está oculto
+            if !AppData.is_sidebar_open : Rectangle {
+                width: 36px;
+                height: 36px;
+                border-radius: 6px;
+                background: btn_burger.has-hover ? #eff6ff : #f8fafc;
+                border-width: 1.5px;
+                border-color: btn_burger.has-hover ? #3b82f6 : #cbd5e1;
+
+                HorizontalLayout {
+                    alignment: center;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: "☰";
+                        font-size: 17px;
+                        font-weight: 800;
+                        color: #1e3a8a;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                btn_burger := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppData.is_sidebar_open = true;
+                        AppLogic.set_sidebar_open(true);
+                    }
+                }
+            }
+
             if AppData.current_view != 0 && AppData.current_view != 1 && AppData.current_view != 11 : Rectangle {
                 height: 34px;
                 border-radius: 6px;

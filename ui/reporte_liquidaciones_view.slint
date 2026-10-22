@@ -1,5 +1,5 @@
-import { ScrollView, Button, LineEdit, ComboBox, CheckBox } from "std-widgets.slint";
-import { AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem, ReporteBatchWorkerItem, ReporteSelectedItem } from "models.slint";
+import { ScrollView, ListView, Button, LineEdit, ComboBox, CheckBox } from "std-widgets.slint";
+import { AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem, ReporteEditObraItem, ReporteBatchWorkerItem, ReporteSelectedItem, ReporteUniqueEmpleadoItem } from "models.slint";
 component ReporteNumericCell inherits Rectangle {
     in property <string> curr_str: "$0.00";
     in property <string> orig_str: "$0.00";
@@ -40,6 +40,427 @@ component ReporteNumericCell inherits Rectangle {
     }
 
     cell_touch := TouchArea {}
+}
+
+component ObraAsignadaRow inherits Rectangle {
+    in property <string> obra_id;
+    in property <string> label;
+    in property <string> vigencia_str;
+    in property <int> dias_activos_mes;
+    in property <int> tope_max;
+    in property <bool> has_error;
+    in property <string> initial_dias_str;
+    callback dias_changed(string, string);
+    callback remove(string);
+
+    height: 38px;
+    border-radius: 6px;
+    background: root.has_error ? #fff1f2 : #eff6ff;
+    border-width: 1px;
+    border-color: root.has_error ? #f87171 : #93c5fd;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        cross-axis-alignment: center;
+
+        Text {
+            text: "🗃️ " + root.label;
+            font-size: 12px;
+            font-weight: 700;
+            color: root.has_error ? #991b1b : #1e3a8a;
+            horizontal-stretch: 3;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.vigencia_str != "" ? root.vigencia_str : "Sin vigencia";
+            font-size: 11px;
+            color: root.has_error ? #b91c1c : #64748b;
+            horizontal-stretch: 2;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        // Input Editable
+        Rectangle {
+            width: 130px;
+            height: 30px;
+            border-radius: 4px;
+            background: root.has_error ? #fef2f2 : #ffffff;
+            border-width: root.has_error ? 2px : 1.5px;
+            border-color: root.has_error ? #ef4444 : #3b82f6;
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                alignment: center;
+                cross-axis-alignment: center;
+
+                LineEdit {
+                    font-size: 12.5px;
+                    horizontal-alignment: center;
+                    text: root.initial_dias_str;
+                    edited(val) => {
+                        root.dias_changed(root.obra_id, val);
+                    }
+                }
+            }
+        }
+
+        // Badge Tope Máx Dinámico
+        Rectangle {
+            width: 120px;
+            height: 28px;
+            border-radius: 4px;
+            background: root.has_error ? #fee2e2 : #ecfdf5;
+            border-width: root.has_error ? 1.5px : 1px;
+            border-color: root.has_error ? #fca5a5 : #a7f3d0;
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                alignment: center;
+                cross-axis-alignment: center;
+
+                Text {
+                    text: "Tope: " + root.tope_max + " d";
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: root.has_error ? #dc2626 : #047857;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Botón Quitar ✕
+        Rectangle {
+            width: 45px;
+            height: 28px;
+            border-radius: 4px;
+            background: btn_rem.has-hover ? #fee2e2 : #ffffff;
+            border-width: 1px;
+            border-color: btn_rem.has-hover ? #fca5a5 : #cbd5e1;
+
+            Text {
+                text: "✕";
+                font-size: 12px;
+                font-weight: 800;
+                color: #ef4444;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            btn_rem := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.remove(root.obra_id);
+                }
+            }
+        }
+    }
+}
+
+component ReporteEmpleadoMultiFilterWidget inherits Rectangle {
+    height: 38px;
+    width: 220px;
+    border-radius: 6px;
+    background: emp_filter_touch.has-hover || emp_pop.is-open
+        ? #dbeafe
+        : (AppData.reporte_unique_empleados_filter_active ? #eff6ff : #ffffff);
+    border-width: AppData.reporte_unique_empleados_filter_active ? 1.5px : 1px;
+    border-color: AppData.reporte_unique_empleados_filter_active ? #2563eb : (emp_filter_touch.has-hover ? #93c5fd : #cbd5e1);
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: space-between;
+        cross-axis-alignment: center;
+
+        HorizontalLayout {
+            spacing: 6px;
+            cross-axis-alignment: center;
+            Text { text: "👥"; font-size: 13px; vertical-alignment: center; }
+            Text {
+                text: AppData.reporte_unique_empleados_selected_count > 0
+                    ? "Empleados (" + AppData.reporte_unique_empleados_selected_count + ")"
+                    : "Empleados: Todos";
+                font-size: 12.5px;
+                font-weight: 700;
+                color: AppData.reporte_unique_empleados_filter_active ? #1d4ed8 : #475569;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 4px;
+            cross-axis-alignment: center;
+
+            if AppData.reporte_unique_empleados_filter_active : Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                background: btn_emp_clear.has-hover ? #fca5a5 : #fee2e2;
+
+                Text {
+                    text: "✕";
+                    font-size: 10px;
+                    font-weight: 800;
+                    color: #b91c1c;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                btn_emp_clear := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppLogic.reporte_limpiar_unique_empleados_filter();
+                    }
+                }
+            }
+
+            Text {
+                text: emp_pop.is-open ? "▴" : "▾";
+                font-size: 12px;
+                font-weight: 800;
+                color: AppData.reporte_unique_empleados_filter_active ? #2563eb : #94a3b8;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    emp_filter_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if emp_pop.is-open {
+                emp_pop.close();
+            } else {
+                emp_pop.show();
+            }
+        }
+    }
+
+    emp_pop := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        width: 380px;
+        height: 420px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #93c5fd;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000028;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                // Header
+                HorizontalLayout {
+                    alignment: space-between;
+                    cross-axis-alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text { text: "👥"; font-size: 13px; }
+                        Text { text: "Filtrar por Empleados"; font-size: 12.5px; font-weight: 800; color: #1e3a8a; }
+                    }
+
+                    Rectangle {
+                        height: 20px;
+                        border-radius: 10px;
+                        background: #dbeafe;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            Text {
+                                text: AppData.reporte_unique_empleados_selected_count + " / " + AppData.reporte_unique_empleados.length;
+                                font-size: 10.5px;
+                                font-weight: 700;
+                                color: #1d4ed8;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Buscador interno en el popup
+                Rectangle {
+                    height: 32px;
+                    border-radius: 5px;
+                    background: #f8fafc;
+                    border-width: 1px;
+                    border-color: #cbd5e1;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        alignment: center;
+                        Text { text: "🔍"; font-size: 11px; vertical-alignment: center; }
+                        LineEdit {
+                            placeholder-text: "Buscar empleado en la lista...";
+                            font-size: 11.5px;
+                            text: AppData.reporte_unique_empleados_search;
+                            edited(txt) => {
+                                AppData.reporte_unique_empleados_search = txt;
+                                AppLogic.reporte_unique_empleados_search_changed(txt);
+                            }
+                        }
+                    }
+                }
+
+                // Botones rápidos: Seleccionar Todos / Deseleccionar
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: space-between;
+
+                    Rectangle {
+                        height: 26px;
+                        horizontal-stretch: 1;
+                        border-radius: 4px;
+                        background: btn_sel_all_u.has-hover ? #dbeafe : #eff6ff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Text { text: "✓"; font-size: 11px; font-weight: 800; color: #1d4ed8; vertical-alignment: center; }
+                            Text { text: "Todos"; font-size: 11px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                        }
+
+                        btn_sel_all_u := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_unique_empleados_select_all(true);
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 26px;
+                        horizontal-stretch: 1;
+                        border-radius: 4px;
+                        background: btn_desel_all_u.has-hover ? #f1f5f9 : #f8fafc;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Text { text: "◻"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; }
+                            Text { text: "Ninguno"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                        }
+
+                        btn_desel_all_u := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_unique_empleados_select_all(false);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: #e2e8f0; }
+
+                // ListView de Empleados Únicos
+                ListView {
+                    vertical-stretch: 1;
+                    for emp in AppData.reporte_unique_empleados_filtered : Rectangle {
+                        height: 36px;
+                        border-radius: 4px;
+                        background: emp.selected ? #eff6ff : (btn_emp_row.has-hover ? #f8fafc : transparent);
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            cross-axis-alignment: center;
+
+                            // Checkbox
+                            Rectangle {
+                                width: 16px;
+                                height: 16px;
+                                border-radius: 3px;
+                                background: emp.selected ? #2563eb : #ffffff;
+                                border-width: 1.5px;
+                                border-color: emp.selected ? #2563eb : #94a3b8;
+
+                                Text {
+                                    text: "✓";
+                                    font-size: 10px;
+                                    font-weight: 800;
+                                    color: #ffffff;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    visible: emp.selected;
+                                }
+                            }
+
+                            // Nombre e info
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 1px;
+                                alignment: center;
+
+                                Text {
+                                    text: emp.nombre;
+                                    font-size: 11.5px;
+                                    font-weight: emp.selected ? 700 : 600;
+                                    color: emp.selected ? #1e3a8a : #0f172a;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: "NSS: " + (emp.nss != "" ? emp.nss : "S/N") + " • RFC: " + (emp.rfc != "" ? emp.rfc : "S/R");
+                                    font-size: 9.5px;
+                                    color: #64748b;
+                                    overflow: elide;
+                                }
+                            }
+
+                            // Badge de Periodos
+                            Rectangle {
+                                height: 18px;
+                                border-radius: 4px;
+                                background: #f1f5f9;
+                                HorizontalLayout {
+                                    padding-left: 5px;
+                                    padding-right: 5px;
+                                    Text {
+                                        text: emp.periodos_count + " per.";
+                                        font-size: 9.5px;
+                                        font-weight: 600;
+                                        color: #475569;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        btn_emp_row := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_toggle_unique_empleado(emp.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 component ReporteSelectedCombobox inherits Rectangle {
@@ -424,9 +845,12 @@ export component ReporteLiquidacionesView inherits Rectangle {
     background: #f8fafc;
 
     ScrollView {
+        width: 100%;
+        content-width: self.width;
+
         VerticalLayout {
-            padding: 20px;
-            spacing: 14px;
+            padding: 16px;
+            spacing: 12px;
 
         // 1. Encabezado Superior y Botones de Acción
         HorizontalLayout {
@@ -454,14 +878,6 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         color: #0f172a;
                         vertical-alignment: center;
                     }
-                }
-
-                Text {
-                    text: AppData.reporte_subtitle != "" ? AppData.reporte_subtitle : "Liquidaciones SUA filtradas por vigencia de Registros de Obra en la revisión activa.";
-                    font-size: 13px;
-                    font-weight: 500;
-                    color: #64748b;
-                    wrap: word-wrap;
                 }
             }
 
@@ -519,32 +935,6 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     btn_export_sua := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { AppLogic.reporte_abrir_modal_exportar_sua(); }
-                    }
-                }
-
-                // Verificar y Corregir Días
-                Rectangle {
-                    height: 38px;
-                    width: 205px;
-                    border-radius: 6px;
-                    background: btn_verif_dias.has-hover ? #0284c7 : #0ea5e9;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 6px;
-                        Text { text: "🔍"; font-size: 13px; vertical-alignment: center; }
-                        Text {
-                            text: "Verificar y Corregir Días";
-                            font-size: 12.5px;
-                            font-weight: 700;
-                            color: #ffffff;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    btn_verif_dias := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { AppLogic.reporte_verificar_y_corregir_dias(); }
                     }
                 }
 
@@ -697,12 +1087,13 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
         // 3. Fila de Filtros de Búsqueda
         HorizontalLayout {
-            spacing: 12px;
+            spacing: 8px;
             alignment: space-between;
 
             // Buscador por empleado
             Rectangle {
                 horizontal-stretch: 1;
+                min-width: 130px;
                 height: 38px;
                 border-radius: 6px;
                 background: #ffffff;
@@ -710,14 +1101,14 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 border-color: #cbd5e1;
 
                 HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 8px;
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 6px;
                     alignment: center;
 
-                    Text { text: "🔍"; font-size: 14px; vertical-alignment: center; }
+                    Text { text: "🔍"; font-size: 13px; vertical-alignment: center; }
                     search_input := LineEdit {
-                        placeholder-text: "Buscar por Empleado (Nombre, RFC, NSS, CURP)...";
+                        placeholder-text: "Buscar Empleado...";
                         text: AppData.reporte_search_query;
                         edited(text) => {
                             AppData.reporte_search_query = text;
@@ -727,13 +1118,50 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 }
             }
 
+            // Filtro Multi-Selección de Empleados Únicos
+            ReporteEmpleadoMultiFilterWidget {}
+
+            // Botón Trigger del Right Side Drawer: Ver Obras (N)
+            Rectangle {
+                height: 38px;
+                border-radius: 6px;
+                background: AppData.reporte_drawer_obras_open ? #eff6ff : (btn_drawer_trigger.has-hover ? #f8fafc : #ffffff);
+                border-width: AppData.reporte_drawer_obras_open ? 1.5px : 1px;
+                border-color: AppData.reporte_drawer_obras_open ? #2563eb : #cbd5e1;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 10px;
+                    spacing: 5px;
+                    alignment: center;
+                    cross-axis-alignment: center;
+
+                    Text { text: "🏗️"; font-size: 13px; vertical-alignment: center; }
+                    Text {
+                        text: "Ver Obras (" + AppData.reporte_obras_usuario.length + ")";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: AppData.reporte_drawer_obras_open ? #1d4ed8 : #2563eb;
+                        vertical-alignment: center;
+                    }
+                }
+
+                btn_drawer_trigger := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppData.reporte_drawer_obras_open = !AppData.reporte_drawer_obras_open;
+                        AppLogic.reporte_toggle_drawer_obras();
+                    }
+                }
+            }
+
             // Filtro Registro de Obra
             HorizontalLayout {
-                spacing: 6px;
+                spacing: 5px;
                 alignment: center;
-                Text { text: "🏗 Obra:"; font-size: 13px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                Text { text: "🏗 Obra:"; font-size: 12px; font-weight: 700; color: #475569; vertical-alignment: center; }
                 ComboBox {
-                    width: 220px;
+                    width: 170px;
                     height: 38px;
                     model: AppData.reporte_obras_filter_labels;
                     current-index <=> AppData.reporte_filter_obra_idx;
@@ -745,11 +1173,11 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
             // Filtro Periodo
             HorizontalLayout {
-                spacing: 6px;
+                spacing: 5px;
                 alignment: center;
-                Text { text: "📅 Periodo:"; font-size: 13px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                Text { text: "📅 Periodo:"; font-size: 12px; font-weight: 700; color: #475569; vertical-alignment: center; }
                 ComboBox {
-                    width: 195px;
+                    width: 150px;
                     height: 38px;
                     model: AppData.reporte_periodo_options;
                     current-index <=> AppData.reporte_filter_periodo_idx;
@@ -761,11 +1189,11 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
             // Filtro Estado
             HorizontalLayout {
-                spacing: 6px;
+                spacing: 5px;
                 alignment: center;
-                Text { text: "🏷 Estado:"; font-size: 13px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                Text { text: "🏷 Estado:"; font-size: 12px; font-weight: 700; color: #475569; vertical-alignment: center; }
                 ComboBox {
-                    width: 175px;
+                    width: 130px;
                     height: 38px;
                     model: AppData.reporte_estado_options;
                     current-index <=> AppData.reporte_filter_estado_idx;
@@ -784,16 +1212,16 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 border-color: AppData.reporte_active_sort_count > 0 ? #3b82f6 : #cbd5e1;
 
                 HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 6px;
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 4px;
                     alignment: center;
                     cross-axis-alignment: center;
 
-                    Text { text: "⇅"; font-size: 14px; font-weight: 800; color: AppData.reporte_active_sort_count > 0 ? #1d4ed8 : #475569; vertical-alignment: center; }
+                    Text { text: "⇅"; font-size: 13px; font-weight: 800; color: AppData.reporte_active_sort_count > 0 ? #1d4ed8 : #475569; vertical-alignment: center; }
                     Text {
                         text: AppData.reporte_active_sort_count > 0 ? "Ordenar (" + AppData.reporte_active_sort_count + ")" : "Ordenar...";
-                        font-size: 13px;
+                        font-size: 12px;
                         font-weight: 700;
                         color: AppData.reporte_active_sort_count > 0 ? #1d4ed8 : #475569;
                         vertical-alignment: center;
@@ -808,75 +1236,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 }
             }
 
-            // Botón Seleccionar Todos los Visibles
-            Rectangle {
-                height: 38px;
-                border-radius: 6px;
-                background: btn_sel_all_vis.has-hover ? #eff6ff : #ffffff;
-                border-width: 1px;
-                border-color: #93c5fd;
-
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 5px;
-                    alignment: center;
-                    cross-axis-alignment: center;
-
-                    Text { text: "☑️"; font-size: 13px; vertical-alignment: center; }
-                    Text {
-                        text: "Seleccionar Visibles";
-                        font-size: 12.5px;
-                        font-weight: 700;
-                        color: #1d4ed8;
-                        vertical-alignment: center;
-                    }
-                }
-
-                btn_sel_all_vis := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        AppLogic.reporte_toggle_select_all(true);
-                    }
-                }
-            }
-
-            // Botón Deseleccionar Todos
-            Rectangle {
-                height: 38px;
-                border-radius: 6px;
-                background: btn_desel_all.has-hover ? #f8fafc : #ffffff;
-                border-width: 1px;
-                border-color: #cbd5e1;
-
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 5px;
-                    alignment: center;
-                    cross-axis-alignment: center;
-
-                    Text { text: "◻️"; font-size: 13px; vertical-alignment: center; }
-                    Text {
-                        text: "Deseleccionar";
-                        font-size: 12.5px;
-                        font-weight: 700;
-                        color: #475569;
-                        vertical-alignment: center;
-                    }
-                }
-
-                btn_desel_all := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        AppLogic.reporte_limpiar_seleccion();
-                    }
-                }
-            }
-
-            // Botón Limpiar Todos los Filtros (Siempre visible y prominente)
+            // Botón Limpiar Todos los Filtros
             btn_clean_rect := Rectangle {
-                property <bool> has_active_filters: AppData.reporte_search_query != "" || AppData.reporte_filter_obra_idx != 0 || AppData.reporte_filter_periodo_idx != 0 || AppData.reporte_filter_estado_idx != 0 || AppData.reporte_emp_filter_active;
+                property <bool> has_active_filters: AppData.reporte_search_query != "" || AppData.reporte_filter_obra_idx != 0 || AppData.reporte_filter_periodo_idx != 0 || AppData.reporte_filter_estado_idx != 0 || AppData.reporte_emp_filter_active || AppData.reporte_unique_empleados_filter_active;
                 height: 38px;
                 border-radius: 6px;
                 background: self.has_active_filters ? (btn_clear_all_f.has-hover ? #fecaca : #fee2e2) : (btn_clear_all_f.has-hover ? #f8fafc : #ffffff);
@@ -884,16 +1246,16 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 border-color: self.has_active_filters ? #ef4444 : #cbd5e1;
 
                 HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 5px;
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 4px;
                     alignment: center;
                     cross-axis-alignment: center;
 
-                    Text { text: "🧹"; font-size: 13px; vertical-alignment: center; }
+                    Text { text: "✕"; font-size: 12px; font-weight: 800; color: btn_clean_rect.has_active_filters ? #dc2626 : #64748b; vertical-alignment: center; }
                     Text {
-                        text: "Limpiar Filtros";
-                        font-size: 12.5px;
+                        text: "Limpiar";
+                        font-size: 12px;
                         font-weight: 700;
                         color: btn_clean_rect.has_active_filters ? #dc2626 : #64748b;
                         vertical-alignment: center;
@@ -911,7 +1273,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
         // 4. Panel de Modificación Masiva en Lote (Siempre Disponible)
         Rectangle {
-            height: 54px;
+            height: 52px;
             border-radius: 8px;
             background: #eff6ff;
             border-width: 1px;
@@ -920,11 +1282,11 @@ export component ReporteLiquidacionesView inherits Rectangle {
             HorizontalLayout {
                 padding-left: 14px;
                 padding-right: 14px;
-                spacing: 12px;
+                spacing: 10px;
                 alignment: space-between;
                 cross-axis-alignment: center;
 
-                // Título del lote y conteo
+                // Título del lote, conteo y botones de selección
                 HorizontalLayout {
                     spacing: 8px;
                     alignment: center;
@@ -941,36 +1303,51 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     // Combobox desplegable con los elementos seleccionados
                     ReporteSelectedCombobox {}
 
-                    // Botón directo para remover todos los seleccionados
-                    if AppData.reporte_selected_count > 0 : Rectangle {
-                        height: 34px;
+                    // Botón Seleccionar Todos los Visibles
+                    Rectangle {
+                        height: 32px;
                         border-radius: 5px;
-                        background: btn_clear_all_sel.has-hover ? #fee2e2 : #ffffff;
+                        background: btn_sel_all_vis.has-hover ? #dbeafe : #ffffff;
+                        border-width: 1px;
+                        border-color: #93c5fd;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 4px;
+                            alignment: center;
+                            cross-axis-alignment: center;
+                            Text { text: "☑️"; font-size: 11px; vertical-alignment: center; }
+                            Text { text: "Todos Visibles"; font-size: 11.5px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
+                        }
+
+                        btn_sel_all_vis := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_toggle_select_all(true); }
+                        }
+                    }
+
+                    // Botón Deseleccionar Todos
+                    if AppData.reporte_selected_count > 0 : Rectangle {
+                        height: 32px;
+                        border-radius: 5px;
+                        background: btn_desel_all.has-hover ? #fee2e2 : #ffffff;
                         border-width: 1px;
                         border-color: #fca5a5;
 
                         HorizontalLayout {
                             padding-left: 8px;
-                            padding-right: 10px;
-                            spacing: 5px;
+                            padding-right: 8px;
+                            spacing: 4px;
                             alignment: center;
                             cross-axis-alignment: center;
-
-                            Text { text: "✕"; font-size: 12px; font-weight: 800; color: #dc2626; vertical-alignment: center; }
-                            Text {
-                                text: "Remover Selección";
-                                font-size: 12px;
-                                font-weight: 700;
-                                color: #dc2626;
-                                vertical-alignment: center;
-                            }
+                            Text { text: "✕"; font-size: 11px; font-weight: 800; color: #dc2626; vertical-alignment: center; }
+                            Text { text: "Deseleccionar"; font-size: 11.5px; font-weight: 700; color: #dc2626; vertical-alignment: center; }
                         }
 
-                        btn_clear_all_sel := TouchArea {
+                        btn_desel_all := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => {
-                                AppLogic.reporte_limpiar_seleccion();
-                            }
+                            clicked => { AppLogic.reporte_limpiar_seleccion(); }
                         }
                     }
                 }
@@ -1152,187 +1529,61 @@ export component ReporteLiquidacionesView inherits Rectangle {
             }
         }
 
-        // 4.1. Panel Informativo: Registros de Obra Creados por el Usuario (Vigencias y Empleados Asignados)
-        Rectangle {
-            border-radius: 8px;
-            background: #f8fafc;
-            border-width: 1px;
-            border-color: #cbd5e1;
+        // Contenedor Flexible: Tabla Principal y Right Side Drawer
+        HorizontalLayout {
+            spacing: AppData.reporte_drawer_obras_open ? 12px : 0px;
 
+            // Área Principal de la Tabla
             VerticalLayout {
-                padding: 12px;
+                horizontal-stretch: 1;
                 spacing: 10px;
 
+        // Pestañas de Navegación por Mes (Empleados por Mes) con scroll horizontal independiente
+        if AppData.reporte_periodo_options.length > 1 : Rectangle {
+            height: 40px;
+            clip: true;
+
+            ScrollView {
+                vertical-stretch: 0;
+                content-height: self.height;
+
                 HorizontalLayout {
-                    alignment: space-between;
-                    cross-axis-alignment: center;
-
-                    HorizontalLayout {
-                        spacing: 8px;
-                        cross-axis-alignment: center;
-                        Text { text: "🏗️"; font-size: 15px; vertical-alignment: center; }
-                        Text {
-                            text: "Registros de Obra Creados por el Usuario (Vigencias y Empleados Asignados):";
-                            font-size: 13px;
-                            font-weight: 800;
-                            color: #1e3a8a;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    Text {
-                        text: "Haz clic en una obra para filtrar la tabla rápidamente";
-                        font-size: 11px;
-                        font-weight: 600;
-                        color: #64748b;
-                        vertical-alignment: center;
-                    }
-                }
-
-                if AppData.reporte_obras_usuario.length == 0 : Rectangle {
-                    height: 48px;
-                    border-radius: 6px;
-                    background: #ffffff;
-                    border-width: 1px;
-                    border-color: #e2e8f0;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        cross-axis-alignment: center;
-                        spacing: 8px;
-                        Text { text: "ℹ️"; font-size: 13px; vertical-alignment: center; }
-                        Text {
-                            text: "No hay registros de obras creados por el usuario en esta revisión. Puede agregarlos desde Registros de Obras (F5).";
-                            font-size: 12px;
-                            font-weight: 600;
-                            color: #64748b;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                if AppData.reporte_obras_usuario.length > 0 : HorizontalLayout {
-                    spacing: 10px;
+                    spacing: 8px;
                     alignment: start;
 
-                    for obra in AppData.reporte_obras_usuario : Rectangle {
+                    for opt[idx] in AppData.reporte_periodo_options : Rectangle {
+                        height: 34px;
                         border-radius: 6px;
-                        background: obra.selected ? #eff6ff : (card_touch.has-hover ? #f0fdf4 : #ffffff);
-                        border-width: obra.selected ? 2px : 1px;
-                        border-color: obra.selected ? #2563eb : #93c5fd;
-                        height: 56px;
+                        background: AppData.reporte_filter_periodo_idx == idx ? #1e3a8a : #ffffff;
+                        border-width: 1px;
+                        border-color: AppData.reporte_filter_periodo_idx == idx ? #1e3a8a : #cbd5e1;
 
                         HorizontalLayout {
                             padding-left: 12px;
                             padding-right: 12px;
-                            spacing: 14px;
-                            cross-axis-alignment: center;
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 3px;
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    cross-axis-alignment: center;
-                                    Text {
-                                        text: obra.numero;
-                                        font-size: 13px;
-                                        font-weight: 800;
-                                        color: obra.selected ? #1d4ed8 : #0f172a;
-                                    }
-                                    if obra.tipo_obra != "" : Text {
-                                        text: "(" + obra.tipo_obra + ")";
-                                        font-size: 11px;
-                                        font-weight: 600;
-                                        color: #475569;
-                                    }
-                                }
-                                Text {
-                                    text: "📅 Vigencia: " + obra.vigencia_str;
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    color: #047857;
-                                }
+                            spacing: 6px;
+                            alignment: center;
+                            Text {
+                                text: idx == 0 ? "📅" : "🗓";
+                                font-size: 12px;
+                                vertical-alignment: center;
                             }
-
-                            // Badge de Conteo de Empleados Asignados
-                            Rectangle {
-                                height: 26px;
-                                border-radius: 13px;
-                                background: obra.selected ? #dbeafe : (obra.empleados_count > 0 ? #ecfdf5 : #f1f5f9);
-                                border-width: 1px;
-                                border-color: obra.selected ? #93c5fd : (obra.empleados_count > 0 ? #a7f3d0 : #cbd5e1);
-
-                                HorizontalLayout {
-                                    padding-left: 10px;
-                                    padding-right: 10px;
-                                    spacing: 5px;
-                                    alignment: center;
-                                    cross-axis-alignment: center;
-
-                                    Text {
-                                        text: "👥";
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                    }
-                                    Text {
-                                        text: obra.empleados_count_str;
-                                        font-size: 11px;
-                                        font-weight: 700;
-                                        color: obra.selected ? #1d4ed8 : (obra.empleados_count > 0 ? #065f46 : #64748b);
-                                        vertical-alignment: center;
-                                    }
-                                }
+                            Text {
+                                text: opt;
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: AppData.reporte_filter_periodo_idx == idx ? #ffffff : #334155;
+                                vertical-alignment: center;
                             }
                         }
 
-                        card_touch := TouchArea {
+                        TouchArea {
                             mouse-cursor: pointer;
                             clicked => {
-                                AppLogic.reporte_seleccionar_obra_usuario(obra.id);
+                                AppData.reporte_filter_periodo_idx = idx;
+                                AppLogic.reporte_filtrar_periodo(idx);
                             }
                         }
-                    }
-                }
-            }
-        }
-
-        // Pestañas de Navegación por Mes (Empleados por Mes)
-        if AppData.reporte_periodo_options.length > 1 : HorizontalLayout {
-            spacing: 8px;
-            alignment: start;
-
-            for opt[idx] in AppData.reporte_periodo_options : Rectangle {
-                height: 36px;
-                border-radius: 6px;
-                background: AppData.reporte_filter_periodo_idx == idx ? #1e3a8a : #ffffff;
-                border-width: 1px;
-                border-color: AppData.reporte_filter_periodo_idx == idx ? #1e3a8a : #cbd5e1;
-
-                HorizontalLayout {
-                    padding-left: 14px;
-                    padding-right: 14px;
-                    spacing: 6px;
-                    alignment: center;
-                    Text {
-                        text: idx == 0 ? "📅" : "🗓";
-                        font-size: 13px;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: opt;
-                        font-size: 13px;
-                        font-weight: 700;
-                        color: AppData.reporte_filter_periodo_idx == idx ? #ffffff : #334155;
-                        vertical-alignment: center;
-                    }
-                }
-
-                TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        AppData.reporte_filter_periodo_idx = idx;
-                        AppLogic.reporte_filtrar_periodo(idx);
                     }
                 }
             }
@@ -2347,6 +2598,210 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 }
             }
         }
+        } // Fin del Área Principal de la Tabla (VerticalLayout)
+
+        // Right Side Drawer (Panel Lateral Desplegable No Modal)
+        if AppData.reporte_drawer_obras_open : Rectangle {
+            width: 350px;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #cbd5e1;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000018;
+            clip: true;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 12px;
+
+                // Header fijo del Drawer
+                HorizontalLayout {
+                    alignment: space-between;
+                    cross-axis-alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+                        Text { text: "🏗️"; font-size: 16px; vertical-alignment: center; }
+                        Text {
+                            text: "Registros de Obra";
+                            font-size: 15px;
+                            font-weight: 800;
+                            color: #1e3a8a;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Botón "X" para cerrar
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: btn_close_drawer.has-hover ? #fee2e2 : #f1f5f9;
+                        border-width: 1px;
+                        border-color: btn_close_drawer.has-hover ? #fca5a5 : #e2e8f0;
+
+                        Text {
+                            text: "✕";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: btn_close_drawer.has-hover ? #dc2626 : #64748b;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        btn_close_drawer := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppData.reporte_drawer_obras_open = false;
+                                AppLogic.reporte_set_drawer_obras(false);
+                            }
+                        }
+                    }
+                }
+
+                // Separador inferior del header
+                Rectangle { height: 1px; background: #e2e8f0; }
+
+                // Subtítulo
+                Text {
+                    text: "Haz clic en una obra para filtrar la tabla principal:";
+                    font-size: 11.5px;
+                    font-weight: 600;
+                    color: #64748b;
+                }
+
+                // Body: Scrollable list of cards
+                if AppData.reporte_obras_usuario.length == 0 : Rectangle {
+                    vertical-stretch: 1;
+                    HorizontalLayout {
+                        alignment: center;
+                        cross-axis-alignment: center;
+                        spacing: 8px;
+                        Text { text: "ℹ️"; font-size: 13px; }
+                        Text {
+                            text: "No hay registros de obras creados por el usuario en esta revisión.";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: #64748b;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                if AppData.reporte_obras_usuario.length > 0 : ListView {
+                    vertical-stretch: 1;
+                    for obra in AppData.reporte_obras_usuario : Rectangle {
+                        height: 82px;
+                        border-radius: 8px;
+                        background: obra.selected ? #eff6ff : (card_drawer_touch.has-hover ? #f0fdf4 : #ffffff);
+                        border-width: obra.selected ? 2px : 1px;
+                        border-color: obra.selected ? #2563eb : (card_drawer_touch.has-hover ? #86efac : #cbd5e1);
+                        drop-shadow-blur: 4px;
+                        drop-shadow-color: #0000000a;
+
+                        VerticalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 10px;
+                            padding-bottom: 10px;
+                            spacing: 5px;
+                            alignment: space-between;
+
+                            // Top: ID de obra en negrita (Ej. C0640941) + tipo
+                            HorizontalLayout {
+                                alignment: space-between;
+                                cross-axis-alignment: center;
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: obra.numero;
+                                        font-size: 13.5px;
+                                        font-weight: 800;
+                                        color: obra.selected ? #1d4ed8 : #0f172a;
+                                    }
+                                    if obra.tipo_obra != "" : Text {
+                                        text: "(" + obra.tipo_obra + ")";
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: #64748b;
+                                    }
+                                }
+
+                                if obra.selected : Rectangle {
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    background: #2563eb;
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Text { text: "Filtro Activo"; font-size: 9.5px; font-weight: 800; color: #ffffff; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+
+                            // Middle: Rango de fechas
+                            HorizontalLayout {
+                                spacing: 5px;
+                                cross-axis-alignment: center;
+                                Text { text: "📅"; font-size: 11px; vertical-alignment: center; }
+                                Text {
+                                    text: "Vigencia: " + obra.vigencia_str;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: #047857;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            // Bottom: Badge verde con el número de "empleados únicos (N reg)"
+                            HorizontalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    height: 22px;
+                                    border-radius: 11px;
+                                    background: obra.empleados_count > 0 ? #ecfdf5 : #f1f5f9;
+                                    border-width: 1px;
+                                    border-color: obra.empleados_count > 0 ? #a7f3d0 : #cbd5e1;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 5px;
+                                        alignment: center;
+                                        cross-axis-alignment: center;
+
+                                        Text {
+                                            text: "👥";
+                                            font-size: 10px;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: obra.empleados_count + " empleados únicos (" + obra.empleados_count_str + ")";
+                                            font-size: 10.5px;
+                                            font-weight: 700;
+                                            color: obra.empleados_count > 0 ? #065f46 : #64748b;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        card_drawer_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_seleccionar_obra_usuario(obra.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } // Fin del HorizontalLayout contenedor de Tabla y Right Side Drawer
 
         // 7. Análisis de Guarderías (Tope 18% por Registro de Obra del Usuario)
         Rectangle {
@@ -2616,35 +3071,35 @@ export component ReporteLiquidacionesView inherits Rectangle {
         TouchArea {}
 
         Rectangle {
-            width: 580px;
-            height: (AppData.reporte_edit_dropdown_open ? 640px : 540px) + (AppData.reporte_edit_alert_show ? 54px : 0px);
+            width: 1080px;
+            height: 850px;
             border-radius: 12px;
             background: #ffffff;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             drop-shadow-blur: 24px;
             drop-shadow-color: #00000040;
-            animate height { duration: 150ms; easing: ease-out; }
 
             VerticalLayout {
-                padding: 22px;
-                spacing: 14px;
+                padding: 20px;
+                spacing: 12px;
                 alignment: space-between;
 
                 // 1. Título y Cabecera
                 HorizontalLayout {
                     alignment: space-between;
+                    cross-axis-alignment: center;
                     VerticalLayout {
-                        spacing: 3px;
+                        spacing: 2px;
                         Text {
-                            text: "Modificar Asignación de Obra y Días";
-                            font-size: 18px;
+                            text: "Modificar Asignación de Obra y Días (Multi-Obra)";
+                            font-size: 17px;
                             font-weight: 800;
                             color: #0f172a;
                         }
                         Text {
-                            text: "Trabajador: " + AppData.reporte_edit_worker_name + (AppData.reporte_edit_periodo != "" ? " • " + AppData.reporte_edit_periodo : "");
-                            font-size: 13.5px;
+                            text: "Trabajador: " + AppData.reporte_edit_worker_name + (AppData.reporte_edit_periodo != "" ? " • Periodo: " + AppData.reporte_edit_periodo : "");
+                            font-size: 13px;
                             font-weight: 600;
                             color: #2563eb;
                             overflow: elide;
@@ -2664,7 +3119,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
-                // ALERTA TEMPORAL EN EL MODAL (Visible ante errores/restricciones de asignación)
+                // ALERTA TEMPORAL EN EL MODAL (Visible ante errores/restricciones)
                 if AppData.reporte_edit_alert_show : Rectangle {
                     border-radius: 8px;
                     background: AppData.reporte_edit_alert_type == "error" ? #fef2f2 : (AppData.reporte_edit_alert_type == "warning" ? #fffbeb : #eff6ff);
@@ -2674,21 +3129,21 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     HorizontalLayout {
                         padding-left: 12px;
                         padding-right: 10px;
-                        padding-top: 8px;
-                        padding-bottom: 8px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
                         spacing: 10px;
                         cross-axis-alignment: center;
 
                         Text {
                             text: AppData.reporte_edit_alert_type == "error" ? "⛔" : (AppData.reporte_edit_alert_type == "warning" ? "⚠️" : "ℹ");
-                            font-size: 16px;
+                            font-size: 15px;
                             vertical-alignment: center;
                         }
 
                         Text {
                             horizontal-stretch: 1;
                             text: AppData.reporte_edit_alert_text;
-                            font-size: 12.5px;
+                            font-size: 12px;
                             font-weight: 700;
                             color: AppData.reporte_edit_alert_type == "error" ? #991b1b : (AppData.reporte_edit_alert_type == "warning" ? #92400e : #1e40af);
                             wrap: word-wrap;
@@ -2696,13 +3151,13 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         }
 
                         Rectangle {
-                            width: 22px;
-                            height: 22px;
-                            border-radius: 11px;
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 10px;
                             background: btn_dismiss_edit_alert.has-hover ? #fecaca : transparent;
                             Text {
                                 text: "✕";
-                                font-size: 12px;
+                                font-size: 11px;
                                 font-weight: 800;
                                 color: #991b1b;
                                 horizontal-alignment: center;
@@ -2716,406 +3171,443 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
-                // 2. Campo Registro de Obra (Combobox con filtro)
-                VerticalLayout {
-                    spacing: 6px;
-
-                    HorizontalLayout {
-                        alignment: space-between;
-                        Text {
-                            text: "Registro de Obra (SIROC):";
-                            font-size: 13px;
-                            font-weight: 700;
-                            color: #334155;
-                            vertical-alignment: center;
-                        }
-                        Text {
-                            text: AppData.reporte_edit_selected_obra_id != "" ? "Obra Vinculada" : "⚠️ Sin Asignar (Pendiente)";
-                            font-size: 12px;
-                            font-weight: 700;
-                            color: AppData.reporte_edit_selected_obra_id != "" ? #166534 : #b91c1c;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Cuadro de Combobox / Input
-                    Rectangle {
-                        height: 40px;
-                        border-radius: 6px;
-                        background: #ffffff;
-                        border-width: 1.5px;
-                        border-color: AppData.reporte_edit_dropdown_open ? #3b82f6 : #cbd5e1;
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 6px;
-                            spacing: 8px;
-                            alignment: space-between;
-
-                            edit_search_input := LineEdit {
-                                horizontal-stretch: 1;
-                                placeholder-text: "Escribe para filtrar o selecciona una obra...";
-                                text <=> AppData.reporte_edit_search_query;
-                                edited(text) => {
-                                    AppData.reporte_edit_dropdown_open = true;
-                                    AppLogic.reporte_filter_edit_obras(text);
-                                }
-                            }
-
-                            // Botón flecha desplegable Combobox
-                            Rectangle {
-                                width: 28px;
-                                height: 28px;
-                                border-radius: 4px;
-                                background: btn_drop_toggle.has-hover ? #e2e8f0 : transparent;
-                                y: (parent.height - self.height) / 2;
-
-                                Text {
-                                    text: AppData.reporte_edit_dropdown_open ? "▴" : "▾";
-                                    font-size: 14px;
-                                    font-weight: 800;
-                                    color: #2563eb;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-
-                                btn_drop_toggle := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        AppData.reporte_edit_dropdown_open = !AppData.reporte_edit_dropdown_open;
-                                        if AppData.reporte_edit_dropdown_open {
-                                            AppLogic.reporte_filter_edit_obras("");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Menú desplegable Combobox (Lista de opciones)
-                    if AppData.reporte_edit_dropdown_open : Rectangle {
-                        height: 135px;
-                        border-radius: 6px;
-                        background: #ffffff;
-                        border-width: 1px;
-                        border-color: #93c5fd;
-                        drop-shadow-blur: 10px;
-                        drop-shadow-color: #00000020;
-                        clip: true;
-
-                        ScrollView {
-                            VerticalLayout {
-                                padding: 4px;
-                                spacing: 4px;
-
-                                // Opción: Dejar Sin Asignar (Pendiente)
-                                Rectangle {
-                                    height: 34px;
-                                    border-radius: 4px;
-                                    background: btn_pick_none.has-hover ? #fee2e2 : (AppData.reporte_edit_selected_obra_id == "" ? #fef2f2 : #ffffff);
-                                    border-width: 1px;
-                                    border-color: AppData.reporte_edit_selected_obra_id == "" ? #fca5a5 : #f1f5f9;
-
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        spacing: 8px;
-                                        alignment: start;
-                                        Text { text: "⚠️"; font-size: 12px; vertical-alignment: center; }
-                                        Text {
-                                            text: "Dejar Sin Asignar (Pendiente)";
-                                            font-size: 12px;
-                                            font-weight: 700;
-                                            color: #b91c1c;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-
-                                    btn_pick_none := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            edit_search_input.text = "⚠️ Sin Asignar (Pendiente)";
-                                            AppData.reporte_edit_search_query = "⚠️ Sin Asignar (Pendiente)";
-                                            AppData.reporte_edit_dropdown_open = false;
-                                            AppLogic.reporte_select_edit_obra("", "⚠️ Sin Asignar (Pendiente)");
-                                        }
-                                    }
-                                }
-
-                                // Obras disponibles filtradas
-                                for o in AppData.reporte_edit_filtered_obras : Rectangle {
-                                    height: 34px;
-                                    border-radius: 4px;
-                                    background: btn_pick_item.has-hover ? #dbeafe : (AppData.reporte_edit_selected_obra_id == o.id ? #eff6ff : #ffffff);
-                                    border-width: 1px;
-                                    border-color: AppData.reporte_edit_selected_obra_id == o.id ? #93c5fd : #f1f5f9;
-
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        spacing: 8px;
-                                        alignment: start;
-                                        Text { text: "🏗"; font-size: 12px; vertical-alignment: center; }
-                                        Text {
-                                            text: o.label;
-                                            font-size: 12px;
-                                            font-weight: 700;
-                                            color: #1e3a8a;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
-                                    }
-
-                                    btn_pick_item := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            edit_search_input.text = o.label;
-                                            AppData.reporte_edit_search_query = o.label;
-                                            AppData.reporte_edit_dropdown_open = false;
-                                            AppLogic.reporte_select_edit_obra(o.id, o.label);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 2.5 Resumen Informativo de Incidencias (Lic, Inc, Aus) y Límite de Días
+                // 2. Banner de Reglas de Auditoría e Incidencias (Descuento LIC, INC, AUS)
                 Rectangle {
                     border-radius: 8px;
-                    background: #fffbeb;
+                    background: #f8fafc;
                     border-width: 1px;
-                    border-color: #fde68a;
+                    border-color: #cbd5e1;
 
                     VerticalLayout {
                         padding: 10px;
-                        spacing: 8px;
+                        spacing: 6px;
 
                         HorizontalLayout {
                             alignment: space-between;
-                            Text {
-                                text: "⚠️ Incidencias registradas en el mes:";
-                                font-size: 12px;
-                                font-weight: 800;
-                                color: #92400e;
-                            }
-                            Text {
-                                text: "Límite máx. asignable: " + AppData.reporte_edit_dias_max + " días";
-                                font-size: 12px;
-                                font-weight: 800;
-                                color: #b45309;
-                            }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-
-                            Rectangle {
-                                height: 26px;
-                                border-radius: 4px;
-                                background: #ffffff;
-                                border-width: 1px;
-                                border-color: #fde68a;
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    alignment: center;
-                                    Text { text: "Licencias: " + AppData.reporte_edit_lic_info; font-size: 11.5px; font-weight: 700; color: #b45309; vertical-alignment: center; }
-                                }
-                            }
-
-                            Rectangle {
-                                height: 26px;
-                                border-radius: 4px;
-                                background: #ffffff;
-                                border-width: 1px;
-                                border-color: #fde68a;
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    alignment: center;
-                                    Text { text: "Incapacidades: " + AppData.reporte_edit_inc_info; font-size: 11.5px; font-weight: 700; color: #b45309; vertical-alignment: center; }
-                                }
-                            }
-
-                            Rectangle {
-                                height: 26px;
-                                border-radius: 4px;
-                                background: #ffffff;
-                                border-width: 1px;
-                                border-color: #fde68a;
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    alignment: center;
-                                    Text { text: "Ausentismos: " + AppData.reporte_edit_aus_info; font-size: 11.5px; font-weight: 700; color: #b45309; vertical-alignment: center; }
-                                }
-                            }
-                        }
-
-                        if AppData.reporte_edit_obra_vigencia_info != "" : Rectangle {
-                            border-radius: 4px;
-                            background: AppData.reporte_edit_dias_max == 0 ? #fef2f2 : #eff6ff;
-                            border-width: 1px;
-                            border-color: AppData.reporte_edit_dias_max == 0 ? #fca5a5 : #bfdbfe;
+                            cross-axis-alignment: center;
                             HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                padding-top: 4px;
-                                padding-bottom: 4px;
+                                spacing: 8px;
                                 Text {
-                                    text: AppData.reporte_edit_obra_vigencia_info;
-                                    font-size: 11px;
+                                    text: "Días Cédula: " + AppData.reporte_edit_dias_cedula_val;
+                                    font-size: 12px;
                                     font-weight: 700;
-                                    color: AppData.reporte_edit_dias_max == 0 ? #b91c1c : #1e40af;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-
-                        if AppData.reporte_edit_vinculaciones_info != "" : Rectangle {
-                            border-radius: 6px;
-                            background: #f8fafc;
-                            border-width: 1px;
-                            border-color: #cbd5e1;
-                            VerticalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                padding-top: 6px;
-                                padding-bottom: 6px;
-                                spacing: 3px;
-                                Text {
-                                    text: "🔗 Vinculaciones de Obra del Empleado:";
-                                    font-size: 11px;
-                                    font-weight: 800;
                                     color: #334155;
                                 }
+                                Text { text: "•"; font-size: 12px; color: #94a3b8; }
                                 Text {
-                                    text: AppData.reporte_edit_vinculaciones_info;
-                                    font-size: 11px;
+                                    text: "Incidencias No Pagadas (LIC: " + AppData.reporte_edit_lic_info + ", INC: " + AppData.reporte_edit_inc_info + ", AUS: " + AppData.reporte_edit_aus_info + ")";
+                                    font-size: 11.5px;
                                     font-weight: 600;
-                                    color: #475569;
-                                    wrap: word-wrap;
+                                    color: #b45309;
+                                }
+                            }
+
+                            Rectangle {
+                                height: 24px;
+                                border-radius: 4px;
+                                background: #eff6ff;
+                                border-width: 1px;
+                                border-color: #bfdbfe;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: "Total Disponibles: " + AppData.reporte_edit_total_disponibles + " días";
+                                        font-size: 11.5px;
+                                        font-weight: 800;
+                                        color: #1d4ed8;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Live KPI Counter Bar
+                        HorizontalLayout {
+                            spacing: 10px;
+                            cross-axis-alignment: center;
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 28px;
+                                border-radius: 5px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: #cbd5e1;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    alignment: space-between;
+                                    cross-axis-alignment: center;
+                                    Text { text: "Días Asignados:"; font-size: 11.5px; font-weight: 700; color: #475569; }
+                                    Text {
+                                        text: AppData.reporte_edit_dias_asignados_sum + " / " + AppData.reporte_edit_total_disponibles + " d";
+                                        font-size: 12px;
+                                        font-weight: 800;
+                                        color: AppData.reporte_edit_has_errors || AppData.reporte_edit_dias_asignados_sum > AppData.reporte_edit_total_disponibles ? #dc2626 : (AppData.reporte_edit_dias_asignados_sum == AppData.reporte_edit_total_disponibles ? #166534 : #1e40af);
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 28px;
+                                border-radius: 5px;
+                                background: AppData.reporte_edit_has_errors || AppData.reporte_edit_dias_asignados_sum > AppData.reporte_edit_total_disponibles ? #fef2f2 : (AppData.reporte_edit_dias_restantes == 0 ? #ecfdf5 : #fffbeb);
+                                border-width: 1px;
+                                border-color: AppData.reporte_edit_has_errors || AppData.reporte_edit_dias_asignados_sum > AppData.reporte_edit_total_disponibles ? #fca5a5 : (AppData.reporte_edit_dias_restantes == 0 ? #a7f3d0 : #fde68a);
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    alignment: space-between;
+                                    cross-axis-alignment: center;
+                                    Text {
+                                        text: AppData.reporte_edit_has_errors || AppData.reporte_edit_dias_asignados_sum > AppData.reporte_edit_total_disponibles ? "⛔ Exceso de Días en Asignación" : (AppData.reporte_edit_dias_restantes == 0 ? "✅ Totalmente Asignado" : "ℹ️ Días Libres por Asignar:");
+                                        font-size: 11.5px;
+                                        font-weight: 700;
+                                        color: AppData.reporte_edit_has_errors || AppData.reporte_edit_dias_asignados_sum > AppData.reporte_edit_total_disponibles ? #b91c1c : (AppData.reporte_edit_dias_restantes == 0 ? #047857 : #92400e);
+                                    }
+                                    Text {
+                                        text: AppData.reporte_edit_dias_asignados_sum > AppData.reporte_edit_total_disponibles
+                                            ? ("+" + (AppData.reporte_edit_dias_asignados_sum - AppData.reporte_edit_total_disponibles) + " d de más")
+                                            : (AppData.reporte_edit_dias_restantes == 0 ? "0 d libres" : (AppData.reporte_edit_dias_restantes + " d"));
+                                        font-size: 12px;
+                                        font-weight: 800;
+                                        color: AppData.reporte_edit_has_errors || AppData.reporte_edit_dias_asignados_sum > AppData.reporte_edit_total_disponibles ? #b91c1c : (AppData.reporte_edit_dias_restantes == 0 ? #047857 : #92400e);
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                // 3. Campos de Días Cédula y Días Obra
-                HorizontalLayout {
-                    spacing: 16px;
+                // 3. Tabla Superior: Obras Vinculadas al Trabajador (Días a Asignar)
+                VerticalLayout {
+                    spacing: 5px;
 
-                    VerticalLayout {
-                        spacing: 6px;
+                    HorizontalLayout {
+                        alignment: space-between;
+                        cross-axis-alignment: center;
+                        Text {
+                            text: "🗂️ Obras Vinculadas al Trabajador (" + AppData.reporte_edit_selected_count + " asignada(s)) — Asignación de Días:";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #1e3a8a;
+                        }
+                        Text {
+                            text: "Tope Máximo Permitido: " + AppData.reporte_edit_total_disponibles + " días";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #15803d;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 235px;
+                        border-radius: 8px;
+                        background: #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+                        clip: true;
+
+                        VerticalLayout {
+                            // Sticky Header de la Tabla Superior
+                            Rectangle {
+                                height: 32px;
+                                background: #f1f5f9;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    cross-axis-alignment: center;
+                                    Text { text: "Registro de Obra (Folio / Tipo)"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-stretch: 3; }
+                                    Text { text: "Vigencia en el Mes"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-stretch: 2; }
+                                    Text { text: "Días Obra (Editable)"; font-size: 11.5px; font-weight: 800; color: #1e40af; width: 130px; horizontal-alignment: center; }
+                                    Text { text: "Tope Máx Dinámico"; font-size: 11.5px; font-weight: 800; color: #047857; width: 120px; horizontal-alignment: center; }
+                                    Text { text: "Quitar"; font-size: 11.5px; font-weight: 800; color: #ef4444; width: 45px; horizontal-alignment: center; }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: #e2e8f0; }
+
+                            if AppData.reporte_edit_selected_obras.length == 0 : Rectangle {
+                                vertical-stretch: 1;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    cross-axis-alignment: center;
+                                    spacing: 8px;
+                                    Text { text: "⚠️"; font-size: 13px; }
+                                    Text {
+                                        text: "No hay obras vinculadas actualmente. Marca una o más casillas en el catálogo inferior para vincular obras a este trabajador.";
+                                        font-size: 11.5px;
+                                        font-weight: 600;
+                                        color: #64748b;
+                                    }
+                                }
+                            }
+
+                            if AppData.reporte_edit_selected_obras.length > 0 : ScrollView {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    padding-top: 4px;
+                                    padding-bottom: 20px;
+                                    spacing: 4px;
+
+                                    for o in AppData.reporte_edit_selected_obras : ObraAsignadaRow {
+                                        obra_id: o.id;
+                                        label: o.label;
+                                        vigencia_str: o.vigencia_str;
+                                        dias_activos_mes: o.dias_activos_mes;
+                                        tope_max: o.tope_max;
+                                        has_error: o.has_error;
+                                        initial_dias_str: o.dias_obra_str;
+                                        dias_changed(id, val) => {
+                                            AppLogic.reporte_edit_obra_dias_changed(id, val);
+                                        }
+                                        remove(id) => {
+                                            AppLogic.reporte_edit_toggle_obra(id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 4. Catálogo Amplio de Registros de Obra en el Periodo (Checkboxes para vincular / desvincular)
+                VerticalLayout {
+                    spacing: 5px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        cross-axis-alignment: center;
+                        Text {
+                            text: "🗃️ Catálogo de Registros de Obra en el Periodo (Palomea para vincular / Despalomea para desvincular):";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #0f172a;
+                        }
+                        Text {
+                            text: AppData.reporte_edit_obras_list.length + " obra(s) disponible(s)";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: #64748b;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 235px;
+                        border-radius: 8px;
+                        background: #ffffff;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+                        clip: true;
+
+                        VerticalLayout {
+                            // Encabezado Fijo del Catálogo
+                            Rectangle {
+                                height: 32px;
+                                background: #f8fafc;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 8px;
+                                    cross-axis-alignment: center;
+                                    Text { text: "Vincular"; font-size: 11.5px; font-weight: 800; color: #475569; width: 65px; }
+                                    Text { text: "Registro de Obra (Folio / Tipo)"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-stretch: 3; }
+                                    Text { text: "Vigencia Registrada"; font-size: 11.5px; font-weight: 800; color: #475569; horizontal-stretch: 2; }
+                                    Text { text: "Días Activos Mes"; font-size: 11.5px; font-weight: 800; color: #475569; width: 115px; horizontal-alignment: center; }
+                                    Text { text: "Estado de Asignación"; font-size: 11.5px; font-weight: 800; color: #1e40af; width: 140px; horizontal-alignment: center; }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: #e2e8f0; }
+
+                            ScrollView {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    padding-top: 4px;
+                                    padding-bottom: 40px;
+                                    spacing: 3px;
+
+                                    for o in AppData.reporte_edit_obras_list : Rectangle {
+                                        height: 36px;
+                                        border-radius: 5px;
+                                        background: o.selected ? #f0fdf4 : (btn_obra_row.has-hover ? #f8fafc : #ffffff);
+                                        border-width: 1px;
+                                        border-color: o.selected ? #86efac : #e2e8f0;
+
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            spacing: 8px;
+                                            cross-axis-alignment: center;
+
+                                            // Checkbox Interactivo
+                                            Rectangle {
+                                                width: 65px;
+                                                HorizontalLayout {
+                                                    alignment: start;
+                                                    cross-axis-alignment: center;
+                                                    Rectangle {
+                                                        width: 18px;
+                                                        height: 18px;
+                                                        border-radius: 4px;
+                                                        background: o.selected ? #16a34a : #ffffff;
+                                                        border-width: 1.5px;
+                                                        border-color: o.selected ? #15803d : #94a3b8;
+
+                                                        Text {
+                                                            text: "✓";
+                                                            font-size: 12px;
+                                                            font-weight: 800;
+                                                            color: #ffffff;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                            visible: o.selected;
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Nombre / Folio
+                                            Text {
+                                                text: o.label;
+                                                font-size: 12px;
+                                                font-weight: 700;
+                                                color: o.selected ? #14532d : #334155;
+                                                horizontal-stretch: 3;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+
+                                            // Vigencia
+                                            Text {
+                                                text: o.vigencia_str != "" ? o.vigencia_str : "Sin vigencia registrada";
+                                                font-size: 11px;
+                                                color: #64748b;
+                                                horizontal-stretch: 2;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+
+                                            // Días Activos en Mes
+                                            Text {
+                                                text: o.dias_activos_mes > 0 ? (o.dias_activos_mes + " días") : "0 días";
+                                                font-size: 11.5px;
+                                                font-weight: 600;
+                                                color: #475569;
+                                                width: 115px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+
+                                            // Badge de Estado
+                                            Rectangle {
+                                                width: 140px;
+                                                height: 26px;
+                                                border-radius: 4px;
+                                                background: o.selected ? #ecfdf5 : transparent;
+                                                border-width: 1px;
+                                                border-color: o.selected ? #a7f3d0 : #e2e8f0;
+
+                                                Text {
+                                                    text: o.selected ? ("✓ Asignada: " + o.dias_obra + " d") : "";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #15803d;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+
+                                        btn_obra_row := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                AppLogic.reporte_edit_toggle_obra(o.id);
+                                            }
+                                        }
+                                    }
+
+                                    if AppData.reporte_edit_obras_list.length == 0 : Rectangle {
+                                        height: 80px;
+                                        Text {
+                                            text: "No hay registros de obras activos para este periodo.";
+                                            font-size: 12px;
+                                            color: #64748b;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 4. Separador y Botones Cancelar / Guardar Cambios
+                Rectangle { height: 1px; background: #e2e8f0; }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: space-between;
+                    cross-axis-alignment: center;
+
+                    Text {
+                        text: "💡 Tip: Escribe los días correspondientes a cada obra. El sistema calcula en tiempo real el tope máximo permitido.";
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: #64748b;
                         horizontal-stretch: 1;
-                        Text { text: "Días Cédula SUA:"; font-size: 13px; font-weight: 700; color: #334155; }
+                        overflow: elide;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
                         Rectangle {
-                            height: 40px;
+                            height: 38px;
+                            width: 105px;
                             border-radius: 6px;
-                            background: #ffffff;
+                            background: btn_cancel_unif.has-hover ? #e2e8f0 : #f1f5f9;
                             border-width: 1px;
                             border-color: #cbd5e1;
 
-                            LineEdit {
-                                text <=> AppData.reporte_edit_dias_cedula_val;
-                                edited(text) => {
-                                    AppLogic.reporte_edit_dias_cedula_changed(text);
-                                }
+                            Text { text: "Cancelar"; font-size: 13px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
+                            btn_cancel_unif := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.reporte_close_edit_modal(); }
                             }
                         }
-                    }
 
-                    VerticalLayout {
-                        spacing: 6px;
-                        horizontal-stretch: 1;
-                        HorizontalLayout {
-                            alignment: space-between;
-                            Text { text: "Días Registro Obra:"; font-size: 13px; font-weight: 700; color: #1e40af; }
-                            Text { text: "(Tope máx: " + AppData.reporte_edit_dias_max + ")"; font-size: 11.5px; font-weight: 700; color: #64748b; vertical-alignment: center; }
-                        }
                         Rectangle {
-                            height: 40px;
+                            height: 38px;
+                            width: 195px;
                             border-radius: 6px;
-                            background: #ffffff;
-                            border-width: 1.5px;
-                            border-color: #93c5fd;
+                            property <bool> is_enabled: !AppData.reporte_edit_has_errors && AppData.reporte_edit_selected_count > 0;
+                            background: !self.is_enabled ? #94a3b8 : (btn_save_unif.has-hover ? #1d4ed8 : #2563eb);
+                            drop-shadow-blur: self.is_enabled ? 4px : 0px;
+                            drop-shadow-color: #2563eb40;
 
-                            LineEdit {
-                                text <=> AppData.reporte_edit_dias_obra_val;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 6px;
+                                Text { text: "💾"; font-size: 13px; vertical-alignment: center; }
+                                Text { text: "Guardar Asignación"; font-size: 13px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
                             }
-                        }
-                    }
-                }
 
-                // 4. Botones Cancelar y Guardar Cambios
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: end;
-
-                    // Botón para vincular a otra obra adicional
-                    Rectangle {
-                        height: 38px;
-                        width: 175px;
-                        border-radius: 6px;
-                        background: btn_add_extra_obra.has-hover ? #dbeafe : #eff6ff;
-                        border-width: 1px;
-                        border-color: #93c5fd;
-
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 6px;
-                            Text { text: "➕"; font-size: 12px; vertical-alignment: center; }
-                            Text { text: "Vincular a otra obra"; font-size: 12.5px; font-weight: 700; color: #1d4ed8; vertical-alignment: center; }
-                        }
-
-                        btn_add_extra_obra := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                AppLogic.reporte_open_add_obra_modal(AppData.reporte_edit_row_id);
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        height: 38px;
-                        width: 105px;
-                        border-radius: 6px;
-                        background: btn_cancel_unif.has-hover ? #e2e8f0 : #f1f5f9;
-                        border-width: 1px;
-                        border-color: #cbd5e1;
-
-                        Text { text: "Cancelar"; font-size: 13px; font-weight: 700; color: #475569; horizontal-alignment: center; vertical-alignment: center; }
-                        btn_cancel_unif := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { AppLogic.reporte_close_edit_modal(); }
-                        }
-                    }
-
-                    Rectangle {
-                        height: 38px;
-                        width: 165px;
-                        border-radius: 6px;
-                        background: btn_save_unif.has-hover ? #1d4ed8 : #2563eb;
-
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 6px;
-                            Text { text: "💾"; font-size: 13px; vertical-alignment: center; }
-                            Text { text: "Guardar Cambios"; font-size: 13px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
-                        }
-
-                        btn_save_unif := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                AppLogic.reporte_submit_unified_edit(
-                                    AppData.reporte_edit_row_id,
-                                    AppData.reporte_edit_selected_obra_id,
-                                    AppData.reporte_edit_dias_cedula_val,
-                                    AppData.reporte_edit_dias_obra_val
-                                );
+                            btn_save_unif := TouchArea {
+                                mouse-cursor: parent.is_enabled ? pointer : default;
+                                enabled: parent.is_enabled;
+                                clicked => {
+                                    if parent.is_enabled {
+                                        AppLogic.reporte_submit_unified_edit_multi(AppData.reporte_edit_row_id);
+                                    }
+                                }
                             }
                         }
                     }
@@ -3544,8 +4036,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
         TouchArea {}
 
         Rectangle {
-            width: 820px;
-            height: (AppData.reporte_batch_edit_multi_obra_enabled ? 680px : (AppData.reporte_batch_edit_dropdown_open ? 710px : 610px)) + (AppData.reporte_batch_edit_alert_show ? 54px : 0px);
+            width: 980px;
+            height: 800px + (AppData.reporte_batch_edit_alert_show ? 54px : 0px);
             border-radius: 12px;
             background: #ffffff;
             x: (parent.width - self.width) / 2;
@@ -3648,7 +4140,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                 // 2. Tabla de Trabajadores Seleccionados
                 Rectangle {
-                    height: 145px;
+                    height: 185px;
                     border-radius: 6px;
                     background: #f8fafc;
                     border-width: 1px;
@@ -3656,7 +4148,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     clip: true;
 
                     VerticalLayout {
-                        // Cabecera de la tabla
+                        // Cabecera Fija de la tabla (Sticky Header)
                         Rectangle {
                             height: 28px;
                             background: #e2e8f0;
@@ -3665,23 +4157,27 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                 padding-right: 10px;
                                 spacing: 8px;
                                 cross-axis-alignment: center;
-                                Text { text: "Trabajador (Nombre / NSS)"; font-size: 11px; font-weight: 800; color: #334155; horizontal-stretch: 3; }
+                                Text { text: "Trabajador (Nombre / NSS)"; font-size: 11px; font-weight: 800; color: #334155; horizontal-stretch: 3; overflow: elide; }
+                                Text { text: "Incidencias"; font-size: 11px; font-weight: 800; color: #b45309; width: 135px; horizontal-alignment: center; }
                                 Text { text: "Periodo"; font-size: 11px; font-weight: 800; color: #334155; horizontal-stretch: 1; horizontal-alignment: center; }
-                                Text { text: "Obra Actual"; font-size: 11px; font-weight: 800; color: #334155; horizontal-stretch: 2; }
+                                Text { text: "Obra Actual"; font-size: 11px; font-weight: 800; color: #334155; horizontal-stretch: 2; overflow: elide; }
                                 Text { text: "D. Cédula"; font-size: 11px; font-weight: 800; color: #334155; width: 58px; horizontal-alignment: center; }
-                                Text { text: "D. Obra"; font-size: 11px; font-weight: 800; color: #334155; width: 58px; horizontal-alignment: center; }
+                                Text { text: "D. Obra (Editable)"; font-size: 11px; font-weight: 800; color: #1e40af; width: 80px; horizontal-alignment: center; }
                                 Text { text: "Tope Máx"; font-size: 11px; font-weight: 800; color: #047857; width: 66px; horizontal-alignment: center; }
                             }
                         }
 
-                        // Filas scrolleables
+                        // Filas scrolleables con Padding Inferior Generoso (evita corte en el fondo)
                         ScrollView {
                             VerticalLayout {
-                                padding: 3px;
-                                spacing: 2px;
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                padding-top: 4px;
+                                padding-bottom: 50px;
+                                spacing: 3px;
 
                                 for worker[idx] in AppData.reporte_batch_edit_workers : Rectangle {
-                                    height: 27px;
+                                    height: 30px;
                                     border-radius: 4px;
                                     background: Math.mod(idx, 2) == 0 ? #ffffff : #f1f5f9;
 
@@ -3708,6 +4204,31 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                                 font-size: 10.5px;
                                                 color: #64748b;
                                                 overflow: elide;
+                                            }
+                                        }
+
+                                        // Incidencias (LIC, INC, AUS)
+                                        Rectangle {
+                                            width: 135px;
+                                            height: 22px;
+                                            border-radius: 4px;
+                                            background: worker.incidencias_str != "Sin incidencias" ? #fffbeb : #f8fafc;
+                                            border-width: 1px;
+                                            border-color: worker.incidencias_str != "Sin incidencias" ? #fde68a : #e2e8f0;
+
+                                            HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                alignment: center;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: worker.incidencias_str != "Sin incidencias" ? ("⚠️ " + worker.incidencias_str) : "✓ 0 incidencias";
+                                                    font-size: 10px;
+                                                    font-weight: 700;
+                                                    color: worker.incidencias_str != "Sin incidencias" ? #b45309 : #64748b;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
                                             }
                                         }
 
@@ -3741,17 +4262,33 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             horizontal-alignment: center;
                                         }
 
-                                        // Días Obra
-                                        Text {
-                                            text: worker.dias_obra;
-                                            font-size: 11.5px;
-                                            font-weight: 700;
-                                            color: #2563eb;
-                                            width: 58px;
-                                            horizontal-alignment: center;
+                                        // Días Obra (Editable Inline)
+                                        Rectangle {
+                                            width: 80px;
+                                            height: 25px;
+                                            border-radius: 4px;
+                                            background: worker.has_error ? #fef2f2 : #ffffff;
+                                            border-width: 1.5px;
+                                            border-color: worker.has_error ? #ef4444 : #93c5fd;
+
+                                            HorizontalLayout {
+                                                padding-left: 4px;
+                                                padding-right: 4px;
+                                                alignment: center;
+                                                cross-axis-alignment: center;
+
+                                                LineEdit {
+                                                    font-size: 11.5px;
+                                                    horizontal-alignment: center;
+                                                    text: worker.dias_obra_str;
+                                                    edited(val) => {
+                                                        AppLogic.reporte_batch_worker_dias_changed(worker.id, val);
+                                                    }
+                                                }
+                                            }
                                         }
 
-                                        // Tope Máx
+                                        // Tope Máx Dinámico
                                         Rectangle {
                                             width: 66px;
                                             height: 22px;
@@ -3776,320 +4313,31 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
-                // 3. Campo Registro de Obra (Modo 1 Obra vs Múltiples Obras)
+                // 3. Checklist de Registros de Obra Disponibles (Checkboxes en lugar de Dropdown)
                 VerticalLayout {
-                    spacing: 8px;
+                    spacing: 6px;
+                    vertical-stretch: 1;
 
-                    // Selector de Modo de Asignación Masiva
                     HorizontalLayout {
-                        spacing: 8px;
-                        height: 32px;
-
-                        Rectangle {
-                            border-radius: 6px;
-                            background: !AppData.reporte_batch_edit_multi_obra_enabled ? #2563eb : #f1f5f9;
-                            border-width: 1px;
-                            border-color: !AppData.reporte_batch_edit_multi_obra_enabled ? #1d4ed8 : #cbd5e1;
-                            horizontal-stretch: 1;
-
-                            HorizontalLayout {
-                                alignment: center;
-                                spacing: 6px;
-                                cross-axis-alignment: center;
-                                Text {
-                                    text: "📌 Asignar 1 Obra Específica";
-                                    font-size: 12px;
-                                    font-weight: 700;
-                                    color: !AppData.reporte_batch_edit_multi_obra_enabled ? #ffffff : #475569;
-                                }
-                            }
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { AppLogic.reporte_batch_edit_set_multi_mode(false); }
-                            }
+                        alignment: space-between;
+                        cross-axis-alignment: center;
+                        Text {
+                            text: "Registros de Obra en el Periodo (Palomea para vincular / Despalomea para desvincular):";
+                            font-size: 12.5px;
+                            font-weight: 700;
+                            color: #1e3a8a;
                         }
-
-                        Rectangle {
-                            border-radius: 6px;
-                            background: AppData.reporte_batch_edit_multi_obra_enabled ? #2563eb : #f1f5f9;
-                            border-width: 1px;
-                            border-color: AppData.reporte_batch_edit_multi_obra_enabled ? #1d4ed8 : #cbd5e1;
-                            horizontal-stretch: 1;
-
-                            HorizontalLayout {
-                                alignment: center;
-                                spacing: 6px;
-                                cross-axis-alignment: center;
-                                Text {
-                                    text: "🏗 Vincular Múltiples Obras (" + AppData.reporte_batch_edit_selected_obras_count + " seleccionadas)";
-                                    font-size: 12px;
-                                    font-weight: 700;
-                                    color: AppData.reporte_batch_edit_multi_obra_enabled ? #ffffff : #475569;
-                                }
-                            }
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { AppLogic.reporte_batch_edit_set_multi_mode(true); }
-                            }
+                        Text {
+                            text: AppData.reporte_batch_edit_selected_obras_count == 0 ? "⚠️ Ninguna seleccionada (Sin Asignar)" : ("✓ " + AppData.reporte_batch_edit_selected_obras_count + " obra(s) seleccionada(s)");
+                            font-size: 11.5px;
+                            font-weight: 700;
+                            color: AppData.reporte_batch_edit_selected_obras_count == 0 ? #b91c1c : #166534;
                         }
                     }
 
-                    // Controles del Modo 1 Obra Específica
-                    if !AppData.reporte_batch_edit_multi_obra_enabled : VerticalLayout {
-                        spacing: 5px;
-
-                        HorizontalLayout {
-                            alignment: space-between;
-                            cross-axis-alignment: center;
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                cross-axis-alignment: center;
-
-                                Rectangle {
-                                    width: 18px;
-                                    height: 18px;
-                                    border-radius: 4px;
-                                    background: AppData.reporte_batch_edit_change_obra ? #2563eb : #ffffff;
-                                    border-width: 1px;
-                                    border-color: AppData.reporte_batch_edit_change_obra ? #2563eb : #94a3b8;
-
-                                    Text {
-                                        text: "✓";
-                                        font-size: 12px;
-                                        font-weight: 800;
-                                        color: #ffffff;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        visible: AppData.reporte_batch_edit_change_obra;
-                                    }
-
-                                    TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            AppData.reporte_batch_edit_change_obra = !AppData.reporte_batch_edit_change_obra;
-                                        }
-                                    }
-                                }
-
-                                Text {
-                                    text: "Modificar Registro de Obra (SIROC):";
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                    color: #334155;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            Text {
-                                text: !AppData.reporte_batch_edit_change_obra ? "Sin cambios (Mantener actuales)" : (AppData.reporte_batch_edit_selected_obra_id == "__NONE__" ? "⚠️ Se Desvinculará" : (AppData.reporte_batch_edit_selected_obra_id == "__KEEP__" ? "🔄 Mantener Obras" : "🏗 Se Asignará"));
-                                font-size: 12px;
-                                font-weight: 700;
-                                color: !AppData.reporte_batch_edit_change_obra ? #64748b : (AppData.reporte_batch_edit_selected_obra_id == "__NONE__" ? #b91c1c : #166534);
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        // Cuadro de Combobox / Input
                         Rectangle {
-                            height: 38px;
-                            border-radius: 6px;
-                            background: #ffffff;
-                            border-width: 1.5px;
-                            border-color: AppData.reporte_batch_edit_dropdown_open ? #3b82f6 : (AppData.reporte_batch_edit_change_obra ? #93c5fd : #cbd5e1);
-
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 6px;
-                                spacing: 8px;
-                                alignment: space-between;
-
-                                batch_edit_search_input := LineEdit {
-                                    horizontal-stretch: 1;
-                                    placeholder-text: "Escribe para filtrar obra o selecciona del menú...";
-                                    text <=> AppData.reporte_batch_edit_search_query;
-                                    edited(text) => {
-                                        AppData.reporte_batch_edit_dropdown_open = true;
-                                        AppLogic.reporte_filter_batch_edit_obras(text);
-                                    }
-                                }
-
-                                // Botón flecha desplegable Combobox
-                                Rectangle {
-                                    width: 28px;
-                                    height: 28px;
-                                    border-radius: 4px;
-                                    background: btn_batch_drop_toggle.has-hover ? #e2e8f0 : transparent;
-                                    y: (parent.height - self.height) / 2;
-
-                                    Text {
-                                        text: AppData.reporte_batch_edit_dropdown_open ? "▴" : "▾";
-                                        font-size: 14px;
-                                        font-weight: 800;
-                                        color: #2563eb;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-
-                                    btn_batch_drop_toggle := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            AppData.reporte_batch_edit_dropdown_open = !AppData.reporte_batch_edit_dropdown_open;
-                                            if AppData.reporte_batch_edit_dropdown_open {
-                                                AppLogic.reporte_filter_batch_edit_obras("");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Menú desplegable Combobox (Lista de opciones)
-                        if AppData.reporte_batch_edit_dropdown_open : Rectangle {
-                            height: 130px;
-                            border-radius: 6px;
-                            background: #ffffff;
-                            border-width: 1px;
-                            border-color: #93c5fd;
-                            drop-shadow-blur: 10px;
-                            drop-shadow-color: #00000020;
-                            clip: true;
-
-                            ScrollView {
-                                VerticalLayout {
-                                    padding: 4px;
-                                    spacing: 4px;
-
-                                    // Opción: Mantener obras actuales (Sin Cambios)
-                                    Rectangle {
-                                        height: 32px;
-                                        border-radius: 4px;
-                                        background: btn_batch_pick_keep.has-hover ? #eff6ff : (AppData.reporte_batch_edit_selected_obra_id == "__KEEP__" ? #f0fdf4 : #ffffff);
-                                        border-width: 1px;
-                                        border-color: AppData.reporte_batch_edit_selected_obra_id == "__KEEP__" ? #86efac : #f1f5f9;
-
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            spacing: 8px;
-                                            alignment: start;
-                                            Text { text: "🔄"; font-size: 12px; vertical-alignment: center; }
-                                            Text {
-                                                text: "Mantener Obras Actuales (Sin Cambios)";
-                                                font-size: 12px;
-                                                font-weight: 700;
-                                                color: #1e3a8a;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-
-                                        btn_batch_pick_keep := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                batch_edit_search_input.text = "🔄 Mantener Obras Actuales (Sin Cambios)";
-                                                AppData.reporte_batch_edit_search_query = "🔄 Mantener Obras Actuales (Sin Cambios)";
-                                                AppData.reporte_batch_edit_dropdown_open = false;
-                                                AppLogic.reporte_select_batch_edit_obra("__KEEP__", "🔄 Mantener Obras Actuales (Sin Cambios)");
-                                            }
-                                        }
-                                    }
-
-                                    // Opción: Dejar Sin Asignar (Desvincular todas)
-                                    Rectangle {
-                                        height: 32px;
-                                        border-radius: 4px;
-                                        background: btn_batch_pick_none.has-hover ? #fee2e2 : (AppData.reporte_batch_edit_selected_obra_id == "__NONE__" ? #fef2f2 : #ffffff);
-                                        border-width: 1px;
-                                        border-color: AppData.reporte_batch_edit_selected_obra_id == "__NONE__" ? #fca5a5 : #f1f5f9;
-
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            spacing: 8px;
-                                            alignment: start;
-                                            Text { text: "⚠️"; font-size: 12px; vertical-alignment: center; }
-                                            Text {
-                                                text: "Desvincular Obra (Dejar Sin Asignar a Todos)";
-                                                font-size: 12px;
-                                                font-weight: 700;
-                                                color: #b91c1c;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-
-                                        btn_batch_pick_none := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                batch_edit_search_input.text = "⚠️ Desvincular Obra (Sin Asignar)";
-                                                AppData.reporte_batch_edit_search_query = "⚠️ Desvincular Obra (Sin Asignar)";
-                                                AppData.reporte_batch_edit_dropdown_open = false;
-                                                AppLogic.reporte_select_batch_edit_obra("__NONE__", "⚠️ Desvincular Obra (Sin Asignar)");
-                                            }
-                                        }
-                                    }
-
-                                    // Obras disponibles filtradas
-                                    for o in AppData.reporte_batch_edit_filtered_obras : Rectangle {
-                                        height: 32px;
-                                        border-radius: 4px;
-                                        background: btn_batch_pick_item.has-hover ? #dbeafe : (AppData.reporte_batch_edit_selected_obra_id == o.id ? #eff6ff : #ffffff);
-                                        border-width: 1px;
-                                        border-color: AppData.reporte_batch_edit_selected_obra_id == o.id ? #93c5fd : #f1f5f9;
-
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            spacing: 8px;
-                                            alignment: start;
-                                            Text { text: "🏗"; font-size: 12px; vertical-alignment: center; }
-                                            Text {
-                                                text: o.label;
-                                                font-size: 12px;
-                                                font-weight: 700;
-                                                color: #1e3a8a;
-                                                vertical-alignment: center;
-                                                overflow: elide;
-                                            }
-                                        }
-
-                                        btn_batch_pick_item := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                batch_edit_search_input.text = o.label;
-                                                AppData.reporte_batch_edit_search_query = o.label;
-                                                AppData.reporte_batch_edit_dropdown_open = false;
-                                                AppLogic.reporte_select_batch_edit_obra(o.id, o.label);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Controles del Modo Múltiples Obras (Checklist con vigencias y topes)
-                    if AppData.reporte_batch_edit_multi_obra_enabled : VerticalLayout {
-                        spacing: 6px;
-
-                        HorizontalLayout {
-                            alignment: space-between;
-                            cross-axis-alignment: center;
-                            Text {
-                                text: "Selecciona las obras a vincular simultáneamente a los empleados:";
-                                font-size: 12.5px;
-                                font-weight: 700;
-                                color: #1e40af;
-                            }
-                            Text {
-                                text: AppData.reporte_batch_edit_selected_obras_count == 0 ? "⚠️ Ninguna seleccionada" : ("✓ " + AppData.reporte_batch_edit_selected_obras_count + " obra(s) seleccionada(s)");
-                                font-size: 11.5px;
-                                font-weight: 700;
-                                color: AppData.reporte_batch_edit_selected_obras_count == 0 ? #b91c1c : #166534;
-                            }
-                        }
-
-                        Rectangle {
-                            height: 140px;
+                            vertical-stretch: 1;
+                            min-height: 180px;
                             border-radius: 6px;
                             background: #f8fafc;
                             border-width: 1px;
@@ -4098,7 +4346,10 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                             ScrollView {
                                 VerticalLayout {
-                                    padding: 4px;
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    padding-top: 4px;
+                                    padding-bottom: 50px;
                                     spacing: 3px;
 
                                     for o in AppData.reporte_batch_edit_obras_multiselect : Rectangle {
@@ -4182,7 +4433,6 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             }
                         }
                     }
-                }
 
                 // 4. Campos de Días Cédula y Días Obra
                 HorizontalLayout {
@@ -4349,10 +4599,13 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
-                // 6. Botones Cancelar y Aplicar Cambios
+                // 6. Separador visual nítido y Botones Cancelar y Aplicar Cambios
+                Rectangle { height: 1px; background: #e2e8f0; }
+
                 HorizontalLayout {
                     spacing: 12px;
                     alignment: end;
+                    cross-axis-alignment: center;
 
                     Rectangle {
                         height: 38px;
@@ -4371,7 +4624,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                     Rectangle {
                         height: 38px;
-                        width: AppData.reporte_batch_edit_multi_obra_enabled ? 280px : 240px;
+                        width: 270px;
                         border-radius: 6px;
                         background: btn_batch_save.has-hover ? #1d4ed8 : #2563eb;
                         drop-shadow-blur: 4px;
@@ -4383,7 +4636,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             cross-axis-alignment: center;
                             Text { text: "💾"; font-size: 13px; vertical-alignment: center; }
                             Text {
-                                text: AppData.reporte_batch_edit_multi_obra_enabled ?
+                                text: AppData.reporte_batch_edit_selected_obras_count > 0 ?
                                     ("Vincular " + AppData.reporte_batch_edit_selected_obras_count + " Obra(s) a " + AppData.reporte_batch_edit_worker_count + " Empleado(s)") :
                                     ("Aplicar a Seleccionados (" + AppData.reporte_batch_edit_worker_count + ")");
                                 font-size: 13px;

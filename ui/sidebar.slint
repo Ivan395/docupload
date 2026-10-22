@@ -27,35 +27,67 @@ export component Sidebar inherits Rectangle {
         VerticalLayout {
             spacing: 16px;
 
-            // Brand Header
+            // Brand Header con botón para colapsar
             HorizontalLayout {
                 spacing: 10px;
-                alignment: start;
+                alignment: space-between;
+                cross-axis-alignment: center;
 
-                Rectangle {
-                    width: 38px;
-                    height: 38px;
-                    border-radius: 8px;
-                    background: #1e3a8a;
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    cross-axis-alignment: center;
 
-                    Text {
-                        text: "🏛";
-                        font-size: 20px;
-                        color: #ffffff;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    Rectangle {
+                        width: 38px;
+                        height: 38px;
+                        border-radius: 8px;
+                        background: #1e3a8a;
+
+                        Text {
+                            text: "🏛";
+                            font-size: 20px;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        Text {
+                            text: "Firma Fiscal ACD";
+                            font-size: 15px;
+                            font-weight: 800;
+                            color: #0f172a;
+                            letter-spacing: 0.5px;
+                        }
                     }
                 }
 
-                VerticalLayout {
-                    alignment: center;
+                // Botón Ocultar / Colapsar Sidebar
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: btn_collapse_sb.has-hover ? #f1f5f9 : transparent;
 
                     Text {
-                        text: "Firma Fiscal ACD";
-                        font-size: 15px;
+                        text: "◀";
+                        font-size: 12px;
                         font-weight: 800;
-                        color: #0f172a;
-                        letter-spacing: 0.5px;
+                        color: btn_collapse_sb.has-hover ? #1e3a8a : #94a3b8;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    btn_collapse_sb := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            AppData.is_sidebar_open = false;
+                            AppLogic.set_sidebar_open(false);
+                        }
                     }
                 }
             }

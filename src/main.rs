@@ -2837,6 +2837,27 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Toggle y visibilidad del Sidebar Principal
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_toggle_sidebar(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                let current = app_data.get_is_sidebar_open();
+                app_data.set_is_sidebar_open(!current);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_set_sidebar_open(move |open| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_is_sidebar_open(open);
+            }
+        });
+    }
+
     {
         let ui_weak = main_window.as_weak();
         app_logic.on_db_status_clicked(move || {
