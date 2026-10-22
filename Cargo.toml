@@ -49,15 +49,15 @@ winres = "0.1"
 
 # --- Metadata para cargo-bundle (macOS .app/.dmg, Windows, Linux) ---
 [package.metadata.bundle]
-name = "DocuUpload"
+name = "DocUpload"
 identifier = "com.docuffacd.docupload"
 icon = ["ui/assets/app_icon.png", "ui/assets/app_icon_256.png", "ui/assets/app_icon.ico", "ui/assets/app_icon.icns"]
 version = "0.5.0"
 copyright = "Copyright © 2026 Firma Fiscal ACD. Todos los derechos reservados."
 category = "Business"
-short_description = "DocuUpload Fiscal & Nóminas"
+short_description = "DocUpload Fiscal & Nóminas"
 long_description = """
-DocuUpload Fiscal & Nóminas ACD
+DocUpload Fiscal & Nóminas ACD
 Procesamiento concurrente y en paralelo de Nóminas CFDI con validación directa ante el WebService SOAP del SAT y Cédulas de Determinación de Cuotas del SUA IMSS con extracción de amortizaciones Infonavit y reportes en Excel.
 """
 osx_minimum_system_version = "10.15"

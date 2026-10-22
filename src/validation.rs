@@ -731,6 +731,116 @@ pub fn validate_registro_obra(obra: &str) -> Result<RegistroObraInfo, String> {
     }
 }
 
+/// Limpia la entrada de un monto monetario para asegurar que sea exclusivamente numérico:
+/// Permite únicamente dígitos '0'-'9' y como máximo un punto decimal '.'.
+/// Retorna la parte entera en dígitos y opcionalmente los dígitos decimales (hasta 2).
+pub fn clean_numeric_amount_input(raw: &str) -> (String, Option<String>) {
+    let mut int_digits = String::new();
+    let mut dec_digits = String::new();
+    let mut in_decimal = false;
+
+    for ch in raw.chars() {
+        if ch.is_ascii_digit() {
+            if in_decimal {
+                if dec_digits.len() < 2 {
+                    dec_digits.push(ch);
+                }
+            } else {
+                int_digits.push(ch);
+            }
+        } else if ch == '.' && !in_decimal {
+            in_decimal = true;
+        }
+    }
+
+    let dec_opt = if in_decimal {
+        Some(dec_digits)
+    } else {
+        None
+    };
+
+    (int_digits, dec_opt)
+}
+
+/// Separa los dígitos de la parte entera con comas cada tres posiciones (formato México / estándar),
+/// suprimiendo ceros iniciales innecesarios ("00123" -> "123") pero conservando un "0" único.
+pub fn format_integer_with_commas(digits: &str) -> String {
+    let clean = digits.trim_start_matches('0');
+    let effective = if clean.is_empty() {
+        if digits.is_empty() { "" } else { "0" }
+    } else {
+        clean
+    };
+    if effective.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = effective.chars().collect();
+    let mut result = String::with_capacity(chars.len() + chars.len() / 3);
+    for (i, ch) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(*ch);
+    }
+    result
+}
+
+/// Formatea en tiempo real mientras el usuario escribe en el campo de texto:
+/// Asegura que el campo sea exclusivamente numérico, agrega separadores de miles con coma
+/// a la parte entera y conserva el punto y los decimales si el usuario los ingresa.
+/// Ejemplos:
+/// - "300000" -> "300,000"
+/// - "1000" -> "1,000"
+/// - "1979300" -> "1,979,300"
+/// - "300000." -> "300,000."
+/// - "300000.5" -> "300,000.5"
+/// - "300000.50" -> "300,000.50"
+pub fn format_monto_input_realtime(raw: &str) -> String {
+    let (int_digits, dec_opt) = clean_numeric_amount_input(raw);
+    if int_digits.is_empty() && dec_opt.is_none() {
+        return String::new();
+    }
+    let formatted_int = format_integer_with_commas(&int_digits);
+    match dec_opt {
+        Some(dec) => {
+            if formatted_int.is_empty() {
+                format!("0.{}", dec)
+            } else {
+                format!("{}.{}", formatted_int, dec)
+            }
+        }
+        None => formatted_int,
+    }
+}
+
+/// Formatea un valor numérico f64 en formato México (miles con comas, decimales con punto):
+/// Ejemplos:
+/// - 300000.0 -> "300,000.00"
+/// - 1000.0 -> "1,000.00"
+/// - 1979300.0 -> "1,979,300.00"
+/// - 0.0 -> "0.00"
+pub fn format_monto_mexico(val: f64) -> String {
+    let int_part = val.trunc().abs() as u64;
+    let frac_part = ((val.abs() - int_part as f64) * 100.0).round() as u64;
+    let int_str = int_part.to_string();
+    let with_commas = format_integer_with_commas(&int_str);
+    let with_commas = if with_commas.is_empty() { "0".to_string() } else { with_commas };
+    let sign = if val < 0.0 { "-" } else { "" };
+    format!("{}{}.{:02}", sign, with_commas, frac_part)
+}
+
+/// Normaliza una cadena de texto a formato final México con dos decimales:
+/// Si está vacía retorna vacío; si contiene números retorna e.g. "300,000.00".
+pub fn format_monto_final_from_str(raw: &str) -> String {
+    let clean = raw.replace(',', "");
+    let trimmed = clean.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let val: f64 = trimmed.parse().unwrap_or(0.0);
+    format_monto_mexico(val)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,6 +1025,34 @@ mod tests {
 
         // Vacío
         assert!(validate_registro_obra("").unwrap_err().contains("La estructura del registro de obra no es correcta"));
+    }
+
+    #[test]
+    fn test_format_monto_mexico_and_realtime() {
+        // En tiempo real mientras teclea:
+        assert_eq!(format_monto_input_realtime("300000"), "300,000");
+        assert_eq!(format_monto_input_realtime("1000"), "1,000");
+        assert_eq!(format_monto_input_realtime("1979300"), "1,979,300");
+        assert_eq!(format_monto_input_realtime("1979300."), "1,979,300.");
+        assert_eq!(format_monto_input_realtime("1979300.5"), "1,979,300.5");
+        assert_eq!(format_monto_input_realtime("1979300.50"), "1,979,300.50");
+        // Exclusivamente numérico (filtra letras y caracteres extraños):
+        assert_eq!(format_monto_input_realtime("$1,979,300.50 MXN"), "1,979,300.50");
+        assert_eq!(format_monto_input_realtime("abc300000xyz"), "300,000");
+        assert_eq!(format_monto_input_realtime(""), "");
+
+        // Formato México con decimales:
+        assert_eq!(format_monto_mexico(300000.0), "300,000.00");
+        assert_eq!(format_monto_mexico(1000.0), "1,000.00");
+        assert_eq!(format_monto_mexico(1979300.0), "1,979,300.00");
+        assert_eq!(format_monto_mexico(0.0), "0.00");
+
+        // Normalización final:
+        assert_eq!(format_monto_final_from_str("300000"), "300,000.00");
+        assert_eq!(format_monto_final_from_str("300,000"), "300,000.00");
+        assert_eq!(format_monto_final_from_str("1000"), "1,000.00");
+        assert_eq!(format_monto_final_from_str("1979300"), "1,979,300.00");
+        assert_eq!(format_monto_final_from_str(""), "");
     }
 }
 

@@ -220,8 +220,10 @@ pub fn fetch_nominas_reporte(
                    COUNT(*) FILTER (WHERE UPPER(TRIM(t.nombre)) = 'PERCEPCIONES') AS num_percepciones
             FROM public.reportes_detalles_nominas rdn
             JOIN public.reportes_nominas rn ON rn.id = rdn.id_reporte_nomina
+            JOIN public.empleados e ON e.id = rn.id_empleado
             JOIN public.conceptos c ON c.id = rdn.id_concepto
             JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
+            WHERE ($1::uuid IS NULL OR e.id_cliente = $1)
             GROUP BY rdn.id_reporte_nomina
         ),
         ced AS (
@@ -230,6 +232,7 @@ pub fn fetch_nominas_reporte(
                    UPPER(TRIM(rl.mes_periodo)) AS mes,
                    SUM(COALESCE(rdl.dias_registro_obra, rv.dias_registro_obra, 0))::float8 AS dias_cedula
             FROM public.reportes_liquidaciones rl
+            JOIN public.empleados e ON e.id = rl.id_empleado
             LEFT JOIN public.reportes_detalles_liquidaciones rdl
                  ON rdl.id_reporte_liquidacion = rl.id
             LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rv
@@ -237,6 +240,7 @@ pub fn fetch_nominas_reporte(
             LEFT JOIN public.registros_obras ro
                  ON ro.id = COALESCE(rdl.id_registro_obra, rv.id_registro_obra)
             WHERE ro.id IS NOT NULL
+              AND ($1::uuid IS NULL OR e.id_cliente = $1)
             GROUP BY rl.id_empleado, rl.anio_periodo, UPPER(TRIM(rl.mes_periodo))
         ),
         base AS (
@@ -1364,6 +1368,320 @@ pub fn check_all_data_exists(
     let reportes = check_reportes_liquidaciones_exists(client, revision_id)?;
     let obras = check_registros_obras_exists(client, revision_id)?;
     Ok((cedulas, nominas, reportes, obras))
+}
+
+/// Exporta el Reporte de Nóminas a un archivo Excel (.xlsx) profesional.
+pub fn export_reporte_nominas_to_excel(
+    file_path: &std::path::Path,
+    rows: &[NominaReporteRowDb],
+    percepcion_headers: &[String],
+    percepciones_por_nomina: &HashMap<Uuid, Vec<f64>>,
+    totales_por_rp: &[RegistroPatronalTotalDb],
+    cliente_nombre: &str,
+) -> Result<(), String> {
+    use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook};
+
+    let mut workbook = Workbook::new();
+
+    // ─── Estilos y Formatos ───────────────────────────────────────────────
+    let title_fmt = Format::new()
+        .set_bold()
+        .set_font_size(14)
+        .set_font_color(Color::RGB(0x1E3A8A));
+
+    let subtitle_fmt = Format::new()
+        .set_italic()
+        .set_font_size(10)
+        .set_font_color(Color::RGB(0x475569));
+
+    let header_fmt = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0x1E3A8A))
+        .set_font_color(Color::RGB(0xFFFFFF))
+        .set_align(FormatAlign::Center)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0x404040));
+
+    let percep_header_fmt = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0x0F766E))
+        .set_font_color(Color::RGB(0xFFFFFF))
+        .set_align(FormatAlign::Center)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0x404040));
+
+    let txt_left = Format::new()
+        .set_font_size(10)
+        .set_align(FormatAlign::Left)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xD1D5DB));
+
+    let txt_center = Format::new()
+        .set_font_size(10)
+        .set_align(FormatAlign::Center)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xD1D5DB));
+
+    let int_center = Format::new()
+        .set_font_size(10)
+        .set_num_format("#,##0")
+        .set_align(FormatAlign::Center)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xD1D5DB));
+
+    let days_fmt = Format::new()
+        .set_font_size(10)
+        .set_num_format("0.0")
+        .set_align(FormatAlign::Right)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xD1D5DB));
+
+    let delta_diff_fmt = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_num_format("0.0")
+        .set_font_color(Color::RGB(0xC2410C))
+        .set_align(FormatAlign::Right)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xD1D5DB));
+
+    let curr_fmt = Format::new()
+        .set_font_size(10)
+        .set_num_format("$#,##0.00;($#,##0.00);\"$ -\"")
+        .set_align(FormatAlign::Right)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xD1D5DB));
+
+    let tot_lbl_fmt = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0xF1F5F9))
+        .set_align(FormatAlign::Left)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border_top(FormatBorder::Thin)
+        .set_border_bottom(FormatBorder::Double);
+
+    let tot_days_fmt = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0xF1F5F9))
+        .set_num_format("#,##0.0")
+        .set_align(FormatAlign::Right)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border_top(FormatBorder::Thin)
+        .set_border_bottom(FormatBorder::Double);
+
+    let tot_curr_fmt = Format::new()
+        .set_bold()
+        .set_font_size(10)
+        .set_background_color(Color::RGB(0xF1F5F9))
+        .set_num_format("$#,##0.00;($#,##0.00);\"$ -\"")
+        .set_align(FormatAlign::Right)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border_top(FormatBorder::Thin)
+        .set_border_bottom(FormatBorder::Double);
+
+    // ─── Hoja 1: Reporte de Nóminas ───────────────────────────────────────
+    let ws = workbook.add_worksheet();
+    ws.set_name("Reporte de Nóminas").map_err(|e| e.to_string())?;
+
+    ws.write_string_with_format(0, 0, "Reporte de Nóminas vs Cédula - CONSTRUAUDIT", &title_fmt).map_err(|e| e.to_string())?;
+    let sub = format!(
+        "Empresa / Cliente: {} | Total Nóminas: {} | Fecha de Generación: {}",
+        if cliente_nombre.trim().is_empty() { "Todos los Clientes" } else { cliente_nombre.trim() },
+        rows.len(),
+        chrono::Local::now().format("%d/%m/%Y %H:%M")
+    );
+    ws.write_string_with_format(1, 0, sub, &subtitle_fmt).map_err(|e| e.to_string())?;
+
+    let base_headers = [
+        "#", "Periodo", "Año", "Mes", "Reg. Patronal", "NSS", "RFC", "CURP",
+        "Nombre del Trabajador", "Días Nóm.", "Días Céd.", "Diferencia",
+        "Sueldos Base", "Percep. Gravadas", "Percep. Exentas", "Total Percepciones",
+    ];
+
+    let post_headers = [
+        "SDI", "SDI Calculado", "Tipo Nómina", "Periodicidad",
+        "Fecha Inicial Pago", "Fecha Final Pago", "Fecha Pago",
+        "Inicio Rel. Lab.", "Emisión CFDI", "Archivo",
+    ];
+
+    let mut col_idx: u16 = 0;
+    for h in &base_headers {
+        ws.write_string_with_format(3, col_idx, *h, &header_fmt).map_err(|e| e.to_string())?;
+        col_idx += 1;
+    }
+    for ph in percepcion_headers {
+        ws.write_string_with_format(3, col_idx, format!("Percep: {}", ph), &percep_header_fmt).map_err(|e| e.to_string())?;
+        col_idx += 1;
+    }
+    for ph in &post_headers {
+        ws.write_string_with_format(3, col_idx, *ph, &header_fmt).map_err(|e| e.to_string())?;
+        col_idx += 1;
+    }
+
+    let mut tot_dias_nom = 0.0;
+    let mut tot_dias_ced = 0.0;
+    let mut tot_sueldos = 0.0;
+    let mut tot_gravado = 0.0;
+    let mut tot_exento = 0.0;
+    let mut tot_percepciones = 0.0;
+    let mut tot_dynamic_perceps: Vec<f64> = vec![0.0; percepcion_headers.len()];
+
+    let mut row_idx: u32 = 4;
+    for (i, r) in rows.iter().enumerate() {
+        let delta = r.num_dias_pagados - r.dias_cedula;
+        tot_dias_nom += r.num_dias_pagados;
+        tot_dias_ced += r.dias_cedula;
+        tot_sueldos += r.total_sueldos;
+        tot_gravado += r.total_gravado;
+        tot_exento += r.total_exento;
+        tot_percepciones += r.total_percepciones;
+
+        ws.write_number_with_format(row_idx, 0, (i + 1) as f64, &int_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 1, &r.periodo_str, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 2, r.anio_periodo as f64, &int_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 3, &r.mes_periodo, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 4, &r.registro_patronal, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 5, &r.nss, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 6, &r.rfc, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 7, &r.curp, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, 8, &r.nombre_trabajador, &txt_left).map_err(|e| e.to_string())?;
+
+        ws.write_number_with_format(row_idx, 9, r.num_dias_pagados, &days_fmt).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 10, r.dias_cedula, &days_fmt).map_err(|e| e.to_string())?;
+        let delta_style = if delta.abs() > 0.01 && r.dias_cedula > 0.0 { &delta_diff_fmt } else { &days_fmt };
+        ws.write_number_with_format(row_idx, 11, delta, delta_style).map_err(|e| e.to_string())?;
+
+        ws.write_number_with_format(row_idx, 12, r.total_sueldos, &curr_fmt).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 13, r.total_gravado, &curr_fmt).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 14, r.total_exento, &curr_fmt).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, 15, r.total_percepciones, &curr_fmt).map_err(|e| e.to_string())?;
+
+        let mut c_dyn: u16 = 16;
+        let emp_perceps = percepciones_por_nomina.get(&r.id_nomina);
+        for (p_idx, _) in percepcion_headers.iter().enumerate() {
+            let val = emp_perceps.and_then(|v| v.get(p_idx)).copied().unwrap_or(0.0);
+            tot_dynamic_perceps[p_idx] += val;
+            ws.write_number_with_format(row_idx, c_dyn, val, &curr_fmt).map_err(|e| e.to_string())?;
+            c_dyn += 1;
+        }
+
+        ws.write_number_with_format(row_idx, c_dyn, r.salario_diario_integrado, &curr_fmt).map_err(|e| e.to_string())?;
+        ws.write_number_with_format(row_idx, c_dyn + 1, r.salario_diario_calculado, &curr_fmt).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, c_dyn + 2, &r.tipo_nomina, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, c_dyn + 3, &r.periodicidad, &txt_center).map_err(|e| e.to_string())?;
+
+        let f_ini = r.fecha_inicial_pago.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default();
+        let f_fin = r.fecha_final_pago.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default();
+        let f_pag = r.fecha_pago.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default();
+        let f_rel = r.fecha_inicio_relacion_laboral.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default();
+        let f_emi = r.fecha_emision_cfdi.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default();
+
+        ws.write_string_with_format(row_idx, c_dyn + 4, f_ini, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, c_dyn + 5, f_fin, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, c_dyn + 6, f_pag, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, c_dyn + 7, f_rel, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, c_dyn + 8, f_emi, &txt_center).map_err(|e| e.to_string())?;
+        ws.write_string_with_format(row_idx, c_dyn + 9, &r.nombre_archivo, &txt_left).map_err(|e| e.to_string())?;
+
+        row_idx += 1;
+    }
+
+    // Fila de Totales
+    for c in 0..9 {
+        let label = if c == 0 { "TOTAL GENERAL" } else { "" };
+        ws.write_string_with_format(row_idx, c, label, &tot_lbl_fmt).map_err(|e| e.to_string())?;
+    }
+    ws.write_number_with_format(row_idx, 9, tot_dias_nom, &tot_days_fmt).map_err(|e| e.to_string())?;
+    ws.write_number_with_format(row_idx, 10, tot_dias_ced, &tot_days_fmt).map_err(|e| e.to_string())?;
+    ws.write_number_with_format(row_idx, 11, tot_dias_nom - tot_dias_ced, &tot_days_fmt).map_err(|e| e.to_string())?;
+    ws.write_number_with_format(row_idx, 12, tot_sueldos, &tot_curr_fmt).map_err(|e| e.to_string())?;
+    ws.write_number_with_format(row_idx, 13, tot_gravado, &tot_curr_fmt).map_err(|e| e.to_string())?;
+    ws.write_number_with_format(row_idx, 14, tot_exento, &tot_curr_fmt).map_err(|e| e.to_string())?;
+    ws.write_number_with_format(row_idx, 15, tot_percepciones, &tot_curr_fmt).map_err(|e| e.to_string())?;
+
+    let mut c_tot: u16 = 16;
+    for dp_tot in &tot_dynamic_perceps {
+        ws.write_number_with_format(row_idx, c_tot, *dp_tot, &tot_curr_fmt).map_err(|e| e.to_string())?;
+        c_tot += 1;
+    }
+    for c in c_tot..(c_tot + 10) {
+        ws.write_string_with_format(row_idx, c, "", &tot_lbl_fmt).map_err(|e| e.to_string())?;
+    }
+
+    // Anchos de columna
+    let _ = ws.set_column_width(0, 6);
+    let _ = ws.set_column_width(1, 14);
+    let _ = ws.set_column_width(2, 8);
+    let _ = ws.set_column_width(3, 12);
+    let _ = ws.set_column_width(4, 15);
+    let _ = ws.set_column_width(5, 14);
+    let _ = ws.set_column_width(6, 15);
+    let _ = ws.set_column_width(7, 20);
+    let _ = ws.set_column_width(8, 35);
+    let _ = ws.set_column_width(9, 12);
+    let _ = ws.set_column_width(10, 12);
+    let _ = ws.set_column_width(11, 12);
+    let _ = ws.set_column_width(12, 14);
+    let _ = ws.set_column_width(13, 14);
+    let _ = ws.set_column_width(14, 14);
+    let _ = ws.set_column_width(15, 16);
+    for i in 0..percepcion_headers.len() {
+        let _ = ws.set_column_width(16 + i as u16, 16);
+    }
+    let _ = ws.set_freeze_panes(4, 9);
+
+    // ─── Hoja 2: Resumen por Registro Patronal ────────────────────────────
+    if !totales_por_rp.is_empty() {
+        let ws2 = workbook.add_worksheet();
+        let _ = ws2.set_name("Resumen por Obra");
+
+        let _ = ws2.write_string_with_format(0, 0, "Resumen de Días Cédula por Registro Patronal y Obra", &title_fmt);
+        let _ = ws2.write_string_with_format(1, 0, format!("Empresa: {}", if cliente_nombre.is_empty() { "Todos los Clientes" } else { cliente_nombre }), &subtitle_fmt);
+
+        let rp_headers = ["#", "Registro Patronal", "Número de Obra", "Tipo de Obra", "Total Días Cédula"];
+        for (c, h) in rp_headers.iter().enumerate() {
+            let _ = ws2.write_string_with_format(3, c as u16, *h, &header_fmt);
+        }
+
+        let mut r2_idx: u32 = 4;
+        let mut sum_dias_rp = 0.0;
+        for (i, rp_tot) in totales_por_rp.iter().enumerate() {
+            sum_dias_rp += rp_tot.total_dias_cedula;
+            let _ = ws2.write_number_with_format(r2_idx, 0, (i + 1) as f64, &int_center);
+            let _ = ws2.write_string_with_format(r2_idx, 1, &rp_tot.registro_patronal, &txt_center);
+            let _ = ws2.write_string_with_format(r2_idx, 2, &rp_tot.obra_numero, &txt_center);
+            let _ = ws2.write_string_with_format(r2_idx, 3, &rp_tot.tipo_obra, &txt_left);
+            let _ = ws2.write_number_with_format(r2_idx, 4, rp_tot.total_dias_cedula, &days_fmt);
+            r2_idx += 1;
+        }
+
+        let _ = ws2.write_string_with_format(r2_idx, 0, "TOTAL GENERAL", &tot_lbl_fmt);
+        for c in 1..4 {
+            let _ = ws2.write_string_with_format(r2_idx, c, "", &tot_lbl_fmt);
+        }
+        let _ = ws2.write_number_with_format(r2_idx, 4, sum_dias_rp, &tot_days_fmt);
+
+        let _ = ws2.set_column_width(0, 6);
+        let _ = ws2.set_column_width(1, 18);
+        let _ = ws2.set_column_width(2, 20);
+        let _ = ws2.set_column_width(3, 30);
+        let _ = ws2.set_column_width(4, 20);
+    }
+
+    workbook.save(file_path).map_err(|e| format!("Error guardando archivo Excel: {}", e))?;
+    Ok(())
 }
 
 #[cfg(test)]

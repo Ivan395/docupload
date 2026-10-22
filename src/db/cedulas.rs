@@ -58,6 +58,8 @@ pub struct BusinessContext {
     pub reg_11: String,
     pub delegacion: Option<String>,
     pub subdelegacion: Option<String>,
+    pub anios_filtro: BTreeSet<i16>,
+    pub meses_filtro: BTreeSet<String>,
 }
 
 pub fn resolve_business_context(
@@ -257,6 +259,49 @@ fn update_cliente_and_rp_from_biz(
     Ok(())
 }
 
+fn get_obra_filter_dates(
+    tx: &mut Transaction,
+    id_revision: Uuid,
+) -> (BTreeSet<i16>, BTreeSet<String>) {
+    let obra_dates = tx.query(
+        r#"
+        SELECT ro.fecha_inicio, ro.fecha_fin
+        FROM public.registros_obras ro
+        WHERE ro.id_revision = $1
+           OR ro.id_registro_patronal = (SELECT r.id_registro_patronal FROM public.revisiones r WHERE r.id = $1)
+        "#,
+        &[&id_revision],
+    ).unwrap_or_default();
+
+    let mut anios_filtro: BTreeSet<i16> = BTreeSet::new();
+    let mut meses_filtro: BTreeSet<String> = BTreeSet::new();
+
+    for od in obra_dates {
+        let f_ini: Option<chrono::NaiveDate> = od.get(0);
+        let f_fin: Option<chrono::NaiveDate> = od.get(1);
+        if let (Some(fi), Some(ff)) = (f_ini, f_fin) {
+            let mut curr_y = fi.year();
+            let mut curr_m = fi.month();
+            let end_y = ff.year();
+            let end_m = ff.month();
+
+            while (curr_y < end_y) || (curr_y == end_y && curr_m <= end_m) {
+                anios_filtro.insert(curr_y as i16);
+                let m_nom = month_num_to_name(curr_m);
+                if !m_nom.is_empty() {
+                    meses_filtro.insert(m_nom.to_string());
+                }
+                curr_m += 1;
+                if curr_m > 12 {
+                    curr_m = 1;
+                    curr_y += 1;
+                }
+            }
+        }
+    }
+    (anios_filtro, meses_filtro)
+}
+
 pub fn resolve_business_context_for_revision(
     tx: &mut Transaction,
     biz: &Business,
@@ -288,6 +333,8 @@ pub fn resolve_business_context_for_revision(
             // Actualizar datos patronales y del cliente con los campos extraídos de las cédulas
             update_cliente_and_rp_from_biz(tx, id_cliente, id_registro_patronal, biz)?;
 
+            let (anios_filtro, meses_filtro) = get_obra_filter_dates(tx, id_revision);
+
             return Ok(BusinessContext {
                 id_cliente,
                 id_registro_patronal,
@@ -295,6 +342,8 @@ pub fn resolve_business_context_for_revision(
                 reg_11,
                 delegacion: del_upper,
                 subdelegacion: subdel_upper,
+                anios_filtro,
+                meses_filtro,
             });
         }
     }
@@ -419,8 +468,24 @@ pub fn resolve_business_context_for_revision(
     };
 
     // 3. Revisión
-    let sample_mes = biz.employees.first().and_then(|e| e.mes_periodo.as_deref()).unwrap_or("ENERO");
-    let sample_anio = biz.employees.first().and_then(|e| e.anio_periodo.as_deref()).unwrap_or("2024");
+    let sample_mes = biz
+        .employees
+        .first()
+        .and_then(|e| {
+            e.mes_periodo
+                .as_deref()
+                .or_else(|| e.data_employee.first().and_then(|de| de.mes_periodo.as_deref()))
+        })
+        .unwrap_or("ENERO");
+    let sample_anio = biz
+        .employees
+        .first()
+        .and_then(|e| {
+            e.anio_periodo
+                .as_deref()
+                .or_else(|| e.data_employee.first().and_then(|de| de.anio_periodo.as_deref()))
+        })
+        .unwrap_or("2024");
     let rev_nombre = format!("Revisión SUA {} {}", sample_mes, sample_anio);
     let rev_folio = format!("REV-SUA-{}-{}", sample_anio, month_to_num(sample_mes));
     let rev_nombre_upper = rev_nombre.trim().to_uppercase();
@@ -451,6 +516,8 @@ pub fn resolve_business_context_for_revision(
         }
     };
 
+    let (anios_filtro, meses_filtro) = get_obra_filter_dates(tx, id_revision);
+
     Ok(BusinessContext {
         id_cliente,
         id_registro_patronal,
@@ -458,6 +525,8 @@ pub fn resolve_business_context_for_revision(
         reg_11,
         delegacion: del_upper,
         subdelegacion: subdel_upper,
+        anios_filtro,
+        meses_filtro,
     })
 }
 
@@ -649,53 +718,35 @@ pub fn save_single_cedula_employee_tx(
             && !crate::cedulas::employees::is_rfc_candidate(clean)
     });
 
+    let nss_param = emp_nss.as_deref().map(|s| truncate_str(Some(s), 11).unwrap_or_default());
+    let curp_param = emp_curp.as_deref().filter(|c| !c.is_empty() && !crate::validation::is_generic_sat_identifier(c)).map(|s| truncate_str(Some(s), 18).unwrap_or_default());
+    let rfc_param = emp_rfc.as_deref().filter(|r| !r.is_empty() && !crate::validation::is_generic_sat_identifier(r)).map(|s| truncate_str(Some(s), 13).unwrap_or_default());
+    let nom_param = emp_nombre.as_deref().map(|s| truncate_str(Some(s), 100).unwrap_or_default());
+
     let mut empleado_id: Option<Uuid> = None;
-    if let Some(ref nss) = emp_nss {
-        if !nss.is_empty() {
-            let row = tx.query_opt(
-                "SELECT id FROM public.empleados WHERE id_cliente = $1 AND nss = $2 LIMIT 1",
-                &[&ctx.id_cliente, &truncate_str(Some(nss), 11)],
-            )?;
-            if let Some(r) = row {
-                empleado_id = Some(r.get(0));
-            }
-        }
-    }
-    if empleado_id.is_none() {
-        if let Some(ref curp) = emp_curp {
-            if !curp.is_empty() && !crate::validation::is_generic_sat_identifier(curp) {
-                let row = tx.query_opt(
-                    "SELECT id FROM public.empleados WHERE id_cliente = $1 AND curp = $2 LIMIT 1",
-                    &[&ctx.id_cliente, &truncate_str(Some(curp), 18)],
-                )?;
-                if let Some(r) = row {
-                    empleado_id = Some(r.get(0));
-                }
-            }
-        }
-    }
-    if empleado_id.is_none() {
-        if let Some(ref rfc) = emp_rfc {
-            if !rfc.is_empty() && !crate::validation::is_generic_sat_identifier(rfc) {
-                let row = tx.query_opt(
-                    "SELECT id FROM public.empleados WHERE id_cliente = $1 AND rfc = $2 LIMIT 1",
-                    &[&ctx.id_cliente, &truncate_str(Some(rfc), 13)],
-                )?;
-                if let Some(r) = row {
-                    empleado_id = Some(r.get(0));
-                }
-            }
-        }
-    }
-    if empleado_id.is_none() {
-        if let Some(ref nom) = emp_nombre {
-            let row = tx.query_opt(
-                "SELECT id FROM public.empleados WHERE id_cliente = $1 AND nombre = $2 LIMIT 1",
-                &[&ctx.id_cliente, &truncate_str(Some(nom), 100)],
-            )?;
-            if let Some(r) = row {
-                empleado_id = Some(r.get(0));
-            }
+    if nss_param.is_some() || curp_param.is_some() || rfc_param.is_some() || nom_param.is_some() {
+        let row = tx.query_opt(
+            r#"
+            SELECT id FROM public.empleados
+            WHERE id_cliente = $1 AND (
+                ($2::text IS NOT NULL AND nss = $2)
+                OR ($3::text IS NOT NULL AND curp = $3)
+                OR ($4::text IS NOT NULL AND rfc = $4)
+                OR ($5::text IS NOT NULL AND nombre = $5)
+            )
+            ORDER BY
+                CASE
+                    WHEN $2::text IS NOT NULL AND nss = $2 THEN 1
+                    WHEN $3::text IS NOT NULL AND curp = $3 THEN 2
+                    WHEN $4::text IS NOT NULL AND rfc = $4 THEN 3
+                    ELSE 4
+                END
+            LIMIT 1
+            "#,
+            &[&ctx.id_cliente, &nss_param, &curp_param, &rfc_param, &nom_param],
+        )?;
+        if let Some(r) = row {
+            empleado_id = Some(r.get(0));
         }
     }
 
@@ -767,8 +818,14 @@ pub fn save_single_cedula_employee_tx(
     };
 
     // Liquidación
-    let mes_norm = normalize_mes_periodo(emp.mes_periodo.as_deref());
-    let anio_norm = normalize_anio_periodo(emp.anio_periodo.as_deref());
+    let emp_mes = emp.mes_periodo.as_deref().or_else(|| {
+        emp.data_employee.first().and_then(|de| de.mes_periodo.as_deref())
+    });
+    let emp_anio = emp.anio_periodo.as_deref().or_else(|| {
+        emp.data_employee.first().and_then(|de| de.anio_periodo.as_deref())
+    });
+    let mes_norm = normalize_mes_periodo(emp_mes);
+    let anio_norm = normalize_anio_periodo(emp_anio);
 
     let nombre_arch = format!("Cédula SUA {} - {}.pdf", ctx.reg_11, mes_norm);
 
@@ -828,50 +885,13 @@ pub fn save_single_cedula_employee_tx(
     )?;
     liquidaciones_count += 1;
 
-    // Determinar si la liquidación cae dentro de los años y meses de las obras de la revisión
-    let obra_dates = tx.query(
-        r#"
-        SELECT ro.fecha_inicio, ro.fecha_fin
-        FROM public.registros_obras ro
-        WHERE ro.id_revision = $1
-           OR ro.id_registro_patronal = (SELECT r.id_registro_patronal FROM public.revisiones r WHERE r.id = $1)
-        "#,
-        &[&ctx.id_revision],
-    )?;
-
-    let mut anios_filtro: BTreeSet<i16> = BTreeSet::new();
-    let mut meses_filtro: BTreeSet<String> = BTreeSet::new();
-
-    for od in obra_dates {
-        let f_ini: Option<NaiveDate> = od.get(0);
-        let f_fin: Option<NaiveDate> = od.get(1);
-        if let (Some(fi), Some(ff)) = (f_ini, f_fin) {
-            let mut curr_y = fi.year();
-            let mut curr_m = fi.month();
-            let end_y = ff.year();
-            let end_m = ff.month();
-
-            while (curr_y < end_y) || (curr_y == end_y && curr_m <= end_m) {
-                anios_filtro.insert(curr_y as i16);
-                let m_nom = month_num_to_name(curr_m);
-                if !m_nom.is_empty() {
-                    meses_filtro.insert(m_nom.to_string());
-                }
-                curr_m += 1;
-                if curr_m > 12 {
-                    curr_m = 1;
-                    curr_y += 1;
-                }
-            }
-        }
-    }
-
-    let should_mirror = if anios_filtro.is_empty() || meses_filtro.is_empty() {
+    // Determinar si la liquidación cae dentro de los años y meses de las obras de la revisión (pre-calculado en contexto)
+    let should_mirror = if ctx.anios_filtro.is_empty() || ctx.meses_filtro.is_empty() {
         true
     } else {
         let mes_check = mes_norm.trim().to_uppercase();
         let anio_check = anio_norm;
-        anios_filtro.contains(&anio_check) && meses_filtro.contains(&mes_check)
+        ctx.anios_filtro.contains(&anio_check) && ctx.meses_filtro.contains(&mes_check)
     };
 
     let id_rep_liq_opt = if should_mirror {
@@ -944,50 +964,6 @@ pub fn save_single_cedula_employee_tx(
         detalles_count += 1;
     }
 
-    // Mirror to reportes_detalles_liquidaciones si aplica por filtro de fechas
-    if let Some(id_rep_liq) = id_rep_liq_opt {
-        for de in &emp.data_employee {
-            let id_rep_det = Uuid::now_v7();
-            let dias_det = de.dias.map(|d| d as i16);
-            tx.execute(
-                r#"
-                INSERT INTO public.reportes_detalles_liquidaciones (
-                    id, id_reporte_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
-                    exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
-                    gps, patronal, obrera, subtotal
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
-                )
-                "#,
-                &[
-                    &id_rep_det,
-                    &id_rep_liq,
-                    &truncate_str(de.clave.as_deref(), 17),
-                    &de.fecha,
-                    &dias_det,
-                    &de.sdi,
-                    &de.lic,
-                    &de.inc,
-                    &de.aus,
-                    &de.cf,
-                    &de.exc_pat,
-                    &de.exc_obr,
-                    &de.pd_pat,
-                    &de.pd_obr,
-                    &de.gmp_pat,
-                    &de.gmp_obr,
-                    &de.rt,
-                    &de.iv_pat,
-                    &de.iv_obr,
-                    &de.gps,
-                    &de.patronal,
-                    &de.obrera,
-                    &de.subtotal,
-                ],
-            )?;
-        }
-    }
-
     // Registros de Obra y Vinculaciones
     let mut obras_to_process: Vec<(String, i16)> = Vec::new();
     for ro in &emp.registro_obras {
@@ -1022,6 +998,7 @@ pub fn save_single_cedula_employee_tx(
     }
 
     let mut final_rep_liq_id = id_rep_liq_opt;
+    let mut processed_obras: Vec<(Uuid, i16)> = Vec::new();
 
     for (num_obra, dias_vinc) in obras_to_process {
         let m_num = month_to_num(&mes_norm);
@@ -1058,6 +1035,8 @@ pub fn save_single_cedula_employee_tx(
         if is_inserted {
             registros_obras_count += 1;
         }
+
+        processed_obras.push((id_registro_obra, dias_vinc));
 
         // Evitar duplicar vinculación obra - liquidación
         let existing_vinc = tx.query_opt(
@@ -1102,18 +1081,18 @@ pub fn save_single_cedula_employee_tx(
             final_rep_liq_id = Some(assigned_id);
         }
 
-        // Asegurar vinculación en reportes_vinculaciones_obras_liquidaciones
+        // Asegurar vinculación en reportes_vinculaciones_obras_liquidaciones para cada obra
         if let Some(id_rep_liq) = final_rep_liq_id {
             let existing_rep_vinc = tx.query_opt(
-                "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 LIMIT 1",
-                &[&id_rep_liq],
+                "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 AND id_registro_obra = $2 LIMIT 1",
+                &[&id_rep_liq, &Some(id_registro_obra)],
             )?;
 
             if let Some(erv) = existing_rep_vinc {
                 let vid: Uuid = erv.get(0);
                 let _ = tx.execute(
-                    "UPDATE public.reportes_vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
-                    &[&vid, &Some(id_registro_obra), &Some(dias_vinc)],
+                    "UPDATE public.reportes_vinculaciones_obras_liquidaciones SET dias_registro_obra = $2 WHERE id = $1",
+                    &[&vid, &Some(dias_vinc)],
                 );
             } else {
                 let id_rep_vinc = Uuid::now_v7();
@@ -1129,54 +1108,124 @@ pub fn save_single_cedula_employee_tx(
         }
     }
 
-    // Si tiene obra asignada en reportes_vinculaciones_obras_liquidaciones, recalcular y guardar detalles en reportes_detalles_liquidaciones
+    // Mirror to reportes_detalles_liquidaciones con prorrateo de obra aplicado para cada obra vinculada
     if let Some(id_rep_liq) = final_rep_liq_id {
-        let rv_info = tx.query_opt(
-            r#"
-            SELECT rvol.id_registro_obra, rvol.dias_registro_obra, rdl.dias
-            FROM public.reportes_vinculaciones_obras_liquidaciones rvol
-            JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rvol.id_reporte_liquidacion
-            WHERE rvol.id_reporte_liquidacion = $1
-            LIMIT 1
-            "#,
-            &[&id_rep_liq],
-        )?;
-
-        if let Some(rvr) = rv_info {
-            let id_ro: Option<Uuid> = rvr.get(0);
-            let d_obra: Option<i16> = rvr.get(1);
-            let d_ced: Option<i16> = rvr.get(2);
-
-            if id_ro.is_some() && d_obra.is_some() && d_ced.is_some() && d_ced.unwrap() > 0 {
-                let factor = (d_obra.unwrap() as f64 / d_ced.unwrap() as f64).clamp(0.0, 10.0);
-                let _ = tx.execute(
+        if processed_obras.is_empty() {
+            for de in &emp.data_employee {
+                let id_rep_det = Uuid::now_v7();
+                let dias_det = de.dias.map(|d| d as i16);
+                tx.execute(
                     r#"
-                    UPDATE public.reportes_detalles_liquidaciones rdl
-                    SET 
-                        cf = ROUND((dl.cf * $2)::numeric, 2)::float8,
-                        exc_pat = ROUND((dl.exc_pat * $2)::numeric, 2)::float8,
-                        exc_obr = ROUND((dl.exc_obr * $2)::numeric, 2)::float8,
-                        pd_pat = ROUND((dl.pd_pat * $2)::numeric, 2)::float8,
-                        pd_obr = ROUND((dl.pd_obr * $2)::numeric, 2)::float8,
-                        gmp_pat = ROUND((dl.gmp_pat * $2)::numeric, 2)::float8,
-                        gmp_obr = ROUND((dl.gmp_obr * $2)::numeric, 2)::float8,
-                        rt = ROUND((dl.rt * $2)::numeric, 2)::float8,
-                        iv_pat = ROUND((dl.iv_pat * $2)::numeric, 2)::float8,
-                        iv_obr = ROUND((dl.iv_obr * $2)::numeric, 2)::float8,
-                        gps = ROUND((dl.gps * $2)::numeric, 2)::float8,
-                        patronal = ROUND((dl.patronal * $2)::numeric, 2)::float8,
-                        obrera = ROUND((dl.obrera * $2)::numeric, 2)::float8,
-                        subtotal = ROUND((dl.subtotal * $2)::numeric, 2)::float8
-                    FROM public.reportes_liquidaciones rl,
-                         public.detalles_liquidaciones dl
-                    WHERE rdl.id_reporte_liquidacion = rl.id
-                      AND dl.id_liquidacion = rl.id_liquidacion
-                      AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL))
-                      AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL))
-                      AND rl.id = $1
+                    INSERT INTO public.reportes_detalles_liquidaciones (
+                        id, id_reporte_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
+                        exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
+                        gps, patronal, obrera, subtotal, id_registro_obra, dias_registro_obra
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, NULL, NULL
+                    )
                     "#,
-                    &[&id_rep_liq, &factor],
-                );
+                    &[
+                        &id_rep_det,
+                        &id_rep_liq,
+                        &truncate_str(de.clave.as_deref().map(|s| s.to_uppercase()).as_deref(), 17),
+                        &de.fecha,
+                        &dias_det,
+                        &de.sdi,
+                        &de.lic,
+                        &de.inc,
+                        &de.aus,
+                        &de.cf,
+                        &de.exc_pat,
+                        &de.exc_obr,
+                        &de.pd_pat,
+                        &de.pd_obr,
+                        &de.gmp_pat,
+                        &de.gmp_obr,
+                        &de.rt,
+                        &de.iv_pat,
+                        &de.iv_obr,
+                        &de.gps,
+                        &de.patronal,
+                        &de.obrera,
+                        &de.subtotal,
+                    ],
+                )?;
+            }
+        } else {
+            let mut baja_inserted = false;
+            for (_idx, (obra_id, d_o)) in processed_obras.iter().enumerate() {
+                for de in &emp.data_employee {
+                    let is_baja = de.clave.as_deref().map(|c| c.trim().eq_ignore_ascii_case("BAJA")).unwrap_or(false);
+                    if is_baja {
+                        if baja_inserted {
+                            continue;
+                        }
+                        baja_inserted = true;
+                    }
+
+                    let id_rep_det = Uuid::now_v7();
+                    let dias_det = de.dias.map(|d| d as i16);
+
+                    let (factor, dias_ro) = match dias_det {
+                        Some(d_c) if d_c > 0 => {
+                            let f = (*d_o as f64 / d_c as f64).clamp(0.0, 10.0);
+                            let dro = if is_baja { 0 } else if *d_o <= d_c { *d_o } else { d_c };
+                            (f, Some(dro))
+                        }
+                        _ => {
+                            (1.0, Some(if is_baja { 0 } else { *d_o }))
+                        }
+                    };
+
+                    let prorate = |val: Option<f64>| -> Option<f64> {
+                        if is_baja {
+                            Some(0.0)
+                        } else if factor != 1.0 {
+                            val.map(|v| ((v * factor * 100.0).round()) / 100.0)
+                        } else {
+                            val
+                        }
+                    };
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO public.reportes_detalles_liquidaciones (
+                            id, id_reporte_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
+                            exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
+                            gps, patronal, obrera, subtotal, id_registro_obra, dias_registro_obra
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+                        )
+                        "#,
+                        &[
+                            &id_rep_det,
+                            &id_rep_liq,
+                            &truncate_str(de.clave.as_deref().map(|s| s.to_uppercase()).as_deref(), 17),
+                            &de.fecha,
+                            &dias_det,
+                            &de.sdi,
+                            &de.lic,
+                            &de.inc,
+                            &de.aus,
+                            &prorate(de.cf),
+                            &prorate(de.exc_pat),
+                            &prorate(de.exc_obr),
+                            &prorate(de.pd_pat),
+                            &prorate(de.pd_obr),
+                            &prorate(de.gmp_pat),
+                            &prorate(de.gmp_obr),
+                            &prorate(de.rt),
+                            &prorate(de.iv_pat),
+                            &prorate(de.iv_obr),
+                            &prorate(de.gps),
+                            &prorate(de.patronal),
+                            &prorate(de.obrera),
+                            &prorate(de.subtotal),
+                            &Some(obra_id),
+                            &dias_ro,
+                        ],
+                    )?;
+                }
             }
         }
     }

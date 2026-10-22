@@ -11,14 +11,16 @@ pub mod schema;
 
 pub use calendario::*;
 pub use catalogos::*;
-pub use cedulas::{save_cedulas_concurrent, save_cedulas_to_db, CedulasDbStats};
+pub use cedulas::{
+    save_cedulas_concurrent, save_cedulas_to_db, CedulasDbStats,
+};
 pub use client::{
     create_client, create_pool, diagnose_postgres, get_global_pool, is_fallback_active,
     reload_global_pool, set_global_pool, DbPool, PooledClient, PostgresDiagnosis,
 };
 pub use config::{
-    get_active_config, get_active_config_path, update_active_config, DbConfig,
-    DEFAULT_CONFIG_FILENAME,
+    create_tls_connector, get_active_config, get_active_config_path, update_active_config,
+    DbConfig, DEFAULT_CONFIG_FILENAME,
 };
 pub use nominas::{save_nominas_concurrent, save_nominas_to_db, delete_all_nominas, NominasDbStats};
 pub use nominas_reporte::*;

@@ -48,6 +48,8 @@ export struct ProcessingSummary {
     cedulas_excel_path: string,
 }
 
+
+
 export struct ClienteCardData {
     id: string,
     nombre: string,
@@ -200,6 +202,7 @@ export struct ReporteGuarderiaObraItem {
     limite_18_obra_str: string,
     supera_18: bool,
     empleados_count: int,
+    registros_patronales_str: string,
 }
 
 export struct ReporteObraItem {
@@ -222,6 +225,9 @@ export struct ReporteObraUsuarioItem {
     fecha_inicio: string,
     fecha_fin: string,
     vigencia_str: string,
+    empleados_count: int,
+    empleados_count_str: string,
+    selected: bool,
 }
 
 export struct ReporteSuaObraItem {
@@ -234,15 +240,54 @@ export struct ReporteSuaObraItem {
     creado_usuario: bool,
 }
 
+export struct ReporteUniqueEmpleadoItem {
+    id: string,
+    nombre: string,
+    rfc: string,
+    nss: string,
+    selected: bool,
+    periodos_count: int,
+}
+
+export struct ReporteEditObraItem {
+    id: string,
+    numero: string,
+    label: string,
+    vigencia_str: string,
+    selected: bool,
+    dias_obra: int,
+    dias_obra_str: string,
+    tope_max: int,
+    dias_activos_mes: int,
+    has_error: bool,
+}
+
 export struct ReporteBatchWorkerItem {
     id: string,
+    id_parent: string,
     nss: string,
     nombre: string,
     periodo: string,
     obra_label: string,
     dias_cedula: int,
     dias_obra: int,
+    dias_obra_str: string,
     tope_max: int,
+    total_disponibles: int,
+    has_error: bool,
+    lic_info: string,
+    inc_info: string,
+    aus_info: string,
+    incidencias_str: string,
+}
+
+export struct ReporteBatchObraItem {
+    id: string,
+    numero: string,
+    label: string,
+    vigencia_str: string,
+    dias_tope_est: int,
+    selected: bool,
 }
 
 export struct ReporteSelectedItem {
@@ -269,6 +314,8 @@ export struct ReporteMesTotalItem {
 export struct ReporteLiquidacionRow {
     selected: bool,
     can_delete_split: bool,
+    is_expanded: bool,
+    movimientos_resumen: string,
     idx: int,
     id_reporte_liq: string,
     id_liquidacion: string,
@@ -281,6 +328,11 @@ export struct ReporteLiquidacionRow {
     id_registro_obra: string,
     obra_numero: string,
     obra_label: string,
+    vinculaciones_resumen: string,
+    multi_obra_badge: string,
+    has_multi_obra: bool,
+    dias_mismatch: bool,
+    total_dias_obras: int,
     is_assigned: bool,
     dias_cedula: int,
     dias_obra: int,
@@ -566,6 +618,9 @@ export global AppData {
     // Vista actual: 0: Auditoría/Carga, 1: Clientes, 2: Registros Patronales, 3: Empleados
     in-out property <int> current_view: 1;
 
+    // Sidebar colapsable
+    in-out property <bool> is_sidebar_open: true;
+
     // Navegación contextual
     in-out property <string> selected_cliente_id: "";
     in-out property <string> selected_cliente_nombre: "Todos los Clientes";
@@ -596,20 +651,7 @@ export global AppData {
     in-out property <string> db_status_detail: "";
 
     // Configuración y Credenciales de PostgreSQL
-    in-out property <string> db_cfg_host: "localhost";
-    in-out property <string> db_cfg_port: "5432";
-    in-out property <string> db_cfg_database: "firma_fiscal_acd";
-    in-out property <string> db_cfg_user: "ivan395";
-    in-out property <string> db_cfg_password: "";
-    in-out property <string> db_cfg_ssl_mode: "disable";
-    in-out property <string> db_cfg_connection_url: "";
-    in-out property <string> db_cfg_file_path: "db_config.json";
-    in-out property <bool> db_cfg_is_testing: false;
-    in-out property <bool> db_cfg_is_saving: false;
-    in-out property <string> db_cfg_test_result: "";
-    in-out property <string> db_cfg_test_status: ""; // "success", "error", "testing", ""
-    in-out property <bool> db_cfg_show_password: false;
-    in-out property <bool> db_cfg_use_custom_url: false;
+
 
     // Catálogos para Combos
     in-out property <[string]> tipos_personas_combo: ["-- Seleccionar Tipo Persona --", "FÍSICA", "MORAL"];
@@ -775,6 +817,7 @@ export global AppData {
     in-out property <string> obra_form_ubicacion: "";
     in-out property <string> obra_form_superficie: "";
     in-out property <string> obra_form_monto: "";
+    in-out property <string> obra_form_monto_preview: "";
     in-out property <string> obra_form_delegacion: "";
     in-out property <string> obra_form_subdelegacion: "";
 
@@ -1075,9 +1118,25 @@ export global AppData {
     in-out property <string> reporte_edit_aus_info: "0";
     in-out property <int> reporte_edit_dias_max: 0;
     in-out property <string> reporte_edit_obra_vigencia_info: "";
+    in-out property <string> reporte_edit_vinculaciones_info: "";
     in-out property <bool> reporte_edit_alert_show: false;
     in-out property <string> reporte_edit_alert_text: "";
     in-out property <string> reporte_edit_alert_type: "error";
+    in-out property <[ReporteEditObraItem]> reporte_edit_obras_list: [];
+    in-out property <[ReporteEditObraItem]> reporte_edit_selected_obras: [];
+    in-out property <int> reporte_edit_total_disponibles: 0;
+    in-out property <int> reporte_edit_dias_asignados_sum: 0;
+    in-out property <int> reporte_edit_dias_restantes: 0;
+    in-out property <int> reporte_edit_selected_count: 0;
+    in-out property <bool> reporte_edit_has_errors: false;
+
+    // Filtro Multi-Selección de Empleados Únicos en Menú Principal
+    in-out property <[ReporteUniqueEmpleadoItem]> reporte_unique_empleados: [];
+    in-out property <[ReporteUniqueEmpleadoItem]> reporte_unique_empleados_filtered: [];
+    in-out property <int> reporte_unique_empleados_selected_count: 0;
+    in-out property <bool> reporte_unique_empleados_filter_active: false;
+    in-out property <string> reporte_unique_empleados_search: "";
+    in-out property <bool> reporte_unique_empleados_dropdown_open: false;
 
     // Modal de Modificación Masiva en Lote: Obra, Días Cédula y Días Obra
     in-out property <bool> show_reporte_batch_edit_modal: false;
@@ -1096,6 +1155,9 @@ export global AppData {
     in-out property <bool> reporte_batch_edit_alert_show: false;
     in-out property <string> reporte_batch_edit_alert_text: "";
     in-out property <string> reporte_batch_edit_alert_type: "error";
+    in-out property <[ReporteBatchObraItem]> reporte_batch_edit_obras_multiselect: [];
+    in-out property <int> reporte_batch_edit_selected_obras_count: 0;
+    in-out property <bool> reporte_batch_edit_multi_obra_enabled: false;
 
     // Modal para Vincular Trabajador a Otra Obra Adicional
     in-out property <bool> show_reporte_add_obra_modal: false;
@@ -1154,6 +1216,7 @@ export global AppData {
     // Obras creadas por el usuario en la revisión (Vigencias para análisis)
     in-out property <bool> reporte_has_obras_usuario: false;
     in-out property <[ReporteObraUsuarioItem]> reporte_obras_usuario: [];
+    in-out property <bool> reporte_drawer_obras_open: false;
 
     // Modal de Exportación a SUA
     in-out property <bool> show_reporte_export_sua_modal: false;
@@ -1188,6 +1251,7 @@ export global AppData {
 
     // Análisis de Guarderías (Tope 18% por Registro de Obra del Usuario)
     in-out property <[ReporteGuarderiaObraItem]> reporte_guarderias_obras: [];
+    in-out property <string> reporte_expanded_row_id: "";
 
     // Calendario Fiscal & Revisiones IMSS
     in-out property <int> cal_view_year: 2026;
@@ -1319,6 +1383,8 @@ export global AppData {
 export global AppLogic {
     // Navegación
     callback navigate_view(int);
+    callback toggle_sidebar();
+    callback set_sidebar_open(bool);
     callback open_cedulas_from_obras();
     callback close_cedulas_success_modal();
     callback close_cedulas_duplicate_modal();
@@ -1330,12 +1396,7 @@ export global AppLogic {
     callback reconnect_db();
     callback show_navigation_warning(string);
 
-    // Configuración de Base de Datos PostgreSQL
-    callback test_db_config(string, string, string, string, string, string, string);
-    callback save_db_config(string, string, string, string, string, string, string);
-    callback reset_db_config_defaults();
-    callback load_db_config();
-    callback open_db_config_folder();
+
 
     // Clientes
     callback reload_clientes();
@@ -1392,6 +1453,8 @@ export global AppLogic {
     callback open_delete_obra_dialog(string, string);
     callback close_delete_obra_dialog();
     callback confirm_delete_obra(string);
+    callback obra_form_monto_changed(string);
+    callback obra_form_monto_accepted(string);
     callback filter_obras_search();
     callback filter_obras_tab(int);
 
@@ -1472,6 +1535,7 @@ callback recargar_cedulas_view();
     callback reload_reporte_liquidaciones();
     callback reporte_filtrar_busqueda(string);
     callback reporte_filtrar_obra(int);
+    callback reporte_seleccionar_obra_usuario(string);
     callback reporte_filtrar_periodo(int);
     callback reporte_filtrar_estado(int);
     callback reporte_limpiar_todos_filtros();
@@ -1479,6 +1543,7 @@ callback recargar_cedulas_view();
     callback reporte_toggle_select_row(string);
     callback reporte_toggle_select_all(bool);
     callback reporte_limpiar_seleccion();
+    callback reporte_toggle_expand_row(string);
     callback reporte_open_obra_picker(string);
     callback reporte_filter_obra_picker(string);
     callback reporte_select_obra_picker(string, string);
@@ -1495,6 +1560,16 @@ callback recargar_cedulas_view();
     callback reporte_edit_dias_cedula_changed(string);
     callback reporte_submit_unified_edit(string, string, string, string);
     callback reporte_close_edit_modal();
+    callback reporte_edit_toggle_obra(string);
+    callback reporte_edit_obra_dias_changed(string, string);
+    callback reporte_submit_unified_edit_multi(string);
+    callback reporte_batch_worker_dias_changed(string, string);
+
+    // Callbacks del filtro multi-selección de empleados únicos
+    callback reporte_toggle_unique_empleado(string);
+    callback reporte_unique_empleados_select_all(bool);
+    callback reporte_unique_empleados_search_changed(string);
+    callback reporte_limpiar_unique_empleados_filter();
 
     // Callbacks para vincular a otra obra adicional y eliminar vinculación dividida
     callback reporte_open_add_obra_modal(string);
@@ -1512,6 +1587,8 @@ callback recargar_cedulas_view();
     callback reporte_select_batch_edit_obra(string, string);
     callback reporte_toggle_batch_edit_dropdown();
     callback reporte_batch_edit_dias_cedula_changed(string);
+    callback reporte_batch_edit_toggle_obra(string);
+    callback reporte_batch_edit_set_multi_mode(bool);
     callback reporte_submit_batch_edit(string, bool, string, bool, string, bool);
 
     callback reporte_batch_apply(int, string, string, bool);
@@ -1531,6 +1608,13 @@ callback recargar_cedulas_view();
     callback reporte_toggle_sort_criterion(string);
     callback reporte_toggle_sort_direction(string);
     callback reporte_reset_sorting();
+
+    // Verificación y autocorrección de días y obras
+    callback reporte_verificar_y_corregir_dias();
+
+    // Side Drawer de Registros de Obra
+    callback reporte_toggle_drawer_obras();
+    callback reporte_set_drawer_obras(bool);
 
     // Callbacks de filtro y selección de empleados
     callback reporte_open_empleados_filter_modal();

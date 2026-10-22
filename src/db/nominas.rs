@@ -568,7 +568,35 @@ fn save_single_nomina_tx(
         ],
     )?;
 
-    // Detalles de Nómina
+    // Detalles de Nómina preparados para máxima velocidad de inserción
+    let stmt_det = if !emp.detalles_nomina.is_empty() {
+        Some(tx.prepare(
+            r#"
+            INSERT INTO public.detalles_nominas (
+                id, id_nomina, id_concepto, clave, concepto, importe_gravado, importe_exento, importe
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8
+            )
+            "#,
+        )?)
+    } else {
+        None
+    };
+
+    let stmt_rep_det = if !emp.detalles_nomina.is_empty() {
+        Some(tx.prepare(
+            r#"
+            INSERT INTO public.reportes_detalles_nominas (
+                id, id_reporte_nomina, id_concepto, clave, concepto, importe_gravado, importe_exento, importe
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8
+            )
+            "#,
+        )?)
+    } else {
+        None
+    };
+
     for d in &emp.detalles_nomina {
         let cat_upper = d.tipo_concepto_categoria.to_uppercase();
         let id_tipo_concepto = match tipo_concepto_cache.get(&cat_upper) {
@@ -629,47 +657,39 @@ fn save_single_nomina_tx(
         let clave_trun = truncate_str(Some(&d.clave), 10).unwrap_or_else(|| "001".to_string());
         let desc_trun = truncate_str(Some(&concepto_desc), 250).unwrap();
 
-        tx.execute(
-            r#"
-            INSERT INTO public.detalles_nominas (
-                id, id_nomina, id_concepto, clave, concepto, importe_gravado, importe_exento, importe
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8
-            )
-            "#,
-            &[
-                &id_detalle,
-                &id_nomina,
-                &id_concepto,
-                &clave_trun,
-                &desc_trun,
-                &d.importe_gravado,
-                &d.importe_exento,
-                &d.importe,
-            ],
-        )?;
+        if let Some(ref stmt) = stmt_det {
+            tx.execute(
+                stmt,
+                &[
+                    &id_detalle,
+                    &id_nomina,
+                    &id_concepto,
+                    &clave_trun,
+                    &desc_trun,
+                    &d.importe_gravado,
+                    &d.importe_exento,
+                    &d.importe,
+                ],
+            )?;
+        }
 
         // Mirror to reportes_detalles_nominas
         let id_rep_det = Uuid::now_v7();
-        tx.execute(
-            r#"
-            INSERT INTO public.reportes_detalles_nominas (
-                id, id_reporte_nomina, id_concepto, clave, concepto, importe_gravado, importe_exento, importe
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8
-            )
-            "#,
-            &[
-                &id_rep_det,
-                &id_rep_nomina,
-                &id_concepto,
-                &clave_trun,
-                &desc_trun,
-                &d.importe_gravado,
-                &d.importe_exento,
-                &d.importe,
-            ],
-        )?;
+        if let Some(ref stmt) = stmt_rep_det {
+            tx.execute(
+                stmt,
+                &[
+                    &id_rep_det,
+                    &id_rep_nomina,
+                    &id_concepto,
+                    &clave_trun,
+                    &desc_trun,
+                    &d.importe_gravado,
+                    &d.importe_exento,
+                    &d.importe,
+                ],
+            )?;
+        }
 
         detalles_count += 1;
     }
@@ -992,7 +1012,7 @@ pub fn save_nominas_to_db(
         ) {
             Ok((e_c, c_c, ct_c, n_c, d_c)) => {
                 if let Err(e) = tx.commit() {
-                    stats.errores.push(format!("Error haciendo commit: {}", e));
+                    stats.errores.push(format!("Error haciendo commit: {:?}", e));
                 } else {
                     stats.empleados_guardados += e_c;
                     stats.cfdis_guardados += c_c;

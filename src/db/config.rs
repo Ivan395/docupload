@@ -24,37 +24,27 @@ pub struct DbConfig {
 }
 
 fn default_ssl_mode() -> String {
-    "require".to_string()
+    "disable".to_string()
 }
 
 impl Default for DbConfig {
     fn default() -> Self {
-        let env_password = env::var("DB_PASSWORD").unwrap_or_default();
+        let host = env::var("PGHOST").unwrap_or_else(|_| "localhost".to_string());
+        let port = env::var("PGPORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(5432);
+        let database = env::var("PGDATABASE").unwrap_or_else(|_| "firma_fiscal_acd".to_string());
+        let user = env::var("PGUSER").unwrap_or_else(|_| "ivan395".to_string());
+        let password = env::var("PGPASSWORD").unwrap_or_else(|_| "ABCabc123".to_string());
 
-        // Si existe DATABASE_URL en el entorno, respetarla
-        if let Ok(url) = env::var("DATABASE_URL") {
-            let trimmed = url.trim();
-            if !trimmed.is_empty() {
-                return Self {
-                    host: "pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com".to_string(),
-                    port: 19522,
-                    database: "firma_fiscal_acd".to_string(),
-                    user: "avnadmin".to_string(),
-                    password: env_password,
-                    ssl_mode: "require".to_string(),
-                    connection_url: trimmed.to_string(),
-                };
-            }
-        }
-
-        // Predeterminado con la conexión provista (Aiven Cloud)
         Self {
-            host: "pg-20d4e7ff-angelivan395-55bb.a.aivencloud.com".to_string(),
-            port: 19522,
-            database: "firma_fiscal_acd".to_string(),
-            user: "avnadmin".to_string(),
-            password: env_password,
-            ssl_mode: "require".to_string(),
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl_mode: "disable".to_string(),
             connection_url: String::new(),
         }
     }

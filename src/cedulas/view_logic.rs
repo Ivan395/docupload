@@ -1,6 +1,7 @@
 use chrono::{Datelike, NaiveDate};
 use postgres::Client;
 use rust_xlsxwriter::{Color, Format, FormatAlign, Workbook, XlsxError};
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -333,7 +334,7 @@ pub fn inspect_cedula_file_with_context(
                                 card.has_warning = true;
                                 card.warning_msg = format!(
                                     "Registro Patronal EMA '{}' no coincide con el de la revisión ('{}')",
-                                    ema_rp, target_rp
+                                    clean_found, clean_t
                                 );
                             }
                         }
@@ -348,7 +349,7 @@ pub fn inspect_cedula_file_with_context(
                                 card.has_warning = true;
                                 let rfc_msg = format!(
                                     "RFC EMA '{}' no coincide con el RFC registrado ('{}')",
-                                    ema_rfc, target_rfc
+                                    clean_b, clean_t
                                 );
                                 if card.warning_msg.is_empty() {
                                     card.warning_msg = rfc_msg;
@@ -378,7 +379,7 @@ pub fn inspect_cedula_file_with_context(
                                         card.has_warning = true;
                                         card.warning_msg = format!(
                                             "Registro Patronal '{}' no coincide con el de la revisión ('{}')",
-                                            m.as_str().trim(), target_rp
+                                            clean_found, clean_t
                                         );
                                     }
                                 }
@@ -527,7 +528,7 @@ pub fn process_and_audit_cedulas(
     target_client_name: Option<&str>,
     target_registro_patronal: Option<&str>,
     revision_obras_registered: &HashSet<String>,
-    output_excel_path: &Path,
+    _output_excel_path: &Path,
     temp_dir: &Path,
     progress_callback: impl Fn(usize, usize, &str) + Send + Sync,
 ) -> Result<(CedulasAuditResult, Vec<Business>, CedulaMismatchReport), (String, CedulaMismatchReport)> {
@@ -541,13 +542,13 @@ pub fn process_and_audit_cedulas(
     let mut no_procesados = 0;
     let mut archivos_cliente_invalido_count = 0;
 
-    let clean_target_rfc = target_client_rfc.map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let clean_target_rfc = target_client_rfc.map(|s| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()).filter(|s| !s.is_empty());
     let clean_target_name = target_client_name.map(canonical_razon).filter(|s| !s.is_empty() && s != "TODOS LOS CLIENTES");
     let clean_target_rp = target_registro_patronal.map(canonical_reg).filter(|s| !s.is_empty() && s != "GENERAL");
 
     let mut mismatch_report = CedulaMismatchReport {
-        expected_rfc: target_client_rfc.unwrap_or("").to_string(),
-        expected_rp: target_registro_patronal.unwrap_or("").to_string(),
+        expected_rfc: clean_target_rfc.clone().unwrap_or_default(),
+        expected_rp: clean_target_rp.clone().unwrap_or_default(),
         expected_cliente: target_client_name.unwrap_or("").to_string(),
         items: Vec::new(),
     };
@@ -557,15 +558,24 @@ pub fn process_and_audit_cedulas(
     let patterns = crate::cedulas::regex_expressions::initialize_patterns()
         .map_err(|e| (format!("Error en expresiones regulares: {}", e), mismatch_report.clone()))?;
 
-    for (idx, pdf_path) in pdf_files.iter().enumerate() {
-        let file_display_name = pdf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    // Extracción concurrente multi-hilo de las capas de texto con MuPDF nativo
+    let extracted_pdfs: Vec<(PathBuf, String, Result<String, String>)> = pdf_files
+        .par_iter()
+        .map(|pdf_path| {
+            let file_display_name = pdf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let res = extract_with_layout(pdf_path);
+            (pdf_path.clone(), file_display_name, res)
+        })
+        .collect();
+
+    for (idx, (_pdf_path, file_display_name, extract_res)) in extracted_pdfs.into_iter().enumerate() {
         progress_callback(
             idx + 1,
             total_archivos_analizados,
             &format!("Analizando {} ({}/{})...", file_display_name, idx + 1, total_archivos_analizados),
         );
 
-        let raw_text = match extract_with_layout(pdf_path) {
+        let raw_text = match extract_res {
             Ok(t) => t,
             Err(_) => {
                 no_procesados += 1;
@@ -736,11 +746,11 @@ pub fn process_and_audit_cedulas(
                         mismatch_report.items.push(CedulaMismatchItem {
                             filename: file_display_name.clone(),
                             error_type: "Registro Patronal no coincide".to_string(),
-                            expected_val: format!("RP: {}", target_registro_patronal.unwrap_or("")),
-                            found_val: format!("RP: {}", b_rp),
+                            expected_val: format!("RP: {}", clean_t),
+                            found_val: format!("RP: {}", clean_b),
                             details: format!(
                                 "El Registro Patronal '{}' extraído de esta cédula no coincide con el Registro Patronal '{}' seleccionado para esta revisión.",
-                                b_rp, target_registro_patronal.unwrap_or("")
+                                clean_b, clean_t
                             ),
                         });
                     }
@@ -757,11 +767,11 @@ pub fn process_and_audit_cedulas(
                         mismatch_report.items.push(CedulaMismatchItem {
                             filename: file_display_name.clone(),
                             error_type: "RFC no coincide".to_string(),
-                            expected_val: format!("RFC: {}", target_client_rfc.unwrap_or("")),
-                            found_val: format!("RFC: {}", b_rfc),
+                            expected_val: format!("RFC: {}", clean_t),
+                            found_val: format!("RFC: {}", clean_b),
                             details: format!(
                                 "El RFC '{}' extraído de esta cédula no coincide con el RFC '{}' registrado para la empresa en el Catálogo de Clientes.",
-                                b_rfc, target_client_rfc.unwrap_or("")
+                                clean_b, clean_t
                             ),
                         });
                     }
@@ -845,7 +855,7 @@ pub fn process_and_audit_cedulas(
         validos_sua,
         no_procesados,
         archivos_cliente_invalido_count,
-        Some(output_excel_path),
+        None, // Omitir generación innecesaria de Excel temporal durante auditoría
     );
     audit_res.mismatch_report = mismatch_report.clone();
 
@@ -966,27 +976,48 @@ pub fn build_cedulas_audit_from_businesses(
                 monthly_count += 1;
             }
 
-            let obra_str = emp
-                .registro_obras
-                .first()
-                .map(|ro| ro.registro_obra.clone())
-                .unwrap_or_else(|| "SIN REGISTRO DE OBRA".to_string());
+            if emp.registro_obras.is_empty() {
+                let obra_str = "SIN REGISTRO DE OBRA".to_string();
+                obras_encontradas.insert(obra_str.clone());
+                assignments.push(AuditAssignment {
+                    worker_id: worker_id.clone(),
+                    obra_num: obra_str,
+                    start: period_start,
+                    end: period_end,
+                });
+            } else {
+                for ro in &emp.registro_obras {
+                    let obra_str = ro.registro_obra.clone();
+                    obras_encontradas.insert(obra_str.clone());
 
-            obras_encontradas.insert(obra_str.clone());
+                    // Check if obra is in revision
+                    if !revision_obras_registered.is_empty()
+                        && !revision_obras_registered.contains(&obra_str)
+                        && obra_str != "SIN REGISTRO DE OBRA"
+                    {
+                        obras_fuera_revision_set.insert(obra_str.clone());
+                        empleados_obras_fuera_set.insert(worker_id.clone());
+                    }
 
-            // Check if obra is in revision
-            if !revision_obras_registered.is_empty() && !revision_obras_registered.contains(&obra_str) && obra_str != "SIN REGISTRO DE OBRA" {
-                obras_fuera_revision_set.insert(obra_str.clone());
-                empleados_obras_fuera_set.insert(worker_id.clone());
+                    // Add assignment for overlap checking
+                    assignments.push(AuditAssignment {
+                        worker_id: worker_id.clone(),
+                        obra_num: obra_str,
+                        start: period_start,
+                        end: period_end,
+                    });
+                }
             }
 
-            // Add assignment for overlap checking
-            assignments.push(AuditAssignment {
-                worker_id: worker_id.clone(),
-                obra_num: obra_str.clone(),
-                start: period_start,
-                end: period_end,
-            });
+            let obra_str = if emp.registro_obras.is_empty() {
+                "SIN REGISTRO DE OBRA".to_string()
+            } else {
+                emp.registro_obras
+                    .iter()
+                    .map(|ro| ro.to_string())
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            };
 
             // Extract numeric values from data_employee
             let dias_val: i32 = emp.data_employee.iter().filter_map(|d| d.dias).map(|d| d as i32).sum();
@@ -1479,6 +1510,7 @@ pub fn save_cedulas_audit_to_db(
     pool: &DbPool,
     id_revision: &str,
     businesses: &[Business],
+    progress_cb: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
 ) -> Result<CedulasDbStats, String> {
     if businesses.is_empty() {
         return Ok(CedulasDbStats::default());
@@ -1491,6 +1523,9 @@ pub fn save_cedulas_audit_to_db(
     } else {
         None
     };
+
+    let total_emps: usize = businesses.iter().map(|b| b.employees.len()).sum();
+    let mut current_emp_idx = 0;
 
     for biz in businesses {
         let mut tx = match client.transaction() {
@@ -1511,6 +1546,20 @@ pub fn save_cedulas_audit_to_db(
                 stats.detalles_guardados += d_c;
                 stats.registros_obras_guardados += ro_c;
                 stats.vinculaciones_guardadas += v_c;
+
+                current_emp_idx += 1;
+                if let Some(cb) = progress_cb {
+                    if current_emp_idx % 10 == 0 || current_emp_idx == total_emps {
+                        cb(
+                            current_emp_idx,
+                            total_emps,
+                            &format!(
+                                "Guardando en BD: trabajador {}/{}...",
+                                current_emp_idx, total_emps
+                            ),
+                        );
+                    }
+                }
             }
             Ok(())
         })();
@@ -1528,11 +1577,6 @@ pub fn save_cedulas_audit_to_db(
         }
     }
 
-    // Actualizar reportes_nominas con las nuevas vinculaciones de empleados a obras
-    if let Err(e) = crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client) {
-        log::warn!("Error actualizando reportes_nominas tras guardar cédulas: {}", e);
-    }
-
     Ok(stats)
 }
 
@@ -1541,6 +1585,9 @@ pub fn delete_all_cedulas_for_revision(
     id_revision: &str,
 ) -> Result<u64, String> {
     if id_revision.is_empty() {
+        let _ = client.execute("DELETE FROM public.reportes_detalles_liquidaciones", &[]);
+        let _ = client.execute("DELETE FROM public.reportes_vinculaciones_obras_liquidaciones", &[]);
+        let _ = client.execute("DELETE FROM public.reportes_liquidaciones", &[]);
         let _ = client.execute(
             "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion IN (SELECT id FROM public.liquidaciones)",
             &[],
@@ -1555,11 +1602,12 @@ pub fn delete_all_cedulas_for_revision(
         crate::app_logger::log_db_op(
             "DELETE",
             &[
+                "public.reportes_detalles_liquidaciones",
+                "public.reportes_vinculaciones_obras_liquidaciones",
+                "public.reportes_liquidaciones",
                 "public.vinculaciones_obras_liquidaciones",
                 "public.detalles_liquidaciones",
                 "public.liquidaciones",
-                "public.reportes_vinculaciones_obras_liquidaciones",
-                "public.reportes_liquidaciones",
             ],
             "DELETE FROM liquidaciones... (todas las revisiones)",
             "Eliminación total de liquidaciones",
@@ -1568,6 +1616,16 @@ pub fn delete_all_cedulas_for_revision(
         Ok(n)
     } else {
         let rev_uuid = Uuid::parse_str(id_revision).map_err(|e| format!("UUID de revisión inválido: {}", e))?;
+        let _ = client.execute(
+            "DELETE FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion IN (SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1)",
+            &[&rev_uuid],
+        );
+        let _ = client.execute(
+            "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion IN (SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1)",
+            &[&rev_uuid],
+        );
+        let _ = client.execute("DELETE FROM public.reportes_liquidaciones WHERE id_revision = $1", &[&rev_uuid]);
+
         let _ = client.execute(
             "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion IN (SELECT id FROM public.liquidaciones WHERE id_revision = $1)",
             &[&rev_uuid],
@@ -1579,20 +1637,16 @@ pub fn delete_all_cedulas_for_revision(
         let n = client
             .execute("DELETE FROM public.liquidaciones WHERE id_revision = $1", &[&rev_uuid])
             .map_err(|e| format!("Error al borrar liquidaciones de la revisión: {}", e))?;
-        let _ = client.execute(
-            "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion IN (SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1)",
-            &[&rev_uuid],
-        );
-        let _ = client.execute("DELETE FROM public.reportes_liquidaciones WHERE id_revision = $1", &[&rev_uuid]);
 
         crate::app_logger::log_db_op(
             "DELETE",
             &[
+                "public.reportes_detalles_liquidaciones",
+                "public.reportes_vinculaciones_obras_liquidaciones",
+                "public.reportes_liquidaciones",
                 "public.vinculaciones_obras_liquidaciones",
                 "public.detalles_liquidaciones",
                 "public.liquidaciones",
-                "public.reportes_vinculaciones_obras_liquidaciones",
-                "public.reportes_liquidaciones",
             ],
             "DELETE FROM liquidaciones... WHERE id_revision = $1",
             &format!("id_revision={}", id_revision),

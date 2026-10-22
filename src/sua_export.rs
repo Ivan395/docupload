@@ -1136,7 +1136,7 @@ mod tests {
             registro_patronal: "Y6312345101".into(),
             nss: "12345678901".into(),
             rfc: "ROAE800101XYZ".into(),
-            curp: "ROAE800101HDFRNR01".into(),
+            curp: "ROAE800101HDFRNR06".into(), // CURP con dígito verificador RENAPO válido
             nombre_completo: "RODRIGUEZ ALVAREZ ENRIQUE".into(),
             pensionado: String::new(),
             fecha_alta: Some(NaiveDate::from_ymd_opt(2024, 9, 2).unwrap()),
@@ -1150,7 +1150,7 @@ mod tests {
 
         let line = format_aseg_line(&rec);
         assert_eq!(line.len(), 164, "Debe ser de exactamente 164 caracteres para SUA");
-        assert!(line.starts_with("Y631234510112345678901ROAE800101XYZROAE800101HDFRNR01"));
+        assert!(line.starts_with("Y631234510112345678901ROAE800101XYZROAE800101HDFRNR06"));
         assert!(line.contains("02092024"));
         assert!(line.contains("0034850"));
         // Comprobar tipo trabajador '1', jornada '0' y tipo descuento '2'
@@ -1240,7 +1240,7 @@ mod tests {
             registro_patronal: "Y6312345101".into(),
             nss: "12345678901".into(),
             rfc: "ROAE800101XYZ".into(),
-            curp: "ROAE800101HDFRNR01".into(),
+            curp: "ROAE800101HDFRNR06".into(), // CURP con dígito verificador RENAPO válido
             nombre_completo: "RODRIGUEZ ALVAREZ ENRIQUE".into(),
             pensionado: String::new(),
             fecha_alta: Some(NaiveDate::from_ymd_opt(2024, 9, 2).unwrap()),
@@ -1626,7 +1626,8 @@ mod tests {
         // 3. Verificar 3_MOVOBRA
         let movobra_content = std::fs::read_to_string(temp_dir.join(&res.mov_obra_filename)).unwrap();
         assert!(movobra_content.contains("32856401234"), "Debe contener al empleado asignado a obra");
-        assert!(movobra_content.contains("OBRA-NOR"), "Debe contener el folio de la obra");
+        // El folio se normaliza a 8 caracteres alfanuméricos (se elimina el guion): "OBRA-NORTE" -> "OBRANORT"
+        assert!(movobra_content.contains("OBRANORT"), "Debe contener el folio de la obra");
         assert!(!temp_dir.join("MovObra.txt").exists(), "No debe generarse MovObra.txt sin numeración");
 
         let _ = std::fs::remove_dir_all(&temp_dir);

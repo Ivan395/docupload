@@ -93,7 +93,7 @@ pub fn init_app_logger() {
     }
 
     let _ = log::set_boxed_logger(Box::new(GlobalLogBridge));
-    log::set_max_level(LevelFilter::Debug);
+    log::set_max_level(LevelFilter::Info);
 
     log_general_info("Sistema de logging no bloqueante inicializado correctamente");
 }
@@ -175,8 +175,13 @@ fn run_logger_worker(receiver: Receiver<AppLogMessage>) {
                 let line = format!("{} {:<14} [{}] {}\n", msg.timestamp, category_str, msg.target, msg.message);
                 buffer.push_str(&line);
 
-                // Imprimir a consola
-                eprint!("{}", line);
+                // Imprimir a consola solo errores o advertencias para no saturar el flujo de la terminal
+                match msg.category {
+                    LogCategory::UiError | LogCategory::DbError | LogCategory::General(Level::Error) | LogCategory::General(Level::Warn) => {
+                        eprint!("{}", line);
+                    }
+                    _ => {}
+                }
 
                 // Escribir a disco si el buffer alcanza ~16KB o periódicamente
                 if buffer.len() >= 16 * 1024 || last_flush.elapsed().map(|d| d.as_millis() >= 300).unwrap_or(true) {

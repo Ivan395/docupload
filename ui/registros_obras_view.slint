@@ -928,7 +928,30 @@ export component RegistrosObrasView inherits Rectangle {
                                 }
                                 LineEdit {
                                     text <=> AppData.obra_form_monto;
-                                    placeholder-text: "Ej. 18500000.00";
+                                    placeholder-text: "Ej. 300,000.00";
+                                    edited(text) => {
+                                        AppLogic.obra_form_monto_changed(text);
+                                        self.set-selection-offsets(self.text.character-count, self.text.character-count);
+                                    }
+                                    accepted(text) => {
+                                        AppLogic.obra_form_monto_accepted(text);
+                                        self.set-selection-offsets(self.text.character-count, self.text.character-count);
+                                    }
+                                }
+                                if AppData.obra_form_monto_preview != "" : HorizontalLayout {
+                                    spacing: 5px;
+                                    Text {
+                                        text: "Formato México:";
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        color: #0369a1;
+                                    }
+                                    Text {
+                                        text: AppData.obra_form_monto_preview;
+                                        font-size: 10px;
+                                        font-weight: 800;
+                                        color: #0284c7;
+                                    }
                                 }
                                 Text {
                                     text: (AppData.obra_form_monto == "" || AppData.obra_form_monto == "0" || AppData.obra_form_monto == "0.00")

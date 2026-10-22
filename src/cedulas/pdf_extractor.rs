@@ -294,6 +294,25 @@ pub fn extract_with_layout(pdf_path: &Path) -> Result<String, String> {
 pub fn clean_text(text: &str, patterns: &OCRPatterns) -> String {
     let mut current_text = text.to_string();
 
+    // Normalizar variantes corruptas/mal codificadas de "días" procedentes del extractor PDF (MuPDF):
+    // e.g. "DĂ-as", "dă-as", "DÃ-as", "dã-as", "DÃas", "dãas", "Dãías", "dãías", etc.
+    let dias_replacements = [
+        ("DĂ-as", "dias"),
+        ("dă-as", "dias"),
+        ("DÃ-as", "dias"),
+        ("dã-as", "dias"),
+        ("DÃas", "dias"),
+        ("dãas", "dias"),
+        ("Dãías", "dias"),
+        ("dãías", "dias"),
+        ("DÂ-as", "dias"),
+        ("dâ-as", "dias"),
+    ];
+    for (from, to) in dias_replacements {
+        current_text = current_text.replace(from, to);
+    }
+    current_text = patterns.clean_replace_dias.replace_all(&current_text, "dias").into_owned();
+
     let mut last_nss_start = 0;
     let mut has_employees = false;
     let mut safe_cutoff = 0;
@@ -332,9 +351,6 @@ pub fn clean_text(text: &str, patterns: &OCRPatterns) -> String {
         }
     }
 
-    current_text = current_text.replace("dã-as", "dias");
-    current_text = current_text.replace("dãías", "dias");
-
     let res = patterns
         .clean_remove_floating_colons
         .replace_all(&current_text, "");
@@ -361,10 +377,14 @@ mod tests {
     #[test]
     fn test_clean_text_normalizations() {
         let patterns = crate::cedulas::regex_expressions::initialize_patterns().unwrap();
-        let sample = "dã-as trabajados   5  : \n  1,234.56";
+        let sample = "dã-as trabajados   5  : \n  1,234.56\nFolio de Registro de Obra: C0701031 DĂ-as 14\nFolio de Registro de Obra: C0701034 DÃ-as 17";
         let cleaned = clean_text(sample, &patterns);
         assert!(!cleaned.contains("dã-as"));
+        assert!(!cleaned.contains("DĂ-as"));
+        assert!(!cleaned.contains("DÃ-as"));
         assert!(!cleaned.contains(","));
+        assert!(cleaned.contains("dias 14"));
+        assert!(cleaned.contains("dias 17"));
     }
 }
 

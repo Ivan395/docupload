@@ -25,6 +25,7 @@ pub struct OCRPatterns {
     pub employee_data: Regex,
     pub employee_fechas: Regex,
     pub employee_registro_obras: Regex,
+    pub clean_replace_dias: Regex,
     pub clean_remove_spaces: Regex,
     pub clean_remove_commas: Regex,
     pub clean_remove_unnecesary_date: Regex,
@@ -117,8 +118,10 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
     let employee_fechas =
         Regex::new(r"(?m)(?P<clave>^\w+)[ \t]+(?P<fecha>\d{2}/\d{2}/\d{4})[\n]?$")?;
     let employee_registro_obras = Regex::new(
-        r"(?m)registro[\.\t ]*de[\.\t ]*obra[s]?[:]?[\.\t ]*(?P<registro_obra>\w+)[\t ]+d[ií]as[:\.\t ]*(?P<dias_registro_obra>\d+)",
+        r"(?im)(?:folio[\.\t ]*de[\.\t ]*)?registro[\.\t ]*de[\.\t ]*obra[s]?[:]?[\.\t ]*(?P<registro_obra>[a-z0-9_-]+)[\t ]+(?:d\S*as|dias|d[ií]as|d[ií]?)[:\.\t ]*(?P<dias_registro_obra>\d+)",
     )?;
+
+    let clean_replace_dias = Regex::new(r"(?i)\bd[\w\u{0080}-\u{024F}\-]*as\b")?;
 
     let clean_remove_spaces = Regex::new(r"(?m)[ ]+")?;
     let clean_remove_commas = Regex::new(r"(?m)[,]+")?;
@@ -131,7 +134,7 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
     )?;
 
     let employee_nss = Regex::new(r"\d{2}-\d{2}-\d{2}-\d{4}-\d")?;
-    let employee_dias_cutoff = Regex::new(r"(?i)d[íi]as:\s*\d+")?;
+    let employee_dias_cutoff = Regex::new(r"(?i)\b(?:d\S*as|dias|d[íi]as)[:\s]*\d+")?;
 
     Ok(OCRPatterns {
         column_names,
@@ -154,6 +157,7 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
         employee_data,
         employee_fechas,
         employee_registro_obras,
+        clean_replace_dias,
         clean_remove_spaces,
         clean_remove_commas,
         clean_remove_unnecesary_date,
