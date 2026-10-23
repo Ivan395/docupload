@@ -194,6 +194,7 @@ export component RegistrosPatronalesView inherits Rectangle {
             background: #ffffff;
             border-width: 1px;
             border-color: #e2e8f0;
+            clip: true;
 
             VerticalLayout {
                 padding: 16px;
@@ -221,6 +222,7 @@ export component RegistrosPatronalesView inherits Rectangle {
 
                 // Filas de la Tabla
                 ScrollView {
+                    content-width: self.width;
                     vertical-stretch: 1;
 
                     VerticalLayout {
@@ -594,6 +596,7 @@ export component RegistrosPatronalesView inherits Rectangle {
 
                 // Formulario Scrollable
                 ScrollView {
+                    content-width: self.width;
                     vertical-stretch: 1;
 
                     VerticalLayout {

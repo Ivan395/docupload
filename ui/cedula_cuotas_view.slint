@@ -5,6 +5,7 @@ export component CedulaCuotasView inherits Rectangle {
     background: #f4f6fa;
 
     ScrollView {
+        content-width: self.width;
         VerticalLayout {
             padding: 24px;
             spacing: 20px;
@@ -470,6 +471,7 @@ export component CedulaCuotasView inherits Rectangle {
                             clip: true;
 
                             ScrollView {
+                                content-width: self.width;
                                 VerticalLayout {
                                     padding: 0px;
                                     spacing: 0px;
@@ -992,6 +994,7 @@ export component CedulaCuotasView inherits Rectangle {
 
                                 // Contenedor con Scroll para las filas
                                 ScrollView {
+                                    content-width: self.width;
                                     height: 440px;
 
                                     VerticalLayout {
@@ -1791,6 +1794,7 @@ export component CedulaCuotasView inherits Rectangle {
                         border-color: #f1f5f9;
 
                         ScrollView {
+                            content-width: self.width;
                             VerticalLayout {
                                 padding: 6px;
                                 spacing: 8px;
@@ -1991,6 +1995,7 @@ export component CedulaCuotasView inherits Rectangle {
                             VerticalLayout {
                                 padding: 8px;
                                 ScrollView {
+                                    content-width: self.width;
                                     Text {
                                         text: AppData.cedulas_duplicate_files_msg;
                                         font-size: 11px;
