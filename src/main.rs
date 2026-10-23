@@ -1846,6 +1846,7 @@ fn handle_cedulas_upload_and_inspect(
         ).unwrap_or_default();
 
         // 2. Extraer metadatos de archivos existentes (ruta normalizada y SHA-256)
+        #[allow(dead_code)]
         struct ExistingFileMeta {
             rel_path: String,
             full_sha256: String,
@@ -1867,18 +1868,15 @@ fn handle_cedulas_upload_and_inspect(
         }
 
         // 3. Consultar estado en PostgreSQL para esta revisión específica
-        let mut db_existing_liq_count = 0i64;
-        if let Some(ref pool) = pool_clone {
-            if let Ok(mut client) = pool.get() {
-                if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
-                    if let Ok(row) = client.query_one(
-                        "SELECT COUNT(*) FROM public.liquidaciones WHERE id_revision = $1",
-                        &[&rev_uuid],
-                    ) {
-                        db_existing_liq_count = row.get(0);
-                    }
-                }
-            }
+        let mut _db_existing_liq_count = 0i64;
+        if let Some(ref pool) = pool_clone
+            && let Ok(mut client) = pool.get()
+            && let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id)
+            && let Ok(row) = client.query_one(
+                "SELECT COUNT(*) FROM public.liquidaciones WHERE id_revision = $1",
+                &[&rev_uuid],
+            ) {
+            _db_existing_liq_count = row.get(0);
         }
 
         // 4. Procesar archivos: Estandarizar nombre 'Nombre Cliente__Registro Patronal__Mes__Anio.pdf',
