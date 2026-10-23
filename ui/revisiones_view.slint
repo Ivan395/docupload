@@ -134,6 +134,33 @@ export component RevisionesView inherits Rectangle {
                 alignment: center;
 
 
+                // Botón Cargar Cédulas de Cuotas
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: btn_load_cedulas_rev.has-hover ? #1d4ed8 : #1e40af;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 8px;
+                        alignment: center;
+                        Text { text: "📑"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Cargar Cedulas de Cuotas";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_load_cedulas_rev := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.cargar_cedulas_from_revision(); }
+                    }
+                }
+
                 // Botón + Nueva Revisión (F7)
                 Rectangle {
                     height: 38px;
@@ -463,17 +490,51 @@ export component RevisionesView inherits Rectangle {
                 }
             }
 
-            // Orden indicador
+            // Control de Ordenamiento Multi-Criterio (Folio, Nombre, Fechas, ASC/DESC)
             HorizontalLayout {
-                spacing: 6px;
+                spacing: 8px;
                 alignment: center;
-                Text { text: "⇅"; font-size: 12px; color: #64748b; vertical-alignment: center; }
-                Text {
-                    text: "Orden: Fecha de Creación (Desc)";
-                    font-size: 11px;
-                    font-weight: 700;
-                    color: #64748b;
-                    vertical-alignment: center;
+                cross-axis-alignment: center;
+
+                Text { text: "⇅ Ordenar por:"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+
+                cb_sort_rev := ComboBox {
+                    width: 215px;
+                    height: 32px;
+                    model: AppData.revisiones_sort_options;
+                    current-value <=> AppData.revisiones_sort_field;
+                    selected(val) => {
+                        AppLogic.sort_revisiones(val, AppData.revisiones_sort_asc);
+                    }
+                }
+
+                Rectangle {
+                    width: 80px;
+                    height: 32px;
+                    border-radius: 6px;
+                    background: btn_sort_rev_dir.has-hover ? #e0e7ff : #f8fafc;
+                    border-width: 1px;
+                    border-color: #cbd5e1;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        cross-axis-alignment: center;
+                        Text {
+                            text: AppData.revisiones_sort_asc ? "▲ ASC" : "▼ DESC";
+                            font-size: 11px;
+                            font-weight: 800;
+                            color: #1e3a8a;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_sort_rev_dir := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            AppData.revisiones_sort_asc = !AppData.revisiones_sort_asc;
+                            AppLogic.sort_revisiones(AppData.revisiones_sort_field, AppData.revisiones_sort_asc);
+                        }
+                    }
                 }
             }
         }
@@ -915,372 +976,459 @@ export component RevisionesView inherits Rectangle {
     // ==========================================
     // MODAL: NUEVA / EDITAR REVISIÓN
     // ==========================================
+    // MODAL: NUEVA / EDITAR REVISIÓN
+    // ==========================================
     if AppData.show_revision_modal : Rectangle {
         background: #00000077;
         width: 100%;
         height: 100%;
 
-        Rectangle {
-            width: 640px;
-            height: 490px;
-            border-radius: 12px;
-            background: #ffffff;
+        // Bloqueador de clics hacia el fondo
+        TouchArea { }
+
+        rev_modal_scope := FocusScope {
+            width: Math.min(parent.width - 40px, 660px);
+            height: Math.min(parent.height - 40px, 540px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
 
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-
-                // Header Modal
-                HorizontalLayout {
-                    alignment: space-between;
-
-                    VerticalLayout {
-                        spacing: 2px;
-                        Text {
-                            text: AppData.revision_form_is_editing ? "Editar Revisión Patronal IMSS" : "Nueva Revisión Patronal IMSS";
-                            font-size: 15px;
-                            font-weight: 800;
-                            color: #0f172a;
-                        }
-                        Text {
-                            text: "Expediente de aclaración, seguimiento de plazos legales y prórrogas.";
-                            font-size: 11px;
-                            color: #64748b;
-                        }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    AppLogic.close_revision_dialog();
+                    return EventResult.accept;
+                }
+                // Focus Trap: Tab cicla estrictamente por todos los controles del modal
+                if event.text == Key.Tab {
+                    if btn_cancel_rev_box.has-focus {
+                        btn_submit_rev_box.focus();
+                        return EventResult.accept;
                     }
-
-                    Rectangle {
-                        width: 26px;
-                        height: 26px;
-                        border-radius: 13px;
-                        background: btn_close_rev.has-hover ? #fee2e2 : #f1f5f9;
-                        Text {
-                            text: "✕";
-                            font-size: 12px;
-                            font-weight: 800;
-                            color: btn_close_rev.has-hover ? #b91c1c : #64748b;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        btn_close_rev := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { AppLogic.close_revision_dialog(); }
-                        }
+                    if btn_submit_rev_box.has-focus {
+                        input_rev_nombre.focus();
+                        return EventResult.accept;
                     }
                 }
+                // Focus Trap reverso (Shift+Tab)
+                if event.text == Key.Backtab {
+                    if input_rev_nombre.has-focus {
+                        btn_submit_rev_box.focus();
+                        return EventResult.accept;
+                    }
+                    if btn_submit_rev_box.has-focus {
+                        btn_cancel_rev_box.focus();
+                        return EventResult.accept;
+                    }
+                }
+                EventResult.reject
+            }
 
-                Rectangle { height: 1px; background: #e2e8f0; }
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                border-radius: 12px;
+                background: #ffffff;
 
-                // Form Scrollable
-                ScrollView {
-                    content-width: self.width;
-                    vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
 
-                    VerticalLayout {
-                        spacing: 8px;
+                    // Header Modal
+                    HorizontalLayout {
+                        alignment: space-between;
 
-                        // Campo: Nombre de la Revisión
                         VerticalLayout {
                             spacing: 2px;
-                            Text { text: "Nombre del Expediente / Revisión *"; font-size: 10px; font-weight: 700; color: #334155; }
-                            LineEdit {
-                                text <=> AppData.rev_form_nombre;
-                                placeholder-text: "Ej. Revisión Ordinaria Ejercicio Fiscal 2023 - Obra Insurgentes";
+                            Text {
+                                text: AppData.revision_form_is_editing ? "Editar Revisión Patronal IMSS" : "Nueva Revisión Patronal IMSS";
+                                font-size: 15px;
+                                font-weight: 800;
+                                color: #0f172a;
+                            }
+                            Text {
+                                text: "Expediente de aclaración, seguimiento de plazos legales y prórrogas.";
+                                font-size: 11px;
+                                color: #64748b;
                             }
                         }
 
-                        // Línea 2: Folio IMSS + Concepto Diferencia
-                        HorizontalLayout {
-                            spacing: 10px;
-
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Folio IMSS (Opcional)"; font-size: 10px; font-weight: 700; color: #334155; }
-                                LineEdit {
-                                    text <=> AppData.rev_form_folio;
-                                    placeholder-text: "Ej. REV-IMSS-2023-0891 (Opcional)";
-                                }
+                        Rectangle {
+                            width: 26px;
+                            height: 26px;
+                            border-radius: 13px;
+                            background: btn_close_rev.has-hover ? #fee2e2 : #f1f5f9;
+                            Text {
+                                text: "✕";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: btn_close_rev.has-hover ? #b91c1c : #64748b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
                             }
-
-                            VerticalLayout {
-                                horizontal-stretch: 2;
-                                spacing: 2px;
-                                Text { text: "Concepto de Diferencia"; font-size: 10px; font-weight: 700; color: #334155; }
-                                ComboBox {
-                                    model: AppData.conceptos_combo;
-                                    current-value <=> AppData.rev_form_concepto_val;
-                                }
+                            btn_close_rev := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.close_revision_dialog(); }
                             }
                         }
+                    }
 
-                        // Línea 3: Estatus + Estatus IMSS
-                        HorizontalLayout {
-                            spacing: 10px;
+                    Rectangle { height: 1px; background: #e2e8f0; }
 
+                    // Form Scrollable
+                    ScrollView {
+                        content-width: self.width;
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 8px;
+
+                            // Campo: Nombre de la Revisión
                             VerticalLayout {
-                                horizontal-stretch: 1;
                                 spacing: 2px;
-                                Text { text: "Estatus de la Revisión"; font-size: 10px; font-weight: 700; color: #334155; }
-                                ComboBox {
-                                    model: AppData.estatus_combo;
-                                    current-value <=> AppData.rev_form_estatus_val;
+                                Text { text: "Nombre del Expediente / Revisión *"; font-size: 10px; font-weight: 700; color: #334155; }
+                                input_rev_nombre := LineEdit {
+                                    text <=> AppData.rev_form_nombre;
+                                    placeholder-text: "Ej. Revisión Ordinaria Ejercicio Fiscal 2023 - Obra Insurgentes";
+                                    accepted => { input_rev_folio.focus(); }
                                 }
                             }
 
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Estatus Dictamen IMSS"; font-size: 10px; font-weight: 700; color: #334155; }
-                                ComboBox {
-                                    model: AppData.estatus_imss_combo;
-                                    current-value <=> AppData.rev_form_estatus_imss_val;
+                            // Línea 2: Folio IMSS + Concepto Diferencia
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Folio IMSS (Opcional)"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    input_rev_folio := LineEdit {
+                                        text <=> AppData.rev_form_folio;
+                                        placeholder-text: "Ej. REV-IMSS-2023-0891 (Opcional)";
+                                        accepted => { dp_rev_ent_imss.focus(); }
+                                    }
                                 }
-                            }
-                        }
 
-                        Rectangle { height: 1px; background: #f1f5f9; }
-
-                        // Título de Sección: Fechas de Cumplimiento
-                        Text { text: "Calendario de Términos y Plazos Legales (DD/MM/YYYY):"; font-size: 10px; font-weight: 800; color: #1e3a8a; }
-
-                        // 1. Fila 1: Fecha Entrega IMSS & Fecha Máx Aprobación IMSS (Auto +15 días hábiles L-V)
-                        HorizontalLayout {
-                            spacing: 10px;
-
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Fecha Entrega IMSS"; font-size: 10px; font-weight: 700; color: #475569; }
-                                DatePickerField {
-                                    date-val <=> AppData.rev_form_fecha_entrega_imss;
-                                    placeholder-text: "DD/MM/YYYY (ej. 15/10/2023)";
-                                    enabled: true;
-                                    date-changed(val) => {
-                                        AppLogic.on_fecha_entrega_imss_changed(val);
+                                VerticalLayout {
+                                    horizontal-stretch: 2;
+                                    spacing: 2px;
+                                    Text { text: "Concepto de Diferencia"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    ComboBox {
+                                        model: AppData.conceptos_combo;
+                                        current-value <=> AppData.rev_form_concepto_val;
                                     }
                                 }
                             }
 
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Fecha Máx Aprobación IMSS (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
-                                DatePickerField {
-                                    date-val <=> AppData.rev_form_fecha_max_aprobacion_imss;
-                                    placeholder-text: "Cálculo automático (+15 días hábiles L-V)";
-                                    enabled: false;
-                                    label-badge: "+15 días hábiles";
+                            // Línea 3: Estatus + Estatus IMSS
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Estatus de la Revisión"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    ComboBox {
+                                        model: AppData.estatus_combo;
+                                        current-value <=> AppData.rev_form_estatus_val;
+                                    }
                                 }
-                            }
-                        }
 
-                        // 2. Fila 2: Fecha Aprobación IMSS & Fecha Máx Entrega Revisión (Auto +40 días)
-                        HorizontalLayout {
-                            spacing: 10px;
-
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Fecha Aprobación IMSS"; font-size: 10px; font-weight: 700; color: #475569; }
-                                DatePickerField {
-                                    date-val <=> AppData.rev_form_fecha_aprobacion_imss;
-                                    placeholder-text: "DD/MM/YYYY (opcional si pendiente)";
-                                    enabled: true;
-                                    date-changed(val) => {
-                                        AppLogic.on_fecha_aprobacion_imss_changed(val);
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Estatus Dictamen IMSS"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    ComboBox {
+                                        model: AppData.estatus_imss_combo;
+                                        current-value <=> AppData.rev_form_estatus_imss_val;
                                     }
                                 }
                             }
 
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Fecha Máx Entrega Revisión (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
-                                DatePickerField {
-                                    date-val <=> AppData.rev_form_fecha_max_entrega_rev;
-                                    placeholder-text: "Cálculo automático (+40 días hábiles post-aprobación)";
-                                    enabled: false;
-                                    label-badge: "+40 días hábiles";
+                            Rectangle { height: 1px; background: #f1f5f9; }
+
+                            // Título de Sección: Fechas de Cumplimiento
+                            Text { text: "Calendario de Términos y Plazos Legales (DD/MM/YYYY):"; font-size: 10px; font-weight: 800; color: #1e3a8a; }
+
+                            // 1. Fila 1: Fecha Entrega IMSS & Fecha Máx Aprobación IMSS (Auto +15 días hábiles L-V)
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fecha Entrega IMSS"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    dp_rev_ent_imss := DatePickerField {
+                                        date-val <=> AppData.rev_form_fecha_entrega_imss;
+                                        placeholder-text: "DD/MM/YYYY (ej. 15/10/2023)";
+                                        enabled: true;
+                                        date-changed(val) => {
+                                            AppLogic.on_fecha_entrega_imss_changed(val);
+                                        }
+                                        accepted => { dp_rev_aprob_imss.focus(); }
+                                    }
                                 }
-                            }
-                        }
 
-                        // 3. Fila 3: Fecha Entrega Revisión & Fecha Máx Entrega IMSS (Auto +120 días)
-                        HorizontalLayout {
-                            spacing: 10px;
-
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Fecha Entrega Revisión"; font-size: 10px; font-weight: 700; color: #475569; }
-                                DatePickerField {
-                                    date-val <=> AppData.rev_form_fecha_entrega_rev;
-                                    placeholder-text: "DD/MM/YYYY (ej. 01/10/2023)";
-                                    enabled: true;
-                                    date-changed(val) => {
-                                        AppLogic.on_fecha_entrega_rev_changed(val);
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fecha Máx Aprobación IMSS (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    DatePickerField {
+                                        date-val <=> AppData.rev_form_fecha_max_aprobacion_imss;
+                                        placeholder-text: "Cálculo automático (+15 días hábiles L-V)";
+                                        enabled: false;
+                                        label-badge: "+15 días hábiles";
                                     }
                                 }
                             }
 
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Fecha Máx Entrega IMSS (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
-                                DatePickerField {
-                                    date-val <=> AppData.rev_form_fecha_max_entrega_imss;
-                                    placeholder-text: "Cálculo automático (+120 días post-entrega)";
-                                    enabled: false;
-                                    label-badge: "+120 días";
+                            // 2. Fila 2: Fecha Aprobación IMSS & Fecha Máx Entrega Revisión (Auto +40 días)
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fecha Aprobación IMSS"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    dp_rev_aprob_imss := DatePickerField {
+                                        date-val <=> AppData.rev_form_fecha_aprobacion_imss;
+                                        placeholder-text: "DD/MM/YYYY (opcional si pendiente)";
+                                        enabled: true;
+                                        date-changed(val) => {
+                                            AppLogic.on_fecha_aprobacion_imss_changed(val);
+                                        }
+                                        accepted => { dp_rev_ent_rev.focus(); }
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fecha Máx Entrega Revisión (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    DatePickerField {
+                                        date-val <=> AppData.rev_form_fecha_max_entrega_rev;
+                                        placeholder-text: "Cálculo automático (+40 días hábiles post-aprobación)";
+                                        enabled: false;
+                                        label-badge: "+40 días hábiles";
+                                    }
+                                }
+                            }
+
+                            // 3. Fila 3: Fecha Entrega Revisión & Fecha Máx Entrega IMSS (Auto +120 días)
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fecha Entrega Revisión"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    dp_rev_ent_rev := DatePickerField {
+                                        date-val <=> AppData.rev_form_fecha_entrega_rev;
+                                        placeholder-text: "DD/MM/YYYY (ej. 01/10/2023)";
+                                        enabled: true;
+                                        date-changed(val) => {
+                                            AppLogic.on_fecha_entrega_rev_changed(val);
+                                        }
+                                        accepted => { btn_submit_rev_box.focus(); }
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fecha Máx Entrega IMSS (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    DatePickerField {
+                                        date-val <=> AppData.rev_form_fecha_max_entrega_imss;
+                                        placeholder-text: "Cálculo automático (+120 días post-entrega)";
+                                        enabled: false;
+                                        label-badge: "+120 días";
+                                    }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: #f1f5f9; }
+
+                            // Sección: Prórrogas
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Trámite Extraordinario de Prórroga:"; font-size: 10px; font-weight: 800; color: #1e3a8a; vertical-alignment: center; }
+
+                                // Toggle Button ¿Pidió Prórroga?
+                                Rectangle {
+                                    height: 26px;
+                                    border-radius: 6px;
+                                    background: AppData.rev_form_pidio_prorroga ? #ede9fe : #f1f5f9;
+                                    border-width: 1px;
+                                    border-color: AppData.rev_form_pidio_prorroga ? #c4b5fd : #cbd5e1;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 4px;
+                                        alignment: center;
+                                        Text {
+                                            text: AppData.rev_form_pidio_prorroga ? "✓ Pidió Prórroga: SÍ" : "✕ Pidió Prórroga: NO";
+                                            font-size: 10px;
+                                            font-weight: 800;
+                                            color: AppData.rev_form_pidio_prorroga ? #6d28d9 : #64748b;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppLogic.toggle_rev_prorroga(); }
+                                    }
+                                }
+                            }
+
+                            if AppData.rev_form_pidio_prorroga : HorizontalLayout {
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fecha Aprobación Prórroga"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    DatePickerField {
+                                        date-val <=> AppData.rev_form_fecha_aprobacion_prorroga;
+                                        placeholder-text: "DD/MM/YYYY (ej. 05/11/2023)";
+                                        enabled: true;
+                                        date-changed(val) => {
+                                            AppLogic.on_fecha_aprobacion_prorroga_changed(val);
+                                        }
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fecha Entrega con Prórroga (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    DatePickerField {
+                                        date-val <=> AppData.rev_form_fecha_entrega_con_prorroga;
+                                        placeholder-text: "Cálculo automático (+10 días hábiles post-fecha máxima)";
+                                        enabled: false;
+                                        label-badge: "+10 días hábiles";
+                                    }
                                 }
                             }
                         }
+                    }
 
-                        Rectangle { height: 1px; background: #f1f5f9; }
+                    Rectangle { height: 1px; background: #e2e8f0; }
 
-                        // Sección: Prórrogas
-                        HorizontalLayout {
-                            alignment: space-between;
-                            Text { text: "Trámite Extraordinario de Prórroga:"; font-size: 10px; font-weight: 800; color: #1e3a8a; vertical-alignment: center; }
+                    // Footer Modal
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 10px;
 
-                            // Toggle Button ¿Pidió Prórroga?
+                        // Botón Cancelar
+                        btn_cancel_rev_box := FocusScope {
+                            height: 32px;
+                            key-pressed(event) => {
+                                if (event.text == Key.Return) {
+                                    AppLogic.close_revision_dialog();
+                                    return accept;
+                                }
+                                reject
+                            }
+
                             Rectangle {
-                                height: 26px;
+                                width: 100%;
+                                height: 100%;
                                 border-radius: 6px;
-                                background: AppData.rev_form_pidio_prorroga ? #ede9fe : #f1f5f9;
+                                background: btn_cancel_rev.has-hover ? #f1f5f9 : (btn_cancel_rev_box.has-focus ? #e2e8f0 : #ffffff);
                                 border-width: 1px;
-                                border-color: AppData.rev_form_pidio_prorroga ? #c4b5fd : #cbd5e1;
+                                border-color: btn_cancel_rev_box.has-focus ? #2563eb : #cbd5e1;
 
                                 HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    spacing: 4px;
+                                    padding-left: 14px;
+                                    padding-right: 14px;
                                     alignment: center;
                                     Text {
-                                        text: AppData.rev_form_pidio_prorroga ? "✓ Pidió Prórroga: SÍ" : "✕ Pidió Prórroga: NO";
-                                        font-size: 10px;
-                                        font-weight: 800;
-                                        color: AppData.rev_form_pidio_prorroga ? #6d28d9 : #64748b;
+                                        text: "Cancelar";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #475569;
                                         vertical-alignment: center;
                                     }
                                 }
 
-                                TouchArea {
+                                btn_cancel_rev := TouchArea {
                                     mouse-cursor: pointer;
-                                    clicked => { AppLogic.toggle_rev_prorroga(); }
+                                    clicked => { AppLogic.close_revision_dialog(); }
                                 }
                             }
                         }
 
-                        if AppData.rev_form_pidio_prorroga : HorizontalLayout {
-                            spacing: 10px;
+                        // Botón Guardar
+                        btn_submit_rev_box := FocusScope {
+                            height: 32px;
+                            key-pressed(event) => {
+                                if (event.text == Key.Return) {
+                                    AppLogic.submit_revision(
+                                        AppData.rev_form_id,
+                                        AppData.rev_form_nombre,
+                                        AppData.rev_form_folio,
+                                        AppData.rev_form_concepto_val,
+                                        AppData.rev_form_estatus_val,
+                                        AppData.rev_form_estatus_imss_val,
+                                        AppData.rev_form_fecha_entrega_rev,
+                                        AppData.rev_form_fecha_max_entrega_rev,
+                                        AppData.rev_form_fecha_entrega_imss,
+                                        AppData.rev_form_fecha_max_entrega_imss,
+                                        AppData.rev_form_fecha_aprobacion_imss,
+                                        AppData.rev_form_pidio_prorroga,
+                                        AppData.rev_form_fecha_aprobacion_prorroga,
+                                        AppData.rev_form_fecha_entrega_con_prorroga
+                                    );
+                                    return accept;
+                                }
+                                reject
+                            }
 
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Fecha Aprobación Prórroga"; font-size: 10px; font-weight: 700; color: #475569; }
-                                DatePickerField {
-                                    date-val <=> AppData.rev_form_fecha_aprobacion_prorroga;
-                                    placeholder-text: "DD/MM/YYYY (ej. 05/11/2023)";
-                                    enabled: true;
-                                    date-changed(val) => {
-                                        AppLogic.on_fecha_aprobacion_prorroga_changed(val);
+                            Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                border-radius: 6px;
+                                background: btn_submit_rev.has-hover ? #1d4ed8 : (btn_submit_rev_box.has-focus ? #1e40af : #1e3a8a);
+                                border-width: btn_submit_rev_box.has-focus ? 2px : 0px;
+                                border-color: #93c5fd;
+
+                                HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    spacing: 6px;
+                                    alignment: center;
+                                    Text { text: "💾"; font-size: 11px; vertical-alignment: center; }
+                                    Text {
+                                        text: AppData.revision_form_is_editing ? "Actualizar Revisión" : "Guardar Revisión";
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
                                     }
                                 }
-                            }
 
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                spacing: 2px;
-                                Text { text: "Fecha Entrega con Prórroga (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
-                                DatePickerField {
-                                    date-val <=> AppData.rev_form_fecha_entrega_con_prorroga;
-                                    placeholder-text: "Cálculo automático (+10 días hábiles post-fecha máxima)";
-                                    enabled: false;
-                                    label-badge: "+10 días hábiles";
+                                btn_submit_rev := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        AppLogic.submit_revision(
+                                            AppData.rev_form_id,
+                                            AppData.rev_form_nombre,
+                                            AppData.rev_form_folio,
+                                            AppData.rev_form_concepto_val,
+                                            AppData.rev_form_estatus_val,
+                                            AppData.rev_form_estatus_imss_val,
+                                            AppData.rev_form_fecha_entrega_rev,
+                                            AppData.rev_form_fecha_max_entrega_rev,
+                                            AppData.rev_form_fecha_entrega_imss,
+                                            AppData.rev_form_fecha_max_entrega_imss,
+                                            AppData.rev_form_fecha_aprobacion_imss,
+                                            AppData.rev_form_pidio_prorroga,
+                                            AppData.rev_form_fecha_aprobacion_prorroga,
+                                            AppData.rev_form_fecha_entrega_con_prorroga
+                                        );
+                                    }
                                 }
-                            }
-                        }
-                    }
-                }
-
-                Rectangle { height: 1px; background: #e2e8f0; }
-
-                // Footer Modal
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 10px;
-
-                    // Botón Cancelar
-                    Rectangle {
-                        height: 32px;
-                        border-radius: 6px;
-                        background: btn_cancel_rev.has-hover ? #f1f5f9 : #ffffff;
-                        border-width: 1px;
-                        border-color: #cbd5e1;
-
-                        HorizontalLayout {
-                            padding-left: 14px;
-                            padding-right: 14px;
-                            alignment: center;
-                            Text {
-                                text: "Cancelar";
-                                font-size: 11px;
-                                font-weight: 700;
-                                color: #475569;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        btn_cancel_rev := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { AppLogic.close_revision_dialog(); }
-                        }
-                    }
-
-                    // Botón Guardar
-                    Rectangle {
-                        height: 32px;
-                        border-radius: 6px;
-                        background: btn_submit_rev.has-hover ? #1d4ed8 : #1e3a8a;
-
-                        HorizontalLayout {
-                            padding-left: 16px;
-                            padding-right: 16px;
-                            spacing: 6px;
-                            alignment: center;
-                            Text { text: "💾"; font-size: 11px; vertical-alignment: center; }
-                            Text {
-                                text: AppData.revision_form_is_editing ? "Actualizar Revisión" : "Guardar Revisión";
-                                font-size: 11px;
-                                font-weight: 700;
-                                color: #ffffff;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        btn_submit_rev := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => {
-                                AppLogic.submit_revision(
-                                    AppData.rev_form_id,
-                                    AppData.rev_form_nombre,
-                                    AppData.rev_form_folio,
-                                    AppData.rev_form_concepto_val,
-                                    AppData.rev_form_estatus_val,
-                                    AppData.rev_form_estatus_imss_val,
-                                    AppData.rev_form_fecha_entrega_rev,
-                                    AppData.rev_form_fecha_max_entrega_rev,
-                                    AppData.rev_form_fecha_entrega_imss,
-                                    AppData.rev_form_fecha_max_entrega_imss,
-                                    AppData.rev_form_fecha_aprobacion_imss,
-                                    AppData.rev_form_pidio_prorroga,
-                                    AppData.rev_form_fecha_aprobacion_prorroga,
-                                    AppData.rev_form_fecha_entrega_con_prorroga
-                                );
                             }
                         }
                     }

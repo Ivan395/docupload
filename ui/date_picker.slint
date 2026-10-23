@@ -2,11 +2,14 @@ import { Button, LineEdit } from "std-widgets.slint";
 import { DateHelper, DateDmy } from "models.slint";
 
 export component DatePickerField inherits Rectangle {
+    forward-focus: input_field;
+    out property <bool> has-focus: input_field.has-focus;
     in-out property <string> date-val: "";
     in property <string> placeholder-text: "DD/MM/YYYY";
     in property <bool> enabled: true;
     in property <string> label-badge: "";
     callback date-changed(string);
+    callback accepted();
 
     height: 36px;
     border-radius: 6px;
@@ -295,22 +298,40 @@ export component DatePickerField inherits Rectangle {
         }
     }
 
-    if root.enabled : HorizontalLayout {
-        padding-left: 0px;
-        padding-right: 0px;
-        spacing: 4px;
+    HorizontalLayout {
+        padding-left: root.enabled ? 0px : 10px;
+        padding-right: root.enabled ? 0px : 8px;
+        spacing: root.enabled ? 4px : 6px;
 
         input_field := LineEdit {
-            horizontal-stretch: 1;
+            visible: root.enabled;
+            horizontal-stretch: root.enabled ? 1 : 0;
             text <=> root.date-val;
             placeholder-text: root.placeholder-text;
             font-size: 11px;
             edited(text) => {
-                root.date-changed(text);
+                let prev_len = root.date-val.character-count;
+                let cur_len = text.character-count;
+                if cur_len < prev_len {
+                    root.date-val = text;
+                    root.date-changed(text);
+                } else {
+                    let masked = DateHelper.format_date_mask(text);
+                    let should_update = masked != text;
+                    root.date-val = masked;
+                    if should_update {
+                        let new_len = root.date-val.character-count;
+                        input_field.set-selection-offsets(new_len, new_len);
+                    }
+                    root.date-changed(root.date-val);
+                }
+            }
+            accepted => {
+                root.accepted();
             }
         }
 
-        cal_box := Rectangle {
+        if root.enabled : Rectangle {
             width: 32px;
             height: 32px;
             border-radius: 6px;
@@ -345,14 +366,8 @@ export component DatePickerField inherits Rectangle {
                 }
             }
         }
-    }
 
-    if !root.enabled : HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 8px;
-        spacing: 6px;
-
-        Text {
+        if !root.enabled : Text {
             horizontal-stretch: 1;
             text: root.date-val != "" ? root.date-val : root.placeholder-text;
             font-size: 11px;
@@ -361,7 +376,7 @@ export component DatePickerField inherits Rectangle {
             vertical-alignment: center;
         }
 
-        if root.label-badge != "" : Rectangle {
+        if !root.enabled && root.label-badge != "" : Rectangle {
             height: 18px;
             border-radius: 4px;
             background: #e2e8f0;
@@ -379,7 +394,7 @@ export component DatePickerField inherits Rectangle {
             }
         }
 
-        Rectangle {
+        if !root.enabled : Rectangle {
             width: 20px;
             height: 20px;
             y: (parent.height - self.height) / 2;

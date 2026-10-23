@@ -60,6 +60,7 @@ pub struct BusinessContext {
     pub subdelegacion: Option<String>,
     pub anios_filtro: BTreeSet<i16>,
     pub meses_filtro: BTreeSet<String>,
+    pub periodos_filtro: BTreeSet<String>,
 }
 
 pub fn resolve_business_context(
@@ -262,7 +263,7 @@ fn update_cliente_and_rp_from_biz(
 fn get_obra_filter_dates(
     tx: &mut Transaction,
     id_revision: Uuid,
-) -> (BTreeSet<i16>, BTreeSet<String>) {
+) -> (BTreeSet<i16>, BTreeSet<String>, BTreeSet<String>) {
     let obra_dates = tx.query(
         r#"
         SELECT ro.fecha_inicio, ro.fecha_fin
@@ -275,10 +276,12 @@ fn get_obra_filter_dates(
 
     let mut anios_filtro: BTreeSet<i16> = BTreeSet::new();
     let mut meses_filtro: BTreeSet<String> = BTreeSet::new();
+    let mut periodos_filtro: BTreeSet<String> = BTreeSet::new();
 
     for od in obra_dates {
         let f_ini: Option<chrono::NaiveDate> = od.get(0);
         let f_fin: Option<chrono::NaiveDate> = od.get(1);
+        let f_fin = f_fin.or(f_ini);
         if let (Some(fi), Some(ff)) = (f_ini, f_fin) {
             let mut curr_y = fi.year();
             let mut curr_m = fi.month();
@@ -289,7 +292,11 @@ fn get_obra_filter_dates(
                 anios_filtro.insert(curr_y as i16);
                 let m_nom = month_num_to_name(curr_m);
                 if !m_nom.is_empty() {
-                    meses_filtro.insert(m_nom.to_string());
+                    let m_upper = m_nom.to_uppercase();
+                    meses_filtro.insert(m_upper.clone());
+                    periodos_filtro.insert(format!("{}/{}", m_upper, curr_y));
+                    periodos_filtro.insert(format!("{:02}/{}", curr_m, curr_y));
+                    periodos_filtro.insert(format!("{}/{}", curr_m, curr_y));
                 }
                 curr_m += 1;
                 if curr_m > 12 {
@@ -299,7 +306,7 @@ fn get_obra_filter_dates(
             }
         }
     }
-    (anios_filtro, meses_filtro)
+    (anios_filtro, meses_filtro, periodos_filtro)
 }
 
 pub fn resolve_business_context_for_revision(
@@ -333,7 +340,7 @@ pub fn resolve_business_context_for_revision(
             // Actualizar datos patronales y del cliente con los campos extraídos de las cédulas
             update_cliente_and_rp_from_biz(tx, id_cliente, id_registro_patronal, biz)?;
 
-            let (anios_filtro, meses_filtro) = get_obra_filter_dates(tx, id_revision);
+            let (anios_filtro, meses_filtro, periodos_filtro) = get_obra_filter_dates(tx, id_revision);
 
             return Ok(BusinessContext {
                 id_cliente,
@@ -344,6 +351,7 @@ pub fn resolve_business_context_for_revision(
                 subdelegacion: subdel_upper,
                 anios_filtro,
                 meses_filtro,
+                periodos_filtro,
             });
         }
     }
@@ -516,7 +524,7 @@ pub fn resolve_business_context_for_revision(
         }
     };
 
-    let (anios_filtro, meses_filtro) = get_obra_filter_dates(tx, id_revision);
+    let (anios_filtro, meses_filtro, periodos_filtro) = get_obra_filter_dates(tx, id_revision);
 
     Ok(BusinessContext {
         id_cliente,
@@ -527,6 +535,7 @@ pub fn resolve_business_context_for_revision(
         subdelegacion: subdel_upper,
         anios_filtro,
         meses_filtro,
+        periodos_filtro,
     })
 }
 
@@ -885,13 +894,16 @@ pub fn save_single_cedula_employee_tx(
     )?;
     liquidaciones_count += 1;
 
-    // Determinar si la liquidación cae dentro de los años y meses de las obras de la revisión (pre-calculado en contexto)
-    let should_mirror = if ctx.anios_filtro.is_empty() || ctx.meses_filtro.is_empty() {
+    // Determinar si la liquidación cae dentro de los periodos exactos (Mes/Año) de las obras de la revisión
+    let should_mirror = if ctx.periodos_filtro.is_empty() {
         true
     } else {
         let mes_check = mes_norm.trim().to_uppercase();
         let anio_check = anio_norm;
-        ctx.anios_filtro.contains(&anio_check) && ctx.meses_filtro.contains(&mes_check)
+        let p1 = format!("{}/{}", mes_check, anio_check);
+        let p2 = format!("{:02}/{}", crate::cedulas::business::month_to_num(&mes_check), anio_check);
+        let p3 = format!("{}/{}", crate::cedulas::business::month_to_num(&mes_check), anio_check);
+        ctx.periodos_filtro.contains(&p1) || ctx.periodos_filtro.contains(&p2) || ctx.periodos_filtro.contains(&p3)
     };
 
     let id_rep_liq_opt = if should_mirror {

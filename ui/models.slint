@@ -8,6 +8,7 @@ export struct DateDmy {
 export global DateHelper {
     pure callback parse_date(string) -> DateDmy;
     pure callback get_today() -> DateDmy;
+    pure callback format_date_mask(string) -> string;
 }
 
 export struct FileItemData {
@@ -772,8 +773,21 @@ export global AppData {
     in-out property <string> obras_superficie_total_str: "0.00 m²";
     in-out property <string> obras_monto_total_str: "$0.00 MXN";
 
+    in-out property <string> revisiones_sort_field: "Fecha de Creación";
+    in-out property <bool> revisiones_sort_asc: false;
+    in-out property <[string]> revisiones_sort_options: [
+        "Fecha de Creación",
+        "Folio IMSS",
+        "Nombre",
+        "Fecha Entrega Revisión",
+        "Fecha Entrega IMSS",
+        "Fecha Aprobación IMSS",
+        "Fecha Con Prórroga",
+        "Multi-Criterio (Todos a la vez)"
+    ];
+
     // Combos para Revisiones y Obras
-    in-out property <[string]> estatus_combo: ["-- Seleccionar Estatus --", "INICIADA", "EN REVISIÓN", "EN PROCESO DE ACLARACIÓN", "APROBADA POR EMPRESA", "RECHAZADA", "FINALIZADA"];
+    in-out property <[string]> estatus_combo: ["-- Seleccionar Estatus --", "En Revision", "INICIADA", "EN REVISIÓN", "EN PROCESO DE ACLARACIÓN", "APROBADA POR EMPRESA", "RECHAZADA", "FINALIZADA"];
     in-out property <[string]> estatus_imss_combo: ["-- Seleccionar Estatus IMSS --", "PENDIENTE DICTAMEN IMSS", "EN ESTUDIO", "APROBADA POR IMSS", "RECHAZADA POR IMSS"];
     in-out property <[string]> conceptos_combo: ["-- Seleccionar Concepto Diferencia --"];
     in-out property <[string]> clases_obra_combo: ["-- Seleccionar Clase --", "PRIVADA", "PUBLICA", "MIXTA"];
@@ -785,7 +799,7 @@ export global AppData {
     in-out property <string> rev_form_nombre: "";
     in-out property <string> rev_form_folio: "";
     in-out property <string> rev_form_concepto_val: "-- Seleccionar Concepto Diferencia --";
-    in-out property <string> rev_form_estatus_val: "EN PROCESO DE ACLARACIÓN";
+    in-out property <string> rev_form_estatus_val: "En Revision";
     in-out property <string> rev_form_estatus_imss_val: "PENDIENTE DICTAMEN IMSS";
     in-out property <string> rev_form_fecha_entrega_rev: "";
     in-out property <string> rev_form_fecha_max_entrega_rev: "";
@@ -1385,6 +1399,8 @@ export global AppLogic {
     callback navigate_view(int);
     callback toggle_sidebar();
     callback set_sidebar_open(bool);
+    callback cargar_cedulas_from_revision();
+    callback open_resumen_cedulas_from_obras();
     callback open_cedulas_from_obras();
     callback close_cedulas_success_modal();
     callback close_cedulas_duplicate_modal();
@@ -1439,6 +1455,7 @@ export global AppLogic {
     callback confirm_delete_revision(string);
     callback filter_revisiones_search();
     callback filter_revisiones_tab(int);
+    callback sort_revisiones(string, bool);
     callback toggle_rev_prorroga();
     callback on_fecha_entrega_imss_changed(string);
     callback on_fecha_aprobacion_imss_changed(string);

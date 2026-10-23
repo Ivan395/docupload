@@ -1536,15 +1536,20 @@ export component ReporteLiquidacionesView inherits Rectangle {
             // Área Principal de la Tabla
             VerticalLayout {
                 horizontal-stretch: 1;
+                min-width: 0px;
                 spacing: 10px;
 
         // Pestañas de Navegación por Mes (Empleados por Mes) con scroll horizontal independiente
         if AppData.reporte_periodo_options.length > 1 : Rectangle {
             height: 40px;
             clip: true;
+            horizontal-stretch: 1;
+            min-width: 0px;
 
             ScrollView {
                 vertical-stretch: 0;
+                horizontal-stretch: 1;
+                min-width: 0px;
                 content-height: self.height;
 
                 HorizontalLayout {
@@ -1592,6 +1597,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
         // 5. Tabla Principal con Encabezados Fijos en Scroll Vertical y sincronizados en Horizontal
         Rectangle {
             height: 580px;
+            horizontal-stretch: 1;
+            min-width: 0px;
             border-radius: 8px;
             background: #ffffff;
             border-width: 1px;
@@ -1601,12 +1608,16 @@ export component ReporteLiquidacionesView inherits Rectangle {
             VerticalLayout {
                 spacing: 0px;
                 padding: 0px;
+                horizontal-stretch: 1;
+                min-width: 0px;
 
                 // Encabezados Fijos
                 Rectangle {
                     height: 40px;
                     background: #f1f5f9;
                     clip: true;
+                    horizontal-stretch: 1;
+                    min-width: 0px;
 
                     Rectangle {
                         x: table_scroll.content-x;
@@ -1683,6 +1694,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 // Cuerpo de la tabla con scroll vertical y horizontal
                 table_scroll := ScrollView {
                     vertical-stretch: 1;
+                    horizontal-stretch: 1;
+                    min-width: 0px;
                     content-width: 3405px;
                     content-height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + (AppData.reporte_expanded_row_id != "" ? 75px : 0px) + 20px) : 180px;
 
@@ -2603,6 +2616,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
         // Right Side Drawer (Panel Lateral Desplegable No Modal)
         if AppData.reporte_drawer_obras_open : Rectangle {
             width: 350px;
+            horizontal-stretch: 0;
             background: #ffffff;
             border-radius: 8px;
             border-width: 1px;

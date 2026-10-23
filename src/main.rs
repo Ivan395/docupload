@@ -715,6 +715,32 @@ fn load_empleados_ui(ui: &MainWindow, pool: &DbPool, client_id: &str) {
     app_data.set_empleados_list(ModelRc::new(VecModel::from(models)));
 }
 
+fn sort_revisiones_vec(list: &mut [RevisionData], field: &str, asc: bool) {
+    list.sort_by(|a, b| {
+        let ord = match field {
+            "Folio IMSS" => a.folio.to_lowercase().cmp(&b.folio.to_lowercase()),
+            "Nombre" => a.nombre.to_lowercase().cmp(&b.nombre.to_lowercase()),
+            "Fecha Entrega Revisión" => a.fecha_entrega_revision.cmp(&b.fecha_entrega_revision),
+            "Fecha Entrega IMSS" => a.fecha_entrega_imss.cmp(&b.fecha_entrega_imss),
+            "Fecha Aprobación IMSS" => a.fecha_aprobacion_imss.cmp(&b.fecha_aprobacion_imss),
+            "Fecha Con Prórroga" => a.fecha_entrega_con_prorroga.cmp(&b.fecha_entrega_con_prorroga),
+            "Multi-Criterio (Todos a la vez)" => {
+                a.folio.to_lowercase().cmp(&b.folio.to_lowercase())
+                    .then_with(|| a.nombre.to_lowercase().cmp(&b.nombre.to_lowercase()))
+                    .then_with(|| a.fecha_entrega_revision.cmp(&b.fecha_entrega_revision))
+                    .then_with(|| a.fecha_entrega_imss.cmp(&b.fecha_entrega_imss))
+                    .then_with(|| a.created_at_str.cmp(&b.created_at_str))
+            }
+            _ => a.created_at_str.cmp(&b.created_at_str),
+        };
+        if asc {
+            ord
+        } else {
+            ord.reverse()
+        }
+    });
+}
+
 fn load_revisiones_ui(ui: &MainWindow, pool: &DbPool, rp_id: &str) {
     if rp_id.trim().is_empty() {
         ui.global::<AppData>().set_revisiones_list(ModelRc::new(VecModel::default()));
@@ -756,7 +782,7 @@ fn load_revisiones_ui(ui: &MainWindow, pool: &DbPool, rp_id: &str) {
     app_data.set_revisiones_vigentes_count(vigentes_count);
     app_data.set_revisiones_prorrogas_count(prorrogas_count);
 
-    let filtered: Vec<RevisionData> = revs
+    let mut filtered: Vec<RevisionData> = revs
         .into_iter()
         .filter(|r| {
             match filter_tab {
@@ -822,6 +848,10 @@ fn load_revisiones_ui(ui: &MainWindow, pool: &DbPool, rp_id: &str) {
             }
         })
         .collect();
+
+    let sort_field = app_data.get_revisiones_sort_field().to_string();
+    let sort_asc = app_data.get_revisiones_sort_asc();
+    sort_revisiones_vec(&mut filtered, &sort_field, sort_asc);
 
     app_data.set_revisiones_list(ModelRc::new(VecModel::from(filtered)));
 }
@@ -1816,6 +1846,7 @@ fn handle_cedulas_upload_and_inspect(
         ).unwrap_or_default();
 
         // 2. Extraer metadatos de archivos existentes (ruta normalizada y SHA-256)
+        #[allow(dead_code)]
         struct ExistingFileMeta {
             rel_path: String,
             full_sha256: String,
@@ -1837,23 +1868,21 @@ fn handle_cedulas_upload_and_inspect(
         }
 
         // 3. Consultar estado en PostgreSQL para esta revisión específica
-        let mut db_existing_liq_count = 0i64;
-        if let Some(ref pool) = pool_clone {
-            if let Ok(mut client) = pool.get() {
-                if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
-                    if let Ok(row) = client.query_one(
-                        "SELECT COUNT(*) FROM public.liquidaciones WHERE id_revision = $1",
-                        &[&rev_uuid],
-                    ) {
-                        db_existing_liq_count = row.get(0);
-                    }
-                }
-            }
+        let mut _db_existing_liq_count = 0i64;
+        if let Some(ref pool) = pool_clone
+            && let Ok(mut client) = pool.get()
+            && let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id)
+            && let Ok(row) = client.query_one(
+                "SELECT COUNT(*) FROM public.liquidaciones WHERE id_revision = $1",
+                &[&rev_uuid],
+            ) {
+            _db_existing_liq_count = row.get(0);
         }
 
-        // 4. Comparar archivos ingresados contra existentes en esta revisión para detectar duplicados
-        let mut duplicates: Vec<(String, String)> = Vec::new(); // (incoming_file, matched_existing_file)
-        let mut new_items: Vec<crate::archives::PreparedUploadItem> = Vec::new();
+        // 4. Procesar archivos: Estandarizar nombre 'Nombre Cliente__Registro Patronal__Mes__Anio.pdf',
+        //    estructurar físicamente en Año/Mes, y aplicar lógica de sobreescritura si el mes ya existe.
+        let mut overwritten_count = 0;
+        let mut new_count = 0;
 
         for item in items {
             let data = match fs::read(&item.local_path) {
@@ -1861,60 +1890,78 @@ fn handle_cedulas_upload_and_inspect(
                 Err(_) => continue,
             };
 
-            let mut h = Sha256::new();
-            h.update(&data);
-            let item_hash = format!("{:x}", h.finalize());
-            let norm_item_rel = item.rel_path.trim_start_matches('/').replace('\\', "/");
-
-            let matched = existing_metas.iter().find(|ex| {
-                let norm_ex = ex.rel_path.trim_start_matches('/').replace('\\', "/");
-                norm_ex.eq_ignore_ascii_case(&norm_item_rel)
-                    || (!ex.full_sha256.is_empty() && ex.full_sha256 == item_hash)
-            });
-
-            if let Some(ex) = matched {
-                duplicates.push((item.rel_path.clone(), ex.rel_path.clone()));
-            } else {
-                // Agregar temporalmente a existing_metas para evitar duplicados idénticos dentro del mismo lote
-                existing_metas.push(ExistingFileMeta {
-                    rel_path: item.rel_path.clone(),
-                    full_sha256: item_hash,
-                });
-                new_items.push(item);
-            }
-        }
-
-        let dup_count = duplicates.len();
-        let new_count = new_items.len();
-
-        // 5. Subir únicamente los archivos nuevos a RustFS bajo la revisión específica
-        for item in &new_items {
-            if let Ok(data) = fs::read(&item.local_path) {
-                if data.len() < 50 {
-                    let _ = crate::rustfs::upload_file_to_rustfs(
-                        &c_nom,
-                        &r_reg,
-                        &rev_nom,
-                        "Cedulas_de_cuotas",
-                        &format!("Trash/{}", item.rel_path),
-                        &data,
-                    );
-                    continue;
-                }
-                if let Err(e) = crate::rustfs::upload_file_to_rustfs(
+            if data.len() < 50 {
+                let _ = crate::rustfs::upload_file_to_rustfs(
                     &c_nom,
                     &r_reg,
                     &rev_nom,
                     "Cedulas_de_cuotas",
-                    &item.rel_path,
+                    &format!("Trash/{}", item.rel_path),
                     &data,
-                ) {
-                    log::error!("Error subiendo archivo {} a RustFS: {}", item.rel_path, e);
+                );
+                continue;
+            }
+
+            // Extraer metadatos para nombre estricto y estructura Año/Mes
+            let (std_fname, anio_str, mes_str, _, _) = crate::cedulas::view_logic::extract_cedula_standard_naming(
+                &item.local_path,
+                &c_nom,
+                &r_reg,
+            );
+            let structured_rel_path = format!("{}/{}/{}", anio_str, mes_str, std_fname);
+
+            // Verificar si el mes ya existe previamente
+            let existing_match = existing_cards.iter().find(|ex| {
+                let fn_up = ex.filename.to_uppercase();
+                fn_up.contains(&format!("__{}__{}.PDF", mes_str, anio_str))
+                    || fn_up.contains(&format!("{}/{}", anio_str, mes_str))
+                    || fn_up == std_fname.to_uppercase()
+            });
+
+            if let Some(old_card) = existing_match {
+                overwritten_count += 1;
+                log::info!("Sobreescribiendo cédula previa del mes {}/{}: {}", mes_str, anio_str, old_card.filename);
+
+                // 1. Mover el archivo físico anterior a la papelera (trash)
+                let _ = crate::rustfs::move_file_to_trash(
+                    &c_nom,
+                    &r_reg,
+                    &rev_nom,
+                    "Cedulas_de_cuotas",
+                    &old_card.filename,
+                );
+
+                // Limpiar caché local
+                let old_local = cache_dir.join("cedulas_de_cuotas").join(&old_card.filename);
+                let _ = std::fs::remove_file(&old_local);
+
+                // 2. En PostgreSQL, eliminar (DELETE) la información correspondiente a ese mes específico
+                if let Some(ref pool) = pool_clone {
+                    if let Ok(mut client) = pool.get() {
+                        let anio_num: i32 = anio_str.parse().unwrap_or(2026);
+                        if let Err(e) = crate::cedulas::view_logic::delete_cedula_for_month(&mut client, &revision_id, &mes_str, anio_num) {
+                            log::error!("Error al eliminar liquidaciones de mes {} en BD: {}", mes_str, e);
+                        }
+                    }
                 }
+            } else {
+                new_count += 1;
+            }
+
+            // 3. Guardar el nuevo archivo en la ruta correspondiente (Año/Mes)
+            if let Err(e) = crate::rustfs::upload_file_to_rustfs(
+                &c_nom,
+                &r_reg,
+                &rev_nom,
+                "Cedulas_de_cuotas",
+                &structured_rel_path,
+                &data,
+            ) {
+                log::error!("Error subiendo archivo {} a RustFS: {}", structured_rel_path, e);
             }
         }
 
-        // 6. Sincronizar y recargar la lista activa desde RustFS
+        // 5. Sincronizar y recargar la lista activa desde RustFS
         let mut final_cards = crate::rustfs::sync_and_load_cedulas_view_files(
             &c_nom,
             &r_reg,
@@ -1937,27 +1984,7 @@ fn handle_cedulas_upload_and_inspect(
             }
         }
 
-        // 7. Generar mensaje detallado de archivos duplicados si aplica
-        let duplicate_msg_text = if !duplicates.is_empty() {
-            let mut lines = Vec::new();
-            for (dup_in, dup_ex) in &duplicates {
-                let norm_in = dup_in.trim_start_matches('/').replace('\\', "/");
-                let norm_ex = dup_ex.trim_start_matches('/').replace('\\', "/");
-                if norm_in.eq_ignore_ascii_case(&norm_ex) {
-                    lines.push(format!("• {}\n  ↳ Ya se encuentra almacenado en RustFS y registrado en la base de datos.", dup_in));
-                } else {
-                    lines.push(format!("• {}\n  ↳ Contiene la misma información que el archivo ya registrado:\n    \"{}\"", dup_in, dup_ex));
-                }
-            }
-            if db_existing_liq_count > 0 {
-                lines.push(format!("\nℹ️ La base de datos PostgreSQL ya contiene {} liquidaciones registradas para esta revisión.", db_existing_liq_count));
-            }
-            lines.join("\n\n")
-        } else {
-            String::new()
-        };
-
-        // 8. Actualizar la interfaz Slint
+        // 6. Actualizar la interfaz Slint
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut sess = session_clone.lock().unwrap();
@@ -1968,18 +1995,10 @@ fn handle_cedulas_upload_and_inspect(
                     ui.global::<AppData>().set_cedulas_view_state(1);
                 }
 
-                if !duplicate_msg_text.is_empty() {
-                    let app_data = ui.global::<AppData>();
-                    app_data.set_cedulas_duplicate_files_msg(duplicate_msg_text.into());
-                    app_data.set_show_cedulas_duplicate_modal(true);
-
-                    if new_count > 0 {
-                        show_toast_message(&ui, &format!("Se cargaron {} archivos nuevos. Se omitieron {} duplicados.", new_count, dup_count));
-                    } else {
-                        show_toast_message(&ui, "Los archivos seleccionados ya contienen su información en las bases de datos.");
-                    }
+                if overwritten_count > 0 {
+                    show_toast_message(&ui, &format!("Se estructuraron {} cédula(s) nueva(s) y se sobreescribieron {} de meses existentes (movidas a papelera).", new_count, overwritten_count));
                 } else {
-                    show_toast_message(&ui, &format!("Se estructuraron y cargaron {} cédula(s) en RustFS.", new_count));
+                    show_toast_message(&ui, &format!("Se estructuraron y cargaron {} cédula(s) en carpetas Año/Mes en RustFS.", new_count));
                 }
             }
         });
@@ -2767,6 +2786,55 @@ fn main() -> Result<(), slint::PlatformError> {
                 year: today.year() as i32,
                 valid: true,
             }
+        });
+
+        date_helper.on_format_date_mask(|s| {
+            let s_str = s.trim();
+            if s_str.is_empty() {
+                return slint::SharedString::default();
+            }
+            let digits: String = s_str.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                return slint::SharedString::default();
+            }
+            let res = match digits.len() {
+                0 => String::new(),
+                1 => {
+                    if s_str.ends_with('/') {
+                        format!("0{}/", digits)
+                    } else {
+                        digits
+                    }
+                }
+                2 => {
+                    if s_str.ends_with('/') || s_str.len() == 2 {
+                        format!("{}/", digits)
+                    } else {
+                        digits
+                    }
+                }
+                3 => {
+                    if s_str.ends_with('/') && s_str.len() == 4 {
+                        format!("{}/0{}/", &digits[0..2], &digits[2..3])
+                    } else {
+                        format!("{}/{}", &digits[0..2], &digits[2..3])
+                    }
+                }
+                4 => {
+                    if s_str.ends_with('/') || s_str.len() <= 5 {
+                        format!("{}/{}/", &digits[0..2], &digits[2..4])
+                    } else {
+                        format!("{}/{}", &digits[0..2], &digits[2..4])
+                    }
+                }
+                5..=8 => {
+                    format!("{}/{}/{}", &digits[0..2], &digits[2..4], &digits[4..])
+                }
+                _ => {
+                    format!("{}/{}/{}", &digits[0..2], &digits[2..4], &digits[4..8])
+                }
+            };
+            res.into()
         });
     }
 
@@ -3968,6 +4036,22 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        app_logic.on_sort_revisiones(move |field, asc| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                app_data.set_revisiones_sort_field(field);
+                app_data.set_revisiones_sort_asc(asc);
+                if let Some(ref pool) = pool_clone {
+                    let rp_id = app_data.get_selected_rp_id().to_string();
+                    load_revisiones_ui(&ui, pool, &rp_id);
+                }
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
         app_logic.on_open_new_revision_dialog(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
@@ -3986,7 +4070,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_rev_form_nombre("".into());
                 app_data.set_rev_form_folio("".into());
                 app_data.set_rev_form_concepto_val("-- Seleccionar Concepto Diferencia --".into());
-                app_data.set_rev_form_estatus_val("EN PROCESO DE ACLARACIÓN".into());
+                app_data.set_rev_form_estatus_val("En Revision".into());
                 app_data.set_rev_form_estatus_imss_val("PENDIENTE DICTAMEN IMSS".into());
                 app_data.set_rev_form_fecha_entrega_rev("".into());
                 app_data.set_rev_form_fecha_max_entrega_rev("".into());
@@ -4166,7 +4250,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     };
 
                     let est_id = if !estatus_val.trim().is_empty() && !estatus_val.starts_with("--") {
-                        client.query_one("SELECT id FROM public.estatus WHERE nombre = $1 LIMIT 1", &[&estatus_val.trim()])
+                        let clean_est = estatus_val.trim();
+                        client.query_one("SELECT id FROM public.estatus WHERE UPPER(TRIM(nombre)) = UPPER(TRIM($1)) OR UPPER(TRIM(REPLACE(nombre, 'Ó', 'O'))) = UPPER(TRIM(REPLACE($1, 'Ó', 'O'))) LIMIT 1", &[&clean_est])
+                            .or_else(|_| client.query_one("SELECT id FROM public.estatus WHERE UPPER(nombre) LIKE '%' || UPPER($1) || '%' LIMIT 1", &[&clean_est]))
                             .map(|r| { let u: uuid::Uuid = r.get(0); u.to_string() }).ok()
                     } else {
                         None
@@ -6241,12 +6327,46 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // 51. Abrir Cédula de Cuotas desde Registros de Obras
+    // 51a. Cargar Cédulas de Cuotas desde Revisiones
     {
         let ui_weak = main_window.as_weak();
         let cedulas_session_clone = cedulas_session.clone();
         let pool_clone = db_pool.clone();
-        app_logic.on_open_cedulas_from_obras(move || {
+        app_logic.on_cargar_cedulas_from_revision(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            let app_data = ui.global::<AppData>();
+            let rev_id = app_data.get_selected_revision_id().to_string();
+            if rev_id.trim().is_empty() {
+                show_toast_message(&ui, "Seleccione una revisión para cargar cédulas de cuotas.");
+                return;
+            }
+
+            let files = rfd::FileDialog::new()
+                .set_title("Seleccionar Cédulas SUA (PDF, ZIP o RAR)")
+                .add_filter("Cédulas y Paquetes", &["pdf", "zip", "rar"])
+                .add_filter("Cédulas SUA (PDF)", &["pdf"])
+                .add_filter("Comprimidos (ZIP/RAR)", &["zip", "rar"])
+                .pick_files();
+
+            if let Some(paths) = files {
+                app_data.set_cedulas_access_allowed(true);
+                app_data.set_current_view(6);
+                handle_cedulas_upload_and_inspect(
+                    ui_weak.clone(),
+                    cedulas_session_clone.clone(),
+                    pool_clone.clone(),
+                    paths,
+                );
+            }
+        });
+    }
+
+    // 51b. Resumen Cédulas de Cuotas desde Registros de Obras (renderiza resumen sin diálogo de carga)
+    {
+        let ui_weak = main_window.as_weak();
+        let cedulas_session_clone = cedulas_session.clone();
+        let pool_clone = db_pool.clone();
+        let render_resumen = move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 app_data.set_cedulas_access_allowed(true);
@@ -6268,7 +6388,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             }
-        });
+        };
+        app_logic.on_open_resumen_cedulas_from_obras(render_resumen.clone());
+        app_logic.on_open_cedulas_from_obras(render_resumen);
     }
 
     // 52. Cerrar modal de empresa no coincide en Cédulas
