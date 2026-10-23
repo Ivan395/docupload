@@ -530,7 +530,10 @@ pub fn sync_and_load_cedulas_view_files(
         if local_path.exists() {
             let mut card = inspect_cedula_file(&local_path);
             card.id = local_path.to_string_lossy().to_string();
-            card.filename = f.filename.clone();
+            card.filename = Path::new(&f.filename)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or(f.filename.clone());
             cards.push(card);
         }
     }

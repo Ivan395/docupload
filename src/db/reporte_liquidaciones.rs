@@ -49,7 +49,9 @@ pub fn compute_guarderias_kpis(
         let mut emps_count = 0;
         let mut rp_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for r in rows {
-            if r.id_registro_obra == Some(o.id) {
+            if r.id_registro_obra == Some(o.id)
+                || (!r.obra_numero.trim().is_empty() && r.obra_numero.trim().eq_ignore_ascii_case(o.numero.trim()))
+            {
                 total_gps_obra += r.gps;
                 emps_count += 1;
                 if !r.registro_patronal.trim().is_empty() {
@@ -349,29 +351,10 @@ pub fn sync_reportes_liquidaciones_for_revision(
 
     // 1. Obtener las claves exactas de periodo ("MES/AÑO") a partir de las fechas de las obras creadas por el usuario
     let period_keys_set = extract_period_keys_from_obras(&obras);
-    let has_date_filter = !period_keys_set.is_empty();
-    let period_keys_vec: Vec<String> = period_keys_set.into_iter().collect();
+    let _has_date_filter = !period_keys_set.is_empty();
+    let _period_keys_vec: Vec<String> = period_keys_set.into_iter().collect();
 
     let mut tx = client.transaction().map_err(|e| format!("Error iniciando transacción: {}", e))?;
-
-    if !has_date_filter {
-        // Regla: No mostrar empleados a ciegas si no hay obras creadas por el usuario con fechas válidas
-        let _ = tx.execute(
-            "DELETE FROM public.reportes_liquidaciones WHERE id_revision = $1",
-            &[&id_revision],
-        );
-        tx.commit().map_err(|e| format!("Error en commit de sincronización: {}", e))?;
-        return Ok(0);
-    }
-
-    let _ = tx.execute(
-        r#"
-        DELETE FROM public.reportes_liquidaciones
-        WHERE id_revision = $1
-          AND NOT ((UPPER(TRIM(mes_periodo)) || '/' || anio_periodo::text) = ANY($2))
-        "#,
-        &[&id_revision, &period_keys_vec],
-    );
 
     let valid_obras_rows = tx.query(
         r#"
@@ -397,65 +380,32 @@ pub fn sync_reportes_liquidaciones_for_revision(
         valid_obras_vec.push(oid);
     }
 
-    // Verificar en un solo paso rápido si hay registros pendientes por sincronizar
-    let (missing_liq, missing_det): (i64, i64) = if has_date_filter {
-        let r1 = tx.query_one(
-            r#"
-            SELECT 
-                (SELECT COUNT(*) FROM public.liquidaciones l
-                 LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
-                 WHERE l.id_revision = $1
-                   AND (UPPER(TRIM(l.mes_periodo)) || '/' || l.anio_periodo::text) = ANY($2)
-                   AND rl.id IS NULL)::bigint,
-                (SELECT COUNT(*) FROM public.reportes_liquidaciones rl
-                 LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
-                 WHERE rl.id_revision = $1 AND rdl.id IS NULL)::bigint
-            "#,
-            &[&id_revision, &period_keys_vec],
-        ).map_err(|e| format!("Error verificando sincronización: {}", e))?;
-        (r1.get(0), r1.get(1))
-    } else {
-        let r1 = tx.query_one(
-            r#"
-            SELECT 
-                (SELECT COUNT(*) FROM public.liquidaciones l
-                 LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
-                 WHERE l.id_revision = $1 AND rl.id IS NULL)::bigint,
-                (SELECT COUNT(*) FROM public.reportes_liquidaciones rl
-                 LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
-                 WHERE rl.id_revision = $1 AND rdl.id IS NULL)::bigint
-            "#,
-            &[&id_revision],
-        ).map_err(|e| format!("Error verificando sincronización: {}", e))?;
-        (r1.get(0), r1.get(1))
-    };
+    // Verificar si hay liquidaciones o detalles pendientes por sincronizar
+    let r1 = tx.query_one(
+        r#"
+        SELECT 
+            (SELECT COUNT(*) FROM public.liquidaciones l
+             LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
+             WHERE l.id_revision = $1 AND rl.id IS NULL)::bigint,
+            (SELECT COUNT(*) FROM public.reportes_liquidaciones rl
+             LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
+             WHERE rl.id_revision = $1 AND rdl.id IS NULL)::bigint
+        "#,
+        &[&id_revision],
+    ).map_err(|e| format!("Error verificando sincronización: {}", e))?;
+    let (missing_liq, missing_det): (i64, i64) = (r1.get(0), r1.get(1));
 
     if missing_liq > 0 {
-        if has_date_filter {
-            tx.execute(
-                r#"
-                INSERT INTO public.reportes_liquidaciones (id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo)
-                SELECT uuidv7(), l.id, l.id_revision, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
-                FROM public.liquidaciones l
-                LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
-                WHERE l.id_revision = $1
-                  AND (UPPER(TRIM(l.mes_periodo)) || '/' || l.anio_periodo::text) = ANY($2)
-                  AND rl.id IS NULL
-                "#,
-                &[&id_revision, &period_keys_vec],
-            ).map_err(|e| format!("Error insertando reportes_liquidaciones en lote: {}", e))?;
-        } else {
-            tx.execute(
-                r#"
-                INSERT INTO public.reportes_liquidaciones (id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo)
-                SELECT uuidv7(), l.id, l.id_revision, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
-                FROM public.liquidaciones l
-                LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
-                WHERE l.id_revision = $1 AND rl.id IS NULL
-                "#,
-                &[&id_revision],
-            ).map_err(|e| format!("Error insertando reportes_liquidaciones en lote: {}", e))?;
-        }
+        tx.execute(
+            r#"
+            INSERT INTO public.reportes_liquidaciones (id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo)
+            SELECT uuidv7(), l.id, l.id_revision, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
+            FROM public.liquidaciones l
+            LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
+            WHERE l.id_revision = $1 AND rl.id IS NULL
+            "#,
+            &[&id_revision],
+        ).map_err(|e| format!("Error insertando reportes_liquidaciones en lote: {}", e))?;
 
         let _ = tx.execute(
             r#"
@@ -1040,11 +990,11 @@ pub fn fetch_reporte_liquidaciones(
 
     // Extraer claves exactas de periodo ("MES/AÑO") analizados a partir de los registros de obra creados por el usuario
     let period_keys_set = extract_period_keys_from_obras(&obras);
-    let period_keys_vec: Vec<String> = period_keys_set.into_iter().collect();
+    let _period_keys_vec: Vec<String> = period_keys_set.into_iter().collect();
 
     let base_select = r#"
     SELECT 
-        rdl.id AS id_reporte_liq,
+        COALESCE(rdl.id, rl.id) AS id_reporte_liq,
         rl.id_liquidacion,
         e.id AS id_empleado,
         e.nombre AS nombre_trabajador,
@@ -1054,25 +1004,25 @@ pub fn fetch_reporte_liquidaciones(
         rp.registro AS registro_patronal,
         rl.mes_periodo,
         rl.anio_periodo,
-        rdl.dias AS dias_cedula,
+        COALESCE(rdl.dias, 0) AS dias_cedula,
         COALESCE(rdl.id_registro_obra, rvol.id_registro_obra) AS id_registro_obra,
         COALESCE(ro_det.numero, ro.numero, '') AS obra_numero,
         COALESCE(ro_det.tipo_obra, ro.tipo_obra, '') AS tipo_obra,
         COALESCE(rdl.dias_registro_obra, rvol.dias_registro_obra, 0) AS dias_obra,
-        rdl.cf,
-        rdl.exc_pat,
-        rdl.exc_obr,
-        rdl.pd_pat,
-        rdl.pd_obr,
-        rdl.gmp_pat,
-        rdl.gmp_obr,
-        rdl.rt,
-        rdl.iv_pat,
-        rdl.iv_obr,
-        rdl.gps,
-        rdl.patronal,
-        rdl.obrera,
-        rdl.subtotal AS subtotal_prorrateado,
+        COALESCE(rdl.cf, 0.0) AS cf,
+        COALESCE(rdl.exc_pat, 0.0) AS exc_pat,
+        COALESCE(rdl.exc_obr, 0.0) AS exc_obr,
+        COALESCE(rdl.pd_pat, 0.0) AS pd_pat,
+        COALESCE(rdl.pd_obr, 0.0) AS pd_obr,
+        COALESCE(rdl.gmp_pat, 0.0) AS gmp_pat,
+        COALESCE(rdl.gmp_obr, 0.0) AS gmp_obr,
+        COALESCE(rdl.rt, 0.0) AS rt,
+        COALESCE(rdl.iv_pat, 0.0) AS iv_pat,
+        COALESCE(rdl.iv_obr, 0.0) AS iv_obr,
+        COALESCE(rdl.gps, 0.0) AS gps,
+        COALESCE(rdl.patronal, 0.0) AS patronal,
+        COALESCE(rdl.obrera, 0.0) AS obrera,
+        COALESCE(rdl.subtotal, 0.0) AS subtotal_prorrateado,
         COALESCE(dl.cf, rdl.cf, 0.0) AS cf_orig,
         COALESCE(dl.exc_pat, rdl.exc_pat, 0.0) AS exc_pat_orig,
         COALESCE(dl.exc_obr, rdl.exc_obr, 0.0) AS exc_obr_orig,
@@ -1097,7 +1047,7 @@ pub fn fetch_reporte_liquidaciones(
         COALESCE(ro_det.creado_usuario, ro.creado_usuario, false) AS obra_creado_usuario,
         COALESCE(TRIM(e.pensionado), '') AS pensionado
     FROM public.reportes_liquidaciones AS rl
-    INNER JOIN public.reportes_detalles_liquidaciones AS rdl
+    LEFT JOIN public.reportes_detalles_liquidaciones AS rdl
         ON rl.id = rdl.id_reporte_liquidacion
     LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones AS rvol
         ON rl.id = rvol.id_reporte_liquidacion
@@ -1147,17 +1097,12 @@ pub fn fetch_reporte_liquidaciones(
             e.nombre ASC;
     "#;
 
-    let rows = if !period_keys_vec.is_empty() {
-        let sql = format!(
-            "{} WHERE rl.id_revision = $1 AND (UPPER(TRIM(rl.mes_periodo)) || '/' || rl.anio_periodo::text) = ANY($2) {}",
-            base_select, order_clause
-        );
-        client.query(&sql, &[&id_revision, &period_keys_vec])
-            .map_err(|e| format!("Error consultando filas filtradas de reportes_liquidaciones: {}", e))?
-    } else {
-        // Regla: No mostrar empleados a ciegas si no hay periodos coincidentes con obras creadas por el usuario.
-        return Ok(Vec::new());
-    };
+    let sql = format!(
+        "{} WHERE rl.id_revision = $1 {}",
+        base_select, order_clause
+    );
+    let rows = client.query(&sql, &[&id_revision])
+        .map_err(|e| format!("Error consultando filas de reportes_liquidaciones: {}", e))?;
 
     crate::app_logger::log_db_read(
         &[

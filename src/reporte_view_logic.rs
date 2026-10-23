@@ -837,10 +837,17 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
         filter_obras_labels.push(o.label.clone().into());
         batch_obras_labels.push(o.label.clone().into());
     }
-    app_data.set_reporte_obras_options(ModelRc::new(VecModel::from(obras_vec.clone())));
-    app_data.set_reporte_picker_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
-    app_data.set_reporte_obras_filter_labels(ModelRc::new(VecModel::from(filter_obras_labels)));
-    app_data.set_reporte_obras_batch_labels(ModelRc::new(VecModel::from(batch_obras_labels)));
+    let curr_filter_labels = app_data.get_reporte_obras_filter_labels();
+    let filter_labels_differ = curr_filter_labels.row_count() != filter_obras_labels.len()
+        || (0..filter_obras_labels.len()).any(|i| {
+            curr_filter_labels.row_data(i).map(|s| s != filter_obras_labels[i]).unwrap_or(true)
+        });
+    if filter_labels_differ {
+        app_data.set_reporte_obras_options(ModelRc::new(VecModel::from(obras_vec.clone())));
+        app_data.set_reporte_picker_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
+        app_data.set_reporte_obras_filter_labels(ModelRc::new(VecModel::from(filter_obras_labels)));
+        app_data.set_reporte_obras_batch_labels(ModelRc::new(VecModel::from(batch_obras_labels)));
+    }
 
     // 1.1 Obras creadas por el usuario para visualización rápida de vigencias y conteo de empleados
     let mut obras_usuario_vec = Vec::new();
@@ -1736,7 +1743,11 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     &format!("{}", idx),
                 );
                 let mut state = session_clone.lock().unwrap();
-                state.filter_obra_idx = idx as usize;
+                let target_idx = idx as usize;
+                if state.filter_obra_idx == target_idx {
+                    return;
+                }
+                state.filter_obra_idx = target_idx;
                 apply_reporte_filtering(&mut state);
                 render_reporte_ui(&ui, &state);
             }
@@ -4963,14 +4974,41 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     return;
                 }
 
-                let output_dir = std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join("output");
-                let _ = std::fs::create_dir_all(&output_dir);
+                let output_dir = {
+                    let default_dir = std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join("output");
+                    if std::fs::create_dir_all(&default_dir).is_ok() {
+                        default_dir
+                    } else {
+                        let user_base = std::env::var("USERPROFILE")
+                            .or_else(|_| std::env::var("HOME"))
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|_| std::env::temp_dir());
+                        let fallback_dir = user_base.join("Documents").join("FirmaFiscalACD_Output");
+                        let _ = std::fs::create_dir_all(&fallback_dir);
+                        if fallback_dir.exists() {
+                            fallback_dir
+                        } else {
+                            let temp_out = std::env::temp_dir().join("FirmaFiscalACD_Output");
+                            let _ = std::fs::create_dir_all(&temp_out);
+                            temp_out
+                        }
+                    }
+                };
 
                 let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                let clean_rev = state.revision_nombre.replace(['/', '\\', ' '], "_");
-                let filename = format!("Reporte_Liquidaciones_{}_{}.xlsx", clean_rev, timestamp);
+                let clean_rev: String = state.revision_nombre
+                    .chars()
+                    .map(|c| match c {
+                        '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' => '_',
+                        other if other.is_control() => '_',
+                        other => other,
+                    })
+                    .collect();
+                let clean_rev_trimmed = clean_rev.trim_matches('_');
+                let final_rev_tag = if clean_rev_trimmed.is_empty() { "REVISION" } else { clean_rev_trimmed };
+                let filename = format!("Reporte_Liquidaciones_{}_{}.xlsx", final_rev_tag, timestamp);
                 let out_file = output_dir.join(&filename);
 
                 let valid_user_obra_ids: HashSet<Uuid> = state

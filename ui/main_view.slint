@@ -41,6 +41,7 @@ export component MainWindow inherits Window {
         // 2. Contenedor Principal Derecho (TopBar + Vista Activa + BottomBar)
         VerticalLayout {
             horizontal-stretch: 1;
+            min-width: 0px;
             padding: 0px;
             spacing: 0px;
 
@@ -213,51 +214,71 @@ export component MainWindow inherits Window {
             // VISTA 1: Catálogo Maestro de Clientes (F2)
             if AppData.current_view == 1 : ClientesView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 2: Registros Patronales IMSS (F3)
             if AppData.current_view == 2 : RegistrosPatronalesView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 3: Revisiones Patronales IMSS (F4)
             if AppData.current_view == 3 : RevisionesView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 4: Registros de Obras (F5)
             if AppData.current_view == 4 : RegistrosObrasView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 5: Padrón de Empleados (F6)
             if AppData.current_view == 5 : EmpleadosView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 6: Cédula de Determinación de Cuotas SUA (F7)
             if AppData.current_view == 6 : CedulaCuotasView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 7: Reporte de Liquidaciones y Prorrateo por Obra (F8)
             if AppData.current_view == 7 : ReporteLiquidacionesView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 8: Calendario Fiscal & Revisiones Patronales IMSS (F9)
             if AppData.current_view == 8 : CalendarioView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 9: Reporte de Nóminas (F10)
             if AppData.current_view == 9 : NominasView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // VISTA 10: Carga y Procesamiento de Nóminas
             if AppData.current_view == 10 : NominasUploadView {
                 vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
             }
 
             // 3. Barra Inferior de Estado Global (BottomBar)

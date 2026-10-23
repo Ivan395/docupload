@@ -485,6 +485,98 @@ pub fn extract_cedula_pdf_postgres_filename(path: &Path, default_rp: &str) -> St
     }
 }
 
+/// Extrae periodo, cliente y registro patronal y genera el nombre estricto:
+/// 'Nombre Cliente__Registro Patronal__Mes__Anio.pdf'
+pub fn extract_cedula_standard_naming(
+    path: &Path,
+    default_cliente: &str,
+    default_rp: &str,
+) -> (String, String, String, String, String) {
+    let raw_text = extract_with_layout(path).unwrap_or_default();
+    let patterns = crate::cedulas::regex_expressions::initialize_patterns().ok();
+
+    let mut rp_found = None;
+    let mut mes_found = None;
+    let mut anio_found = None;
+    let mut cliente_found = None;
+
+    if !raw_text.is_empty() {
+        if crate::cedulas::ema::is_ema_document(&raw_text) {
+            if let Some(r) = crate::cedulas::ema::extract_ema_rp(&raw_text) {
+                rp_found = Some(r);
+            }
+            let (m_opt, y_opt) = crate::cedulas::ema::extract_ema_period(&raw_text);
+            if let (Some(m), Some(y)) = (m_opt, y_opt) {
+                let m_num = month_to_num(&m);
+                let valid_m = if (1..=12).contains(&m_num) { m_num } else { 1 };
+                mes_found = Some(month_num_to_name(valid_m).to_string());
+                anio_found = Some(y);
+            }
+        }
+
+        if let Some(ref patterns) = patterns {
+            let cleaned = clean_text(&raw_text.to_lowercase(), patterns);
+            if rp_found.is_none() {
+                if let Ok(Some(mat)) = patterns.business_registro_patronal.find(&cleaned) {
+                    let chunk = &cleaned[mat.start()..cleaned.len().min(mat.start() + 200)];
+                    if let Ok(Some(caps)) = patterns.business_registro_patronal.captures(chunk) {
+                        if let Some(m) = caps.name("registro_patronal") {
+                            let filtered: String = m.as_str().chars().filter(|c| c.is_alphanumeric()).collect();
+                            if !filtered.is_empty() {
+                                rp_found = Some(filtered.to_uppercase());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if mes_found.is_none() || anio_found.is_none() {
+                if let Ok(Some(caps)) = patterns.employee_periodo_proceso.captures(&cleaned) {
+                    if let Some(m) = caps.name("mes_periodo") {
+                        let num = month_to_num(m.as_str().trim());
+                        let valid_num = if (1..=12).contains(&num) { num } else { 1 };
+                        mes_found = Some(month_num_to_name(valid_num).to_string());
+                    }
+                    if let Some(y) = caps.name("anio_periodo") {
+                        anio_found = Some(y.as_str().trim().to_string());
+                    }
+                }
+            }
+
+            if let Ok(Some(caps)) = patterns.business_razon_social.captures(&cleaned) {
+                if let Some(rs) = caps.name("razon_social") {
+                    let clean_rs = rs.as_str().trim().to_uppercase();
+                    if !clean_rs.is_empty() {
+                        cliente_found = Some(clean_rs);
+                    }
+                }
+            }
+        }
+    }
+
+    let final_cliente = if !default_cliente.trim().is_empty() && default_cliente != "Todos los Clientes" {
+        default_cliente.trim().to_uppercase()
+    } else {
+        cliente_found.unwrap_or_else(|| "CLIENTE".to_string())
+    };
+
+    let final_rp = if !default_rp.trim().is_empty() && default_rp != "GENERAL" {
+        default_rp.trim().to_uppercase()
+    } else {
+        rp_found.unwrap_or_else(|| "00000000000".to_string())
+    };
+
+    let final_mes = mes_found.unwrap_or_else(|| "ENERO".to_string()).to_uppercase();
+    let final_anio = anio_found.unwrap_or_else(|| "2026".to_string());
+
+    let clean_c_name = final_cliente.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_").trim().to_string();
+    let clean_rp_name = final_rp.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_").trim().to_string();
+
+    let standard_filename = format!("{}__{}__{}__{}.pdf", clean_c_name, clean_rp_name, final_mes, final_anio);
+
+    (standard_filename, final_anio, final_mes, clean_c_name, clean_rp_name)
+}
+
 pub struct AuditAssignment {
     pub worker_id: String,
     pub obra_num: String,
@@ -1654,6 +1746,63 @@ pub fn delete_all_cedulas_for_revision(
         );
         Ok(n)
     }
+}
+
+/// Elimina los registros físicos y lógicos en PostgreSQL de una cédula de cuotas
+/// para un mes y año específicos dentro de una revisión (soporta sobreescritura limpia).
+pub fn delete_cedula_for_month(
+    client: &mut Client,
+    id_revision: &str,
+    mes_periodo: &str,
+    anio_periodo: i32,
+) -> Result<u64, String> {
+    let rev_uuid = Uuid::parse_str(id_revision).map_err(|e| format!("UUID de revisión inválido: {}", e))?;
+    let mes_clean = mes_periodo.trim().to_uppercase();
+
+    let _ = client.execute(
+        "DELETE FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion IN (
+            SELECT id FROM public.reportes_liquidaciones 
+            WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+        )",
+        &[&rev_uuid, &mes_clean, &anio_periodo],
+    );
+    let _ = client.execute(
+        "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion IN (
+            SELECT id FROM public.reportes_liquidaciones 
+            WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+        )",
+        &[&rev_uuid, &mes_clean, &anio_periodo],
+    );
+    let _ = client.execute(
+        "DELETE FROM public.reportes_liquidaciones 
+         WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3",
+        &[&rev_uuid, &mes_clean, &anio_periodo],
+    );
+
+    let _ = client.execute(
+        "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion IN (
+            SELECT id FROM public.liquidaciones 
+            WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+        )",
+        &[&rev_uuid, &mes_clean, &anio_periodo],
+    );
+    let _ = client.execute(
+        "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion IN (
+            SELECT id FROM public.liquidaciones 
+            WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+        )",
+        &[&rev_uuid, &mes_clean, &anio_periodo],
+    );
+    let n = client
+        .execute(
+            "DELETE FROM public.liquidaciones 
+             WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3",
+            &[&rev_uuid, &mes_clean, &anio_periodo],
+        )
+        .map_err(|e| format!("Error al borrar liquidación del periodo {}/{}: {}", mes_clean, anio_periodo, e))?;
+
+    log::info!("Eliminadas {} liquidaciones del mes {}/{} para la revisión {}", n, mes_clean, anio_periodo, id_revision);
+    Ok(n)
 }
 
 pub fn export_cedulas_comprehensive_excel(
