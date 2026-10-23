@@ -2799,7 +2799,13 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let res = match digits.len() {
                 0 => String::new(),
-                1 => digits,
+                1 => {
+                    if s_str.ends_with('/') {
+                        format!("0{}/", digits)
+                    } else {
+                        digits
+                    }
+                }
                 2 => {
                     if s_str.ends_with('/') || s_str.len() == 2 {
                         format!("{}/", digits)
@@ -2808,7 +2814,11 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
                 3 => {
-                    format!("{}/{}", &digits[0..2], &digits[2..3])
+                    if s_str.ends_with('/') && s_str.len() == 4 {
+                        format!("{}/0{}/", &digits[0..2], &digits[2..3])
+                    } else {
+                        format!("{}/{}", &digits[0..2], &digits[2..3])
+                    }
                 }
                 4 => {
                     if s_str.ends_with('/') || s_str.len() <= 5 {
@@ -6317,12 +6327,46 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // 51. Abrir Cédula de Cuotas desde Registros de Obras
+    // 51a. Cargar Cédulas de Cuotas desde Revisiones
     {
         let ui_weak = main_window.as_weak();
         let cedulas_session_clone = cedulas_session.clone();
         let pool_clone = db_pool.clone();
-        app_logic.on_open_cedulas_from_obras(move || {
+        app_logic.on_cargar_cedulas_from_revision(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            let app_data = ui.global::<AppData>();
+            let rev_id = app_data.get_selected_revision_id().to_string();
+            if rev_id.trim().is_empty() {
+                show_toast_message(&ui, "Seleccione una revisión para cargar cédulas de cuotas.");
+                return;
+            }
+
+            let files = rfd::FileDialog::new()
+                .set_title("Seleccionar Cédulas SUA (PDF, ZIP o RAR)")
+                .add_filter("Cédulas y Paquetes", &["pdf", "zip", "rar"])
+                .add_filter("Cédulas SUA (PDF)", &["pdf"])
+                .add_filter("Comprimidos (ZIP/RAR)", &["zip", "rar"])
+                .pick_files();
+
+            if let Some(paths) = files {
+                app_data.set_cedulas_access_allowed(true);
+                app_data.set_current_view(6);
+                handle_cedulas_upload_and_inspect(
+                    ui_weak.clone(),
+                    cedulas_session_clone.clone(),
+                    pool_clone.clone(),
+                    paths,
+                );
+            }
+        });
+    }
+
+    // 51b. Resumen Cédulas de Cuotas desde Registros de Obras (renderiza resumen sin diálogo de carga)
+    {
+        let ui_weak = main_window.as_weak();
+        let cedulas_session_clone = cedulas_session.clone();
+        let pool_clone = db_pool.clone();
+        let render_resumen = move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 app_data.set_cedulas_access_allowed(true);
@@ -6344,7 +6388,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             }
-        });
+        };
+        app_logic.on_open_resumen_cedulas_from_obras(render_resumen.clone());
+        app_logic.on_open_cedulas_from_obras(render_resumen);
     }
 
     // 52. Cerrar modal de empresa no coincide en Cédulas

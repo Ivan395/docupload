@@ -310,11 +310,21 @@ export component DatePickerField inherits Rectangle {
             placeholder-text: root.placeholder-text;
             font-size: 11px;
             edited(text) => {
-                let masked = DateHelper.format_date_mask(text);
-                if masked != text {
+                let prev_len = root.date-val.character-count;
+                let cur_len = text.character-count;
+                if cur_len < prev_len {
+                    root.date-val = text;
+                    root.date-changed(text);
+                } else {
+                    let masked = DateHelper.format_date_mask(text);
+                    let should_update = masked != text;
                     root.date-val = masked;
+                    if should_update {
+                        let new_len = root.date-val.character-count;
+                        input_field.set-selection-offsets(new_len, new_len);
+                    }
+                    root.date-changed(root.date-val);
                 }
-                root.date-changed(root.date-val);
             }
             accepted => {
                 root.accepted();

@@ -152,7 +152,7 @@ export component RegistrosObrasView inherits Rectangle {
                     }
                 }
 
-                // Botón Cargar Cédulas de Cuotas
+                // Botón Resumen Cédulas de Cuotas
                 Rectangle {
                     height: 38px;
                     border-radius: 6px;
@@ -163,9 +163,9 @@ export component RegistrosObrasView inherits Rectangle {
                         padding-right: 16px;
                         spacing: 8px;
                         alignment: center;
-                        Text { text: "📑"; font-size: 13px; vertical-alignment: center; }
+                        Text { text: "📊"; font-size: 13px; vertical-alignment: center; }
                         Text {
-                            text: "Cargar Cédulas de Cuotas";
+                            text: "Resumen Cedulas de Cuotas";
                             font-size: 12px;
                             font-weight: 700;
                             color: #ffffff;
@@ -175,7 +175,7 @@ export component RegistrosObrasView inherits Rectangle {
 
                     btn_load_cedulas := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { AppLogic.open_cedulas_from_obras(); }
+                        clicked => { AppLogic.open_resumen_cedulas_from_obras(); }
                     }
                 }
 
@@ -753,8 +753,8 @@ export component RegistrosObrasView inherits Rectangle {
         TouchArea { }
 
         obra_modal_trap := FocusScope {
-            width: 720px;
-            height: 600px;
+            width: Math.min(parent.width - 40px, 720px);
+            height: Math.min(parent.height - 40px, 600px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
 
@@ -763,17 +763,25 @@ export component RegistrosObrasView inherits Rectangle {
                     AppLogic.close_obra_dialog();
                     return EventResult.accept;
                 }
-                // Focus Trap: Si está en el botón final y presiona Tab, ciclar al primer input
+                // Focus Trap: Tab cicla a través de todos los elementos interactivos del modal
                 if event.text == Key.Tab {
-                    if btn_submit_obra.has-focus || btn_cancel_obra.has-focus {
+                    if btn_cancel_obra.has-focus {
+                        btn_submit_obra.focus();
+                        return EventResult.accept;
+                    }
+                    if btn_submit_obra.has-focus {
                         input_obra_numero.focus();
                         return EventResult.accept;
                     }
                 }
-                // Si está en el primer input y presiona Shift+Tab (Backtab), ciclar al botón submit
+                // Focus Trap reverso (Shift+Tab): del primer input al último botón (Guardar)
                 if event.text == Key.Backtab {
                     if input_obra_numero.has-focus {
                         btn_submit_obra.focus();
+                        return EventResult.accept;
+                    }
+                    if btn_submit_obra.has-focus {
+                        btn_cancel_obra.focus();
                         return EventResult.accept;
                     }
                 }
@@ -837,6 +845,7 @@ export component RegistrosObrasView inherits Rectangle {
                         vertical-stretch: 1;
 
                         VerticalLayout {
+                            alignment: start;
                             spacing: 14px;
 
                             // Línea 1: Número de Obra + Clase

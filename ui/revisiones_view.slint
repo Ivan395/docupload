@@ -134,6 +134,33 @@ export component RevisionesView inherits Rectangle {
                 alignment: center;
 
 
+                // Botón Cargar Cédulas de Cuotas
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: btn_load_cedulas_rev.has-hover ? #1d4ed8 : #1e40af;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 8px;
+                        alignment: center;
+                        Text { text: "📑"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Cargar Cedulas de Cuotas";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_load_cedulas_rev := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.cargar_cedulas_from_revision(); }
+                    }
+                }
+
                 // Botón + Nueva Revisión (F7)
                 Rectangle {
                     height: 38px;
@@ -960,8 +987,8 @@ export component RevisionesView inherits Rectangle {
         TouchArea { }
 
         rev_modal_scope := FocusScope {
-            width: 640px;
-            height: 490px;
+            width: Math.min(parent.width - 40px, 660px);
+            height: Math.min(parent.height - 40px, 540px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
 
@@ -970,17 +997,25 @@ export component RevisionesView inherits Rectangle {
                     AppLogic.close_revision_dialog();
                     return EventResult.accept;
                 }
-                // Focus Trap: Si está en el botón final y presiona Tab, ciclar al primer input
+                // Focus Trap: Tab cicla estrictamente por todos los controles del modal
                 if event.text == Key.Tab {
-                    if btn_submit_rev_box.has-focus || btn_cancel_rev_box.has-focus {
+                    if btn_cancel_rev_box.has-focus {
+                        btn_submit_rev_box.focus();
+                        return EventResult.accept;
+                    }
+                    if btn_submit_rev_box.has-focus {
                         input_rev_nombre.focus();
                         return EventResult.accept;
                     }
                 }
-                // Si está en el primer input y presiona Shift+Tab (Backtab), ciclar al botón submit
+                // Focus Trap reverso (Shift+Tab)
                 if event.text == Key.Backtab {
                     if input_rev_nombre.has-focus {
                         btn_submit_rev_box.focus();
+                        return EventResult.accept;
+                    }
+                    if btn_submit_rev_box.has-focus {
+                        btn_cancel_rev_box.focus();
                         return EventResult.accept;
                     }
                 }
@@ -1044,6 +1079,7 @@ export component RevisionesView inherits Rectangle {
                         vertical-stretch: 1;
 
                         VerticalLayout {
+                            alignment: start;
                             spacing: 8px;
 
                             // Campo: Nombre de la Revisión
