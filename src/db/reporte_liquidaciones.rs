@@ -211,13 +211,13 @@ pub fn fetch_obras_for_revision(client: &mut Client, id_revision: Uuid) -> Resul
                 SELECT rdl.id_registro_obra
                 FROM public.reportes_detalles_liquidaciones rdl
                 JOIN public.reportes_liquidaciones rl ON rl.id = rdl.id_reporte_liquidacion
-                WHERE rl.id_revision = $1 AND rdl.id_registro_obra IS NOT NULL
+                WHERE rl.id_registro_patronal = (SELECT id_registro_patronal FROM public.revisiones WHERE id = $1) AND rdl.id_registro_obra IS NOT NULL
             )
             OR ro.id IN (
                 SELECT rvol.id_registro_obra
                 FROM public.reportes_vinculaciones_obras_liquidaciones rvol
                 JOIN public.reportes_liquidaciones rl ON rl.id = rvol.id_reporte_liquidacion
-                WHERE rl.id_revision = $1 AND rvol.id_registro_obra IS NOT NULL
+                WHERE rl.id_registro_patronal = (SELECT id_registro_patronal FROM public.revisiones WHERE id = $1) AND rvol.id_registro_obra IS NOT NULL
             )
         )
         ORDER BY ro.numero ASC
@@ -264,17 +264,18 @@ pub fn fetch_all_obras_for_revision(client: &mut Client, id_revision: Uuid) -> R
                COALESCE(ro.monto, 0.0) AS monto
         FROM public.registros_obras ro
         WHERE ro.id_revision = $1
+           OR ro.id_registro_patronal = (SELECT id_registro_patronal FROM public.revisiones WHERE id = $1)
            OR ro.id IN (
                SELECT rdl.id_registro_obra
                FROM public.reportes_detalles_liquidaciones rdl
                JOIN public.reportes_liquidaciones rl ON rl.id = rdl.id_reporte_liquidacion
-               WHERE rl.id_revision = $1 AND rdl.id_registro_obra IS NOT NULL
+               WHERE rl.id_registro_patronal = (SELECT id_registro_patronal FROM public.revisiones WHERE id = $1) AND rdl.id_registro_obra IS NOT NULL
            )
            OR ro.id IN (
                SELECT rvol.id_registro_obra
                FROM public.reportes_vinculaciones_obras_liquidaciones rvol
                JOIN public.reportes_liquidaciones rl ON rl.id = rvol.id_reporte_liquidacion
-               WHERE rl.id_revision = $1 AND rvol.id_registro_obra IS NOT NULL
+               WHERE rl.id_registro_patronal = (SELECT id_registro_patronal FROM public.revisiones WHERE id = $1) AND rvol.id_registro_obra IS NOT NULL
            )
         ORDER BY ro.creado_usuario DESC, ro.numero ASC
         "#,
@@ -357,22 +358,30 @@ pub fn sync_reportes_liquidaciones_for_revision(
 
     let mut tx = client.transaction().map_err(|e| format!("Error iniciando transacción: {}", e))?;
 
+    let id_rp: Uuid = if let Ok(Some(r)) = tx.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&id_revision]) {
+        r.get(0)
+    } else if let Ok(Some(r)) = tx.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&id_revision]) {
+        r.get(0)
+    } else {
+        return Err(format!("No se encontró el registro patronal para la revisión {}", id_revision));
+    };
+
     let valid_obras_rows = tx.query(
         r#"
         SELECT ro.id, ro.fecha_inicio, ro.fecha_fin
         FROM public.registros_obras ro
         WHERE (
             ro.id_revision = $1
-            OR ro.id_registro_patronal = (SELECT id_registro_patronal FROM public.revisiones WHERE id = $1)
+            OR ro.id_registro_patronal = $2
             OR ro.id IN (
                 SELECT rvol.id_registro_obra
                 FROM public.reportes_vinculaciones_obras_liquidaciones rvol
                 JOIN public.reportes_liquidaciones rl ON rl.id = rvol.id_reporte_liquidacion
-                WHERE rl.id_revision = $1 AND rvol.id_registro_obra IS NOT NULL
+                WHERE rl.id_registro_patronal = $2 AND rvol.id_registro_obra IS NOT NULL
             )
         )
         "#,
-        &[&id_revision],
+        &[&id_revision, &id_rp],
     ).map_err(|e| format!("Error consultando registros de obras válidos: {}", e))?;
     let mut valid_obras_vec: Vec<Uuid> = Vec::new();
     for r in valid_obras_rows {
@@ -386,25 +395,25 @@ pub fn sync_reportes_liquidaciones_for_revision(
         SELECT 
             (SELECT COUNT(*) FROM public.liquidaciones l
              LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
-             WHERE l.id_revision = $1 AND rl.id IS NULL)::bigint,
+             WHERE l.id_registro_patronal = $1 AND rl.id IS NULL)::bigint,
             (SELECT COUNT(*) FROM public.reportes_liquidaciones rl
              LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
-             WHERE rl.id_revision = $1 AND rdl.id IS NULL)::bigint
+             WHERE rl.id_registro_patronal = $1 AND rdl.id IS NULL)::bigint
         "#,
-        &[&id_revision],
+        &[&id_rp],
     ).map_err(|e| format!("Error verificando sincronización: {}", e))?;
     let (missing_liq, missing_det): (i64, i64) = (r1.get(0), r1.get(1));
 
     if missing_liq > 0 {
         tx.execute(
             r#"
-            INSERT INTO public.reportes_liquidaciones (id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo)
-            SELECT uuidv7(), l.id, l.id_revision, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
+            INSERT INTO public.reportes_liquidaciones (id, id_liquidacion, id_registro_patronal, id_empleado, mes_periodo, anio_periodo, nombre_archivo)
+            SELECT uuidv7(), l.id, l.id_registro_patronal, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
             FROM public.liquidaciones l
             LEFT JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = l.id
-            WHERE l.id_revision = $1 AND rl.id IS NULL
+            WHERE l.id_registro_patronal = $1 AND rl.id IS NULL
             "#,
-            &[&id_revision],
+            &[&id_rp],
         ).map_err(|e| format!("Error insertando reportes_liquidaciones en lote: {}", e))?;
 
         let _ = tx.execute(
@@ -413,15 +422,15 @@ pub fn sync_reportes_liquidaciones_for_revision(
             SELECT uuidv7(), vol.id_registro_obra, rl.id, vol.dias_registro_obra
             FROM public.reportes_liquidaciones rl
             JOIN public.vinculaciones_obras_liquidaciones vol ON vol.id_liquidacion = rl.id_liquidacion
-            JOIN public.registros_obras ro ON ro.id = vol.id_registro_obra AND ro.id_revision = $1
-            WHERE rl.id_revision = $1
+            JOIN public.registros_obras ro ON ro.id = vol.id_registro_obra AND (ro.id_revision = $1 OR ro.id_registro_patronal = $2)
+            WHERE rl.id_registro_patronal = $2
               AND NOT EXISTS (
                   SELECT 1 FROM public.reportes_vinculaciones_obras_liquidaciones rvol
                   WHERE rvol.id_reporte_liquidacion = rl.id
                     AND rvol.id_registro_obra = vol.id_registro_obra
               )
             "#,
-            &[&id_revision],
+            &[&id_revision, &id_rp],
         );
 
         let _ = tx.execute(
@@ -430,14 +439,14 @@ pub fn sync_reportes_liquidaciones_for_revision(
             SELECT uuidv7(), ro.id, rl.id, 30
             FROM public.reportes_liquidaciones rl
             JOIN public.empleados e ON e.id = rl.id_empleado
-            JOIN public.registros_obras ro ON ro.id_revision = rl.id_revision AND ro.numero = LEFT(TRIM(e.clave_ubicacion), 15) AND COALESCE(ro.creado_usuario, false) = true
-            WHERE rl.id_revision = $1
+            JOIN public.registros_obras ro ON (ro.id_revision = $1 OR ro.id_registro_patronal = $2) AND ro.numero = LEFT(TRIM(e.clave_ubicacion), 15) AND COALESCE(ro.creado_usuario, false) = true
+            WHERE rl.id_registro_patronal = $2
               AND NOT EXISTS (
                   SELECT 1 FROM public.reportes_vinculaciones_obras_liquidaciones rvol
                   WHERE rvol.id_reporte_liquidacion = rl.id
               )
             "#,
-            &[&id_revision],
+            &[&id_revision, &id_rp],
         );
     }
 
@@ -506,13 +515,13 @@ pub fn sync_reportes_liquidaciones_for_revision(
             FROM public.detalles_liquidaciones dl
             JOIN public.reportes_liquidaciones rl ON dl.id_liquidacion = rl.id_liquidacion
             LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rvol ON rvol.id_reporte_liquidacion = rl.id
-            WHERE rl.id_revision = $1
+            WHERE rl.id_registro_patronal = $1
               AND NOT EXISTS (
                   SELECT 1 FROM public.reportes_detalles_liquidaciones rdl
                   WHERE rdl.id_reporte_liquidacion = rl.id
               )
             "#,
-            &[&id_revision],
+            &[&id_rp],
         );
     }
 
@@ -521,17 +530,17 @@ pub fn sync_reportes_liquidaciones_for_revision(
         DELETE FROM public.reportes_vinculaciones_obras_liquidaciones rvol
         USING public.reportes_liquidaciones rl
         WHERE rvol.id_reporte_liquidacion = rl.id
-          AND rl.id_revision = $1
+          AND rl.id_registro_patronal = $2
           AND rvol.id_registro_obra IS NOT NULL
           AND rvol.id_registro_obra NOT IN (
               SELECT ro.id FROM public.registros_obras ro
               WHERE (
                   ro.id_revision = $1
-                  OR ro.id_registro_patronal = (SELECT id_registro_patronal FROM public.revisiones WHERE id = $1)
+                  OR ro.id_registro_patronal = $2
               )
           )
         "#,
-        &[&id_revision],
+        &[&id_revision, &id_rp],
     );
 
     let copied_count = (missing_liq + missing_det) as usize;
@@ -564,13 +573,13 @@ pub fn sync_reportes_liquidaciones_for_revision(
             LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rvol
                 ON rvol.id_reporte_liquidacion = rl.id
             WHERE rdl.id_reporte_liquidacion = rl.id
-              AND rl.id_revision = $1
+              AND rl.id_registro_patronal = $1
               AND COALESCE(rdl.id_registro_obra, rvol.id_registro_obra) IS NOT NULL
               AND COALESCE(rdl.dias_registro_obra, rvol.dias_registro_obra) IS NOT NULL
               AND rdl.dias IS NOT NULL AND rdl.dias > 0
               AND COALESCE(rdl.id_registro_obra, rvol.id_registro_obra) = ANY($2);
             "#,
-            &[&id_revision, &valid_obras_vec],
+            &[&id_rp, &valid_obras_vec],
         );
     }
 
@@ -601,7 +610,7 @@ pub fn sync_reportes_liquidaciones_for_revision(
         LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rvol
             ON rvol.id_reporte_liquidacion = rl.id
         WHERE rdl.id_reporte_liquidacion = rl.id 
-          AND rl.id_revision = $1
+          AND rl.id_registro_patronal = $1
           AND (
               COALESCE(rdl.id_registro_obra, rvol.id_registro_obra) IS NULL 
               OR NOT (
@@ -609,7 +618,7 @@ pub fn sync_reportes_liquidaciones_for_revision(
               )
           );
         "#,
-        &[&id_revision, &valid_obras_vec],
+        &[&id_rp, &valid_obras_vec],
     );
 
     tx.commit().map_err(|e| format!("Error en commit de sincronización: {}", e))?;
@@ -648,10 +657,18 @@ pub fn revertir_reporte_liquidaciones_a_originales(
 
     let mut tx = client.transaction().map_err(|e| format!("Error iniciando transacción: {}", e))?;
 
+    let id_rp: Uuid = if let Ok(Some(r)) = tx.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&id_revision]) {
+        r.get(0)
+    } else if let Ok(Some(r)) = tx.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&id_revision]) {
+        r.get(0)
+    } else {
+        return Err(format!("No se encontró el registro patronal para la revisión {}", id_revision));
+    };
+
     // Mapa de obras válidas con sus rangos de fechas
     let valid_obras_rows = tx.query(
-        "SELECT id, fecha_inicio, fecha_fin FROM public.registros_obras WHERE id_revision = $1",
-        &[&id_revision],
+        "SELECT id, fecha_inicio, fecha_fin FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2)",
+        &[&id_revision, &id_rp],
     ).map_err(|e| format!("Error consultando registros de obras: {}", e))?;
 
     let mut obras_map: HashMap<Uuid, (Option<NaiveDate>, Option<NaiveDate>)> = HashMap::new();
@@ -662,25 +679,25 @@ pub fn revertir_reporte_liquidaciones_a_originales(
         obras_map.insert(oid, (f_ini, f_fin));
     }
 
-    // 2. Limpiar todos los detalles y vinculaciones actuales de reportes para esta revisión
+    // 2. Limpiar todos los detalles y vinculaciones actuales de reportes para este registro patronal
     tx.execute(
         r#"
         DELETE FROM public.reportes_detalles_liquidaciones
         WHERE id_reporte_liquidacion IN (
-            SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1
+            SELECT id FROM public.reportes_liquidaciones WHERE id_registro_patronal = $1
         )
         "#,
-        &[&id_revision],
+        &[&id_rp],
     ).map_err(|e| format!("Error limpiando reportes_detalles_liquidaciones: {}", e))?;
 
     tx.execute(
         r#"
         DELETE FROM public.reportes_vinculaciones_obras_liquidaciones
         WHERE id_reporte_liquidacion IN (
-            SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1
+            SELECT id FROM public.reportes_liquidaciones WHERE id_registro_patronal = $1
         )
         "#,
-        &[&id_revision],
+        &[&id_rp],
     ).map_err(|e| format!("Error limpiando reportes_vinculaciones_obras_liquidaciones: {}", e))?;
 
     // 3. Consultar las liquidaciones correspondientes al periodo analizado
@@ -689,31 +706,31 @@ pub fn revertir_reporte_liquidaciones_a_originales(
         let _ = tx.execute(
             r#"
             DELETE FROM public.reportes_liquidaciones
-            WHERE id_revision = $1
+            WHERE id_registro_patronal = $1
               AND NOT ((UPPER(TRIM(mes_periodo)) || '/' || anio_periodo::text) = ANY($2))
             "#,
-            &[&id_revision, &period_keys_vec],
+            &[&id_rp, &period_keys_vec],
         );
 
         tx.query(
             r#"
             SELECT l.id, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
             FROM public.liquidaciones l
-            WHERE l.id_revision = $1
+            WHERE l.id_registro_patronal = $1
               AND (UPPER(TRIM(l.mes_periodo)) || '/' || l.anio_periodo::text) = ANY($2)
             ORDER BY l.anio_periodo ASC, l.mes_periodo ASC
             "#,
-            &[&id_revision, &period_keys_vec],
+            &[&id_rp, &period_keys_vec],
         ).map_err(|e| format!("Error consultando liquidaciones filtradas: {}", e))?
     } else {
         tx.query(
             r#"
             SELECT l.id, l.id_empleado, l.mes_periodo, l.anio_periodo, l.nombre_archivo
             FROM public.liquidaciones l
-            WHERE l.id_revision = $1
+            WHERE l.id_registro_patronal = $1
             ORDER BY l.anio_periodo ASC, l.mes_periodo ASC
             "#,
-            &[&id_revision],
+            &[&id_rp],
         ).map_err(|e| format!("Error consultando liquidaciones: {}", e))?
     };
 
@@ -745,10 +762,10 @@ pub fn revertir_reporte_liquidaciones_a_originales(
                 tx.execute(
                     r#"
                     INSERT INTO public.reportes_liquidaciones (
-                        id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
+                        id, id_liquidacion, id_registro_patronal, id_empleado, mes_periodo, anio_periodo, nombre_archivo
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                     "#,
-                    &[&new_rep_id, &id_liq, &id_revision, &id_emp, &mes_str, &anio, &nombre_arch],
+                    &[&new_rep_id, &id_liq, &id_rp, &id_emp, &mes_str, &anio, &nombre_arch],
                 ).map_err(|e| format!("Error insertando reporte_liquidacion: {}", e))?;
                 new_rep_id
             }
@@ -985,6 +1002,14 @@ pub fn fetch_reporte_liquidaciones(
     client: &mut Client,
     id_revision: Uuid,
 ) -> Result<Vec<ReporteLiquidacionRowDb>, String> {
+    let id_rp: Uuid = if let Ok(Some(r)) = client.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&id_revision]) {
+        r.get(0)
+    } else if let Ok(Some(r)) = client.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&id_revision]) {
+        r.get(0)
+    } else {
+        return Err(format!("No se encontró el registro patronal para la revisión {}", id_revision));
+    };
+
     let obras = fetch_all_obras_for_revision(client, id_revision)?;
 
     // Extraer claves exactas de periodo ("MES/AÑO") analizados a partir de los registros de obra
@@ -1070,10 +1095,8 @@ pub fn fetch_reporte_liquidaciones(
     ) dl ON true
     LEFT JOIN public.empleados AS e
         ON rl.id_empleado = e.id
-    LEFT JOIN public.revisiones AS rev
-        ON rl.id_revision = rev.id
     LEFT JOIN public.registros_patronales AS rp
-        ON rev.id_registro_patronal = rp.id
+        ON rl.id_registro_patronal = rp.id
     "#;
 
     let order_clause = r#"
@@ -1098,7 +1121,7 @@ pub fn fetch_reporte_liquidaciones(
 
     let (_sql, rows) = if !period_keys_vec.is_empty() {
         let where_clause = r#"
-            WHERE rl.id_revision = $1
+            WHERE rl.id_registro_patronal = $1
               AND (
                 (UPPER(TRIM(rl.mes_periodo)) || '/' || rl.anio_periodo) = ANY($2)
                 OR (
@@ -1130,13 +1153,13 @@ pub fn fetch_reporte_liquidaciones(
               )
         "#;
         let full_sql = format!("{} {} {}", base_select, where_clause, order_clause);
-        let r = client.query(&full_sql, &[&id_revision, &period_keys_vec])
+        let r = client.query(&full_sql, &[&id_rp, &period_keys_vec])
             .map_err(|e| format!("Error consultando filas de reportes_liquidaciones: {}", e))?;
         (full_sql, r)
     } else {
-        let where_clause = "WHERE rl.id_revision = $1";
+        let where_clause = "WHERE rl.id_registro_patronal = $1";
         let full_sql = format!("{} {} {}", base_select, where_clause, order_clause);
-        let r = client.query(&full_sql, &[&id_revision])
+        let r = client.query(&full_sql, &[&id_rp])
             .map_err(|e| format!("Error consultando filas de reportes_liquidaciones: {}", e))?;
         (full_sql, r)
     };
@@ -1553,7 +1576,7 @@ pub fn add_obra_vinculacion_for_employee(
     // 1. Obtener datos del padre (reportes_liquidaciones) y detalle base
     let base_info = tx.query_opt(
         r#"
-        SELECT rl.id_liquidacion, rl.id_revision, rl.id_empleado, rl.mes_periodo, rl.anio_periodo,
+        SELECT rl.id_liquidacion, rl.id_registro_patronal, rl.id_empleado, rl.mes_periodo, rl.anio_periodo,
                rdl.dias, rdl.clave, rdl.fecha,
                COALESCE(rdl.sdi, 0.0)::float8, COALESCE(rdl.lic, 0.0)::float8,
                COALESCE(rdl.inc, 0.0)::float8, COALESCE(rdl.aus, 0.0)::float8,
@@ -1576,8 +1599,7 @@ pub fn add_obra_vinculacion_for_employee(
         FROM public.reportes_liquidaciones rl
         JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
         JOIN public.empleados e ON e.id = rl.id_empleado
-        JOIN public.revisiones rev ON rev.id = rl.id_revision
-        JOIN public.registros_patronales rp ON rp.id = rev.id_registro_patronal
+        JOIN public.registros_patronales rp ON rp.id = rl.id_registro_patronal
         LEFT JOIN public.detalles_liquidaciones dl ON dl.id_liquidacion = rl.id_liquidacion
              AND (COALESCE(TRIM(LOWER(dl.clave)), '') = COALESCE(TRIM(LOWER(rdl.clave)), ''))
              AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL))
@@ -4910,15 +4932,23 @@ pub fn verify_and_autocorrect_employee_obras(
         return Ok(stats);
     }
 
+    let id_rp: Uuid = if let Ok(Some(r)) = client.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&id_revision]) {
+        r.get(0)
+    } else if let Ok(Some(r)) = client.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&id_revision]) {
+        r.get(0)
+    } else {
+        return Ok(stats);
+    };
+
     let parent_rows = client.query(
         r#"
         SELECT rl.id, rl.id_liquidacion, rl.id_empleado, rl.mes_periodo, rl.anio_periodo, e.nombre
         FROM public.reportes_liquidaciones rl
         JOIN public.empleados e ON e.id = rl.id_empleado
-        WHERE rl.id_revision = $1
+        WHERE rl.id_registro_patronal = $1
         ORDER BY rl.anio_periodo ASC, rl.mes_periodo ASC, e.nombre ASC
         "#,
-        &[&id_revision],
+        &[&id_rp],
     ).map_err(|e| format!("Error consultando reportes_liquidaciones: {}", e))?;
 
     stats.total_analizados = parent_rows.len();

@@ -354,6 +354,89 @@ pub fn resolve_business_context_for_revision(
                 periodos_filtro,
             });
         }
+
+        // Si rev_id no corresponde a una revisión, verificar si es directamente un registro patronal
+        let rp_row_opt = tx.query_opt(
+            r#"
+            SELECT rp.id, rp.id_cliente, rp.registro, rp.delegacion, rp.subdelegacion
+            FROM public.registros_patronales rp
+            WHERE rp.id = $1
+            "#,
+            &[&rev_id],
+        )?;
+
+        if let Some(row) = rp_row_opt {
+            let id_registro_patronal: Uuid = row.get(0);
+            let id_cliente: Uuid = row.get(1);
+            let reg_11: String = row.get(2);
+            let del_db: Option<String> = row.get(3);
+            let subdel_db: Option<String> = row.get(4);
+            let del_upper = del_db.or_else(|| biz.delegacion.as_deref().map(|s| s.trim().to_uppercase()));
+            let subdel_upper = subdel_db.or_else(|| biz.subdelegacion.as_deref().map(|s| s.trim().to_uppercase()));
+
+            update_cliente_and_rp_from_biz(tx, id_cliente, id_registro_patronal, biz)?;
+
+            let rev_row = tx.query_opt(
+                "SELECT id FROM public.revisiones WHERE id_registro_patronal = $1 ORDER BY id DESC LIMIT 1",
+                &[&id_registro_patronal],
+            )?;
+
+            let id_revision: Uuid = match rev_row {
+                Some(r) => r.get(0),
+                None => {
+                    let sample_mes = biz
+                        .employees
+                        .first()
+                        .and_then(|e| {
+                            e.mes_periodo
+                                .as_deref()
+                                .or_else(|| e.data_employee.first().and_then(|de| de.mes_periodo.as_deref()))
+                        })
+                        .unwrap_or("ENERO");
+                    let sample_anio = biz
+                        .employees
+                        .first()
+                        .and_then(|e| {
+                            e.anio_periodo
+                                .as_deref()
+                                .or_else(|| e.data_employee.first().and_then(|de| de.anio_periodo.as_deref()))
+                        })
+                        .unwrap_or("2024");
+                    let rev_nombre = format!("Revisión SUA {} {}", sample_mes, sample_anio);
+                    let rev_folio = format!("REV-SUA-{}-{}", sample_anio, month_to_num(sample_mes));
+                    let rev_nombre_upper = rev_nombre.trim().to_uppercase();
+                    let rev_folio_upper = rev_folio.trim().to_uppercase();
+                    let rev_nombre_trun = truncate_str(Some(&rev_nombre_upper), 150).unwrap();
+                    let rev_folio_trun = truncate_str(Some(&rev_folio_upper), 20).unwrap();
+
+                    let new_id = Uuid::now_v7();
+                    let ins = tx.query_one(
+                        r#"
+                        INSERT INTO public.revisiones (id, id_registro_patronal, nombre, folio, fecha_entrega_revision)
+                        VALUES ($1, $2, $3, $4, CURRENT_DATE)
+                        ON CONFLICT (id_registro_patronal, nombre) DO UPDATE SET nombre = EXCLUDED.nombre
+                        RETURNING id
+                        "#,
+                        &[&new_id, &id_registro_patronal, &rev_nombre_trun, &rev_folio_trun],
+                    )?;
+                    ins.get(0)
+                }
+            };
+
+            let (anios_filtro, meses_filtro, periodos_filtro) = get_obra_filter_dates(tx, id_revision);
+
+            return Ok(BusinessContext {
+                id_cliente,
+                id_registro_patronal,
+                id_revision,
+                reg_11,
+                delegacion: del_upper,
+                subdelegacion: subdel_upper,
+                anios_filtro,
+                meses_filtro,
+                periodos_filtro,
+            });
+        }
     }
     // 1. Cliente (Patrón)
     let rfc_patron = biz.rfc.as_deref().map(|s| {
@@ -838,13 +921,13 @@ pub fn save_single_cedula_employee_tx(
 
     let nombre_arch = format!("Cédula SUA {} - {}.pdf", ctx.reg_11, mes_norm);
 
-    // Evitar duplicados: consultar todas las liquidaciones existentes para este empleado, revisión y período
+    // Evitar duplicados: consultar todas las liquidaciones existentes para este empleado, registro patronal y período
     let existing_liqs = tx.query(
         r#"
         SELECT id FROM public.liquidaciones
-        WHERE id_revision = $1 AND id_empleado = $2 AND mes_periodo = $3 AND anio_periodo = $4
+        WHERE id_registro_patronal = $1 AND id_empleado = $2 AND mes_periodo = $3 AND anio_periodo = $4
         "#,
-        &[&ctx.id_revision, &id_empleado, &mes_norm, &anio_norm],
+        &[&ctx.id_registro_patronal, &id_empleado, &mes_norm, &anio_norm],
     )?;
 
     // Verificar si alguna liquidación existente coincide 100% de manera idéntica en todos sus renglones de detalle
@@ -878,14 +961,14 @@ pub fn save_single_cedula_employee_tx(
     tx.execute(
         r#"
         INSERT INTO public.liquidaciones (
-            id, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
+            id, id_registro_patronal, id_empleado, mes_periodo, anio_periodo, nombre_archivo
         ) VALUES (
             $1, $2, $3, $4, $5, $6
         )
         "#,
         &[
             &id_liquidacion,
-            &ctx.id_revision,
+            &ctx.id_registro_patronal,
             &id_empleado,
             &mes_norm,
             &anio_norm,
@@ -911,7 +994,7 @@ pub fn save_single_cedula_employee_tx(
         tx.execute(
             r#"
             INSERT INTO public.reportes_liquidaciones (
-                id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
+                id, id_liquidacion, id_registro_patronal, id_empleado, mes_periodo, anio_periodo, nombre_archivo
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7
             )
@@ -919,7 +1002,7 @@ pub fn save_single_cedula_employee_tx(
             &[
                 &new_id,
                 &id_liquidacion,
-                &ctx.id_revision,
+                &ctx.id_registro_patronal,
                 &id_empleado,
                 &mes_norm,
                 &anio_norm,
@@ -1082,10 +1165,10 @@ pub fn save_single_cedula_employee_tx(
                     tx.execute(
                         r#"
                         INSERT INTO public.reportes_liquidaciones (
-                            id, id_liquidacion, id_revision, id_empleado, mes_periodo, anio_periodo, nombre_archivo
+                            id, id_liquidacion, id_registro_patronal, id_empleado, mes_periodo, anio_periodo, nombre_archivo
                         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                         "#,
-                        &[&new_rep_id, &id_liquidacion, &ctx.id_revision, &id_empleado, &mes_norm, &anio_norm, &truncate_str(Some(&nombre_arch), 350)],
+                        &[&new_rep_id, &id_liquidacion, &ctx.id_registro_patronal, &id_empleado, &mes_norm, &anio_norm, &truncate_str(Some(&nombre_arch), 350)],
                     )?;
                     new_rep_id
                 }

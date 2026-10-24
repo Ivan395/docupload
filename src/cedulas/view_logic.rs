@@ -333,7 +333,7 @@ pub fn inspect_cedula_file_with_context(
                             if !clean_found.is_empty() && clean_found != clean_t {
                                 card.has_warning = true;
                                 card.warning_msg = format!(
-                                    "Registro Patronal EMA '{}' no coincide con el de la revisión ('{}')",
+                                    "Registro Patronal EMA '{}' no coincide con el registro patronal seleccionado ('{}')",
                                     clean_found, clean_t
                                 );
                             }
@@ -378,7 +378,7 @@ pub fn inspect_cedula_file_with_context(
                                     if !clean_found.is_empty() && clean_found != clean_t {
                                         card.has_warning = true;
                                         card.warning_msg = format!(
-                                            "Registro Patronal '{}' no coincide con el de la revisión ('{}')",
+                                            "Registro Patronal '{}' no coincide con el registro patronal seleccionado ('{}')",
                                             clean_found, clean_t
                                         );
                                     }
@@ -1360,13 +1360,21 @@ pub fn load_cedulas_from_db(
     client: &mut Client,
     id_revision: &str,
 ) -> Result<Option<(CedulasAuditResult, Vec<Business>)>, String> {
-    let rev_uuid = match Uuid::parse_str(id_revision.trim()) {
+    let target_uuid = match Uuid::parse_str(id_revision.trim()) {
         Ok(u) => u,
         Err(_) => return Ok(None),
     };
 
+    let rp_uuid: Uuid = if let Ok(Some(r)) = client.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&target_uuid]) {
+        r.get(0)
+    } else if let Ok(Some(r)) = client.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&target_uuid]) {
+        r.get(0)
+    } else {
+        return Ok(None);
+    };
+
     let count_row = client
-        .query_one("SELECT count(*) FROM public.liquidaciones WHERE id_revision = $1", &[&rev_uuid])
+        .query_one("SELECT count(*) FROM public.liquidaciones WHERE id_registro_patronal = $1", &[&rp_uuid])
         .map_err(|e| format!("Error contando liquidaciones: {}", e))?;
     let count: i64 = count_row.get(0);
     if count == 0 {
@@ -1375,7 +1383,7 @@ pub fn load_cedulas_from_db(
 
     // 1. Obras registradas en la revisión
     let obra_rows = client
-        .query("SELECT numero FROM public.registros_obras WHERE id_revision = $1 AND COALESCE(creado_usuario, false) = true", &[&rev_uuid])
+        .query("SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND COALESCE(creado_usuario, false) = true", &[&target_uuid, &rp_uuid])
         .map_err(|e| format!("Error consultando obras de la revisión: {}", e))?;
     let mut revision_obras = HashSet::new();
     for r in obra_rows {
@@ -1398,9 +1406,9 @@ pub fn load_cedulas_from_db(
             FROM public.vinculaciones_obras_liquidaciones vol
             JOIN public.registros_obras ro ON vol.id_registro_obra = ro.id
             JOIN public.liquidaciones l ON vol.id_liquidacion = l.id
-            WHERE l.id_revision = $1
+            WHERE l.id_registro_patronal = $1
             "#,
-            &[&rev_uuid],
+            &[&rp_uuid],
         )
         .map_err(|e| format!("Error consultando vinculaciones de obras: {}", e))?;
 
@@ -1457,14 +1465,13 @@ pub fn load_cedulas_from_db(
                 dl.subtotal
             FROM public.liquidaciones l
             JOIN public.empleados e ON l.id_empleado = e.id
-            JOIN public.revisiones rev ON l.id_revision = rev.id
-            JOIN public.registros_patronales rp ON rev.id_registro_patronal = rp.id
+            JOIN public.registros_patronales rp ON l.id_registro_patronal = rp.id
             JOIN public.clientes c ON rp.id_cliente = c.id
             LEFT JOIN public.detalles_liquidaciones dl ON dl.id_liquidacion = l.id
-            WHERE l.id_revision = $1
+            WHERE l.id_registro_patronal = $1
             ORDER BY rp.registro, l.anio_periodo, l.mes_periodo, e.nombre, l.id, dl.fecha;
             "#,
-            &[&rev_uuid],
+            &[&rp_uuid],
         )
         .map_err(|e| format!("Error consultando liquidaciones de la revisión: {}", e))?;
 
@@ -1707,28 +1714,36 @@ pub fn delete_all_cedulas_for_revision(
         );
         Ok(n)
     } else {
-        let rev_uuid = Uuid::parse_str(id_revision).map_err(|e| format!("UUID de revisión inválido: {}", e))?;
-        let _ = client.execute(
-            "DELETE FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion IN (SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1)",
-            &[&rev_uuid],
-        );
-        let _ = client.execute(
-            "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion IN (SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $1)",
-            &[&rev_uuid],
-        );
-        let _ = client.execute("DELETE FROM public.reportes_liquidaciones WHERE id_revision = $1", &[&rev_uuid]);
+        let parsed_uuid = Uuid::parse_str(id_revision).map_err(|e| format!("UUID inválido: {}", e))?;
+        let rp_uuid: Uuid = if let Ok(Some(r)) = client.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&parsed_uuid]) {
+            r.get(0)
+        } else if let Ok(Some(r)) = client.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&parsed_uuid]) {
+            r.get(0)
+        } else {
+            parsed_uuid
+        };
 
         let _ = client.execute(
-            "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion IN (SELECT id FROM public.liquidaciones WHERE id_revision = $1)",
-            &[&rev_uuid],
+            "DELETE FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion IN (SELECT id FROM public.reportes_liquidaciones WHERE id_registro_patronal = $1)",
+            &[&rp_uuid],
         );
         let _ = client.execute(
-            "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion IN (SELECT id FROM public.liquidaciones WHERE id_revision = $1)",
-            &[&rev_uuid],
+            "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion IN (SELECT id FROM public.reportes_liquidaciones WHERE id_registro_patronal = $1)",
+            &[&rp_uuid],
+        );
+        let _ = client.execute("DELETE FROM public.reportes_liquidaciones WHERE id_registro_patronal = $1", &[&rp_uuid]);
+
+        let _ = client.execute(
+            "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion IN (SELECT id FROM public.liquidaciones WHERE id_registro_patronal = $1)",
+            &[&rp_uuid],
+        );
+        let _ = client.execute(
+            "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion IN (SELECT id FROM public.liquidaciones WHERE id_registro_patronal = $1)",
+            &[&rp_uuid],
         );
         let n = client
-            .execute("DELETE FROM public.liquidaciones WHERE id_revision = $1", &[&rev_uuid])
-            .map_err(|e| format!("Error al borrar liquidaciones de la revisión: {}", e))?;
+            .execute("DELETE FROM public.liquidaciones WHERE id_registro_patronal = $1", &[&rp_uuid])
+            .map_err(|e| format!("Error al borrar liquidaciones del registro patronal: {}", e))?;
 
         crate::app_logger::log_db_op(
             "DELETE",
@@ -1740,8 +1755,8 @@ pub fn delete_all_cedulas_for_revision(
                 "public.detalles_liquidaciones",
                 "public.liquidaciones",
             ],
-            "DELETE FROM liquidaciones... WHERE id_revision = $1",
-            &format!("id_revision={}", id_revision),
+            "DELETE FROM liquidaciones... WHERE id_registro_patronal = $1",
+            &format!("id_registro_patronal={}", rp_uuid),
             Some(n as usize),
         );
         Ok(n)
@@ -1749,59 +1764,66 @@ pub fn delete_all_cedulas_for_revision(
 }
 
 /// Elimina los registros físicos y lógicos en PostgreSQL de una cédula de cuotas
-/// para un mes y año específicos dentro de una revisión (soporta sobreescritura limpia).
+/// para un mes y año específicos dentro de un registro patronal (soporta sobreescritura limpia).
 pub fn delete_cedula_for_month(
     client: &mut Client,
     id_revision: &str,
     mes_periodo: &str,
     anio_periodo: i32,
 ) -> Result<u64, String> {
-    let rev_uuid = Uuid::parse_str(id_revision).map_err(|e| format!("UUID de revisión inválido: {}", e))?;
+    let parsed_uuid = Uuid::parse_str(id_revision).map_err(|e| format!("UUID inválido: {}", e))?;
+    let rp_uuid: Uuid = if let Ok(Some(r)) = client.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&parsed_uuid]) {
+        r.get(0)
+    } else if let Ok(Some(r)) = client.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&parsed_uuid]) {
+        r.get(0)
+    } else {
+        parsed_uuid
+    };
     let mes_clean = mes_periodo.trim().to_uppercase();
 
     let _ = client.execute(
         "DELETE FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion IN (
             SELECT id FROM public.reportes_liquidaciones 
-            WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+            WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
         )",
-        &[&rev_uuid, &mes_clean, &anio_periodo],
+        &[&rp_uuid, &mes_clean, &anio_periodo],
     );
     let _ = client.execute(
         "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion IN (
             SELECT id FROM public.reportes_liquidaciones 
-            WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+            WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
         )",
-        &[&rev_uuid, &mes_clean, &anio_periodo],
+        &[&rp_uuid, &mes_clean, &anio_periodo],
     );
     let _ = client.execute(
         "DELETE FROM public.reportes_liquidaciones 
-         WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3",
-        &[&rev_uuid, &mes_clean, &anio_periodo],
+         WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3",
+        &[&rp_uuid, &mes_clean, &anio_periodo],
     );
 
     let _ = client.execute(
         "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion IN (
             SELECT id FROM public.liquidaciones 
-            WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+            WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
         )",
-        &[&rev_uuid, &mes_clean, &anio_periodo],
+        &[&rp_uuid, &mes_clean, &anio_periodo],
     );
     let _ = client.execute(
         "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion IN (
             SELECT id FROM public.liquidaciones 
-            WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+            WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
         )",
-        &[&rev_uuid, &mes_clean, &anio_periodo],
+        &[&rp_uuid, &mes_clean, &anio_periodo],
     );
     let n = client
         .execute(
             "DELETE FROM public.liquidaciones 
-             WHERE id_revision = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3",
-            &[&rev_uuid, &mes_clean, &anio_periodo],
+             WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3",
+            &[&rp_uuid, &mes_clean, &anio_periodo],
         )
         .map_err(|e| format!("Error al borrar liquidación del periodo {}/{}: {}", mes_clean, anio_periodo, e))?;
 
-    log::info!("Eliminadas {} liquidaciones del mes {}/{} para la revisión {}", n, mes_clean, anio_periodo, id_revision);
+    log::info!("Eliminadas {} liquidaciones del mes {}/{} para el registro patronal {}", n, mes_clean, anio_periodo, rp_uuid);
     Ok(n)
 }
 

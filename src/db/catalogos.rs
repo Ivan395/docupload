@@ -615,8 +615,7 @@ pub fn fetch_registros_patronales_by_cliente(
                 (
                     SELECT COUNT(DISTINCT l.id_empleado)::int 
                     FROM public.liquidaciones l 
-                    JOIN public.revisiones rev ON l.id_revision = rev.id 
-                    WHERE rev.id_registro_patronal = rp.id
+                    WHERE l.id_registro_patronal = rp.id
                 ) AS emp_count,
                 EXISTS (
                     SELECT 1 FROM public.revisiones rev WHERE rev.id_registro_patronal = rp.id
@@ -996,8 +995,7 @@ pub fn fetch_empleados_by_cliente(
                      JOIN public.registros_patronales rp ON rev.id_registro_patronal = rp.id 
                      WHERE n.id_empleado = e.id LIMIT 1),
                     (SELECT TRIM(rp.registro) FROM public.liquidaciones l 
-                     JOIN public.revisiones rev ON l.id_revision = rev.id 
-                     JOIN public.registros_patronales rp ON rev.id_registro_patronal = rp.id 
+                     JOIN public.registros_patronales rp ON l.id_registro_patronal = rp.id 
                      WHERE l.id_empleado = e.id LIMIT 1),
                     ''
                 ) AS registro_patronal,

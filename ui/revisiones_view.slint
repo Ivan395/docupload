@@ -157,7 +157,7 @@ export component RevisionesView inherits Rectangle {
 
                     btn_load_cedulas_rev := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { AppLogic.cargar_cedulas_from_revision(); }
+                        clicked => { AppLogic.cargar_cedulas_from_revision(AppData.selected_rp_id); }
                     }
                 }
 

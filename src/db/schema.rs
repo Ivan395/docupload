@@ -315,7 +315,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
 
         CREATE TABLE IF NOT EXISTS public.liquidaciones (
             id uuid PRIMARY KEY DEFAULT uuidv7(),
-            id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+            id_registro_patronal uuid NOT NULL REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
             id_empleado uuid NOT NULL REFERENCES public.empleados(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
             mes_periodo char(15),
             anio_periodo smallint,
@@ -404,7 +404,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE TABLE IF NOT EXISTS public.reportes_liquidaciones (
             id uuid PRIMARY KEY DEFAULT uuidv7(),
             id_liquidacion uuid REFERENCES public.liquidaciones(id) ON UPDATE CASCADE ON DELETE CASCADE,
-            id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            id_registro_patronal uuid NOT NULL REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE,
             id_empleado uuid NOT NULL REFERENCES public.empleados(id) ON UPDATE CASCADE ON DELETE CASCADE,
             mes_periodo char(15),
             anio_periodo smallint,
@@ -589,6 +589,94 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones DROP COLUMN IF EXISTS dias;
         DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_registro_obra IS NULL;
 
+        -- Migración: Cédulas de Cuotas y Reportes Liquidaciones pasan de id_revision a id_registro_patronal
+        DO $$
+        DECLARE
+            r RECORD;
+        BEGIN
+            -- 1. Agregar columna id_registro_patronal si no existe
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'liquidaciones') THEN
+                ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'reportes_liquidaciones') THEN
+                ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+            END IF;
+
+            -- 2. Migrar datos si aún existe id_revision en public.liquidaciones
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'liquidaciones' AND column_name = 'id_revision') THEN
+                UPDATE public.liquidaciones l
+                SET id_registro_patronal = rev.id_registro_patronal
+                FROM public.revisiones rev
+                WHERE l.id_revision = rev.id AND l.id_registro_patronal IS NULL;
+
+                FOR r IN (
+                    SELECT conname 
+                    FROM pg_constraint 
+                    WHERE conrelid = 'public.liquidaciones'::regclass 
+                      AND contype = 'f' 
+                      AND conname ILIKE '%revision%'
+                ) LOOP
+                    EXECUTE 'ALTER TABLE public.liquidaciones DROP CONSTRAINT IF EXISTS ' || quote_ident(r.conname);
+                END LOOP;
+
+                DROP INDEX IF EXISTS public.idx_liquidaciones_id_revision;
+                DROP INDEX IF EXISTS public.idx_liquidaciones_rev_periodo;
+                DROP INDEX IF EXISTS public.idx_liquidaciones_emp_rev;
+
+                ALTER TABLE public.liquidaciones DROP COLUMN IF EXISTS id_revision CASCADE;
+            END IF;
+
+            -- Migrar datos si aún existe id_revision en public.reportes_liquidaciones
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'reportes_liquidaciones' AND column_name = 'id_revision') THEN
+                UPDATE public.reportes_liquidaciones rl
+                SET id_registro_patronal = rev.id_registro_patronal
+                FROM public.revisiones rev
+                WHERE rl.id_revision = rev.id AND rl.id_registro_patronal IS NULL;
+
+                UPDATE public.reportes_liquidaciones rl
+                SET id_registro_patronal = l.id_registro_patronal
+                FROM public.liquidaciones l
+                WHERE rl.id_liquidacion = l.id AND rl.id_registro_patronal IS NULL;
+
+                FOR r IN (
+                    SELECT conname 
+                    FROM pg_constraint 
+                    WHERE conrelid = 'public.reportes_liquidaciones'::regclass 
+                      AND contype = 'f' 
+                      AND conname ILIKE '%revision%'
+                ) LOOP
+                    EXECUTE 'ALTER TABLE public.reportes_liquidaciones DROP CONSTRAINT IF EXISTS ' || quote_ident(r.conname);
+                END LOOP;
+
+                DROP INDEX IF EXISTS public.idx_reportes_liquidaciones_id_revision;
+                DROP INDEX IF EXISTS public.idx_reportes_liquidaciones_rev_periodo;
+                DROP INDEX IF EXISTS public.idx_reportes_liquidaciones_rev_emp;
+
+                ALTER TABLE public.reportes_liquidaciones DROP COLUMN IF EXISTS id_revision CASCADE;
+            END IF;
+
+            -- 3. Asegurar NOT NULL y Foreign Keys
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'liquidaciones' AND column_name = 'id_registro_patronal') THEN
+                DELETE FROM public.liquidaciones WHERE id_registro_patronal IS NULL;
+                ALTER TABLE public.liquidaciones ALTER COLUMN id_registro_patronal SET NOT NULL;
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_liquidaciones_registro_patronal') THEN
+                    ALTER TABLE public.liquidaciones ADD CONSTRAINT fk_liquidaciones_registro_patronal
+                        FOREIGN KEY (id_registro_patronal) REFERENCES public.registros_patronales(id)
+                        ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+                END IF;
+            END IF;
+
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'reportes_liquidaciones' AND column_name = 'id_registro_patronal') THEN
+                DELETE FROM public.reportes_liquidaciones WHERE id_registro_patronal IS NULL;
+                ALTER TABLE public.reportes_liquidaciones ALTER COLUMN id_registro_patronal SET NOT NULL;
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_reportes_liquidaciones_registro_patronal') THEN
+                    ALTER TABLE public.reportes_liquidaciones ADD CONSTRAINT fk_reportes_liquidaciones_registro_patronal
+                        FOREIGN KEY (id_registro_patronal) REFERENCES public.registros_patronales(id)
+                        ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+                END IF;
+            END IF;
+        END $$;
+
         -- Column additions to allow row-level obra and days per detail in reportes_detalles_liquidaciones
         ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_obra uuid REFERENCES public.registros_obras(id) ON UPDATE CASCADE ON DELETE SET NULL;
         ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS dias_registro_obra smallint;
@@ -771,7 +859,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_nominas_id_empleado ON public.nominas(id_empleado);
         CREATE INDEX IF NOT EXISTS idx_detalles_nominas_id_nomina ON public.detalles_nominas(id_nomina);
         CREATE INDEX IF NOT EXISTS idx_detalles_nominas_id_concepto ON public.detalles_nominas(id_concepto);
-        CREATE INDEX IF NOT EXISTS idx_liquidaciones_id_revision ON public.liquidaciones(id_revision);
+        CREATE INDEX IF NOT EXISTS idx_liquidaciones_id_rp ON public.liquidaciones(id_registro_patronal);
         CREATE INDEX IF NOT EXISTS idx_liquidaciones_id_empleado ON public.liquidaciones(id_empleado);
         CREATE INDEX IF NOT EXISTS idx_detalles_liquidaciones_id_liquidacion ON public.detalles_liquidaciones(id_liquidacion);
         CREATE INDEX IF NOT EXISTS idx_vinculaciones_obras_id_obra ON public.vinculaciones_obras_liquidaciones(id_registro_obra);
@@ -780,10 +868,10 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_revision ON public.reportes_nominas(id_revision);
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_empleado ON public.reportes_nominas(id_empleado);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_nominas_id_rep ON public.reportes_detalles_nominas(id_reporte_nomina);
-        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_revision ON public.reportes_liquidaciones(id_revision);
+        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_rp ON public.reportes_liquidaciones(id_registro_patronal);
         CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_liq ON public.reportes_liquidaciones(id_liquidacion);
-        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_rev_periodo ON public.reportes_liquidaciones(id_revision, anio_periodo, mes_periodo);
-        CREATE INDEX IF NOT EXISTS idx_liquidaciones_rev_periodo ON public.liquidaciones(id_revision, anio_periodo, mes_periodo);
+        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_rp_periodo ON public.reportes_liquidaciones(id_registro_patronal, anio_periodo, mes_periodo);
+        CREATE INDEX IF NOT EXISTS idx_liquidaciones_rp_periodo ON public.liquidaciones(id_registro_patronal, anio_periodo, mes_periodo);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_rep ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_obra ON public.reportes_detalles_liquidaciones(id_registro_obra);
         CREATE INDEX IF NOT EXISTS idx_reportes_vinc_obras_id_rep ON public.reportes_vinculaciones_obras_liquidaciones(id_reporte_liquidacion);
@@ -792,7 +880,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_clave_fecha ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion, clave, fecha);
         CREATE INDEX IF NOT EXISTS idx_nominas_emp_fecha ON public.nominas(id_empleado, fecha_pago DESC NULLS LAST);
         CREATE INDEX IF NOT EXISTS idx_nominas_emp_rev ON public.nominas(id_empleado, id_revision);
-        CREATE INDEX IF NOT EXISTS idx_liquidaciones_emp_rev ON public.liquidaciones(id_empleado, id_revision);
+        CREATE INDEX IF NOT EXISTS idx_liquidaciones_emp_rp ON public.liquidaciones(id_empleado, id_registro_patronal);
         CREATE INDEX IF NOT EXISTS idx_registros_patronales_id_entidad_fed ON public.registros_patronales(id_entidad_federativa);
         CREATE INDEX IF NOT EXISTS idx_registros_patronales_id_rel_del_sub ON public.registros_patronales(id_rel_del_sub);
         CREATE INDEX IF NOT EXISTS idx_rel_del_sub_id_del ON public.rel_delegacion_subdelegacion(id_delegacion);
@@ -801,7 +889,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_empleados_cliente_curp ON public.empleados(id_cliente, curp);
         CREATE INDEX IF NOT EXISTS idx_empleados_cliente_rfc ON public.empleados(id_cliente, rfc);
         CREATE INDEX IF NOT EXISTS idx_empleados_cliente_nombre ON public.empleados(id_cliente, nombre);
-        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_rev_emp ON public.reportes_liquidaciones(id_revision, id_empleado);
+        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_rp_emp ON public.reportes_liquidaciones(id_registro_patronal, id_empleado);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_combo ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion, id_registro_obra);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_nom_rep ON public.reportes_detalles_nominas(id_reporte_nomina, id_concepto);
 
