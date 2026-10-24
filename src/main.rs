@@ -1744,13 +1744,14 @@ fn handle_cedulas_upload_and_inspect(
         return;
     }
 
-    let (cliente_nombre, rp_registro, revision_nombre, revision_id) = if let Some(ui) = ui_weak.upgrade() {
+    let (cliente_nombre, rp_registro, revision_nombre, revision_id, rp_id) = if let Some(ui) = ui_weak.upgrade() {
         let app_data = ui.global::<AppData>();
         (
             app_data.get_selected_cliente_nombre().to_string(),
             app_data.get_selected_rp_registro().to_string(),
             app_data.get_selected_revision_nombre().to_string(),
             app_data.get_selected_revision_id().to_string(),
+            app_data.get_selected_rp_id().to_string(),
         )
     } else {
         return;
@@ -1776,6 +1777,19 @@ fn handle_cedulas_upload_and_inspect(
                          JOIN clientes c ON rp.id_cliente = c.id
                          WHERE r.id = $1",
                         &[&rev_uuid],
+                    ) {
+                        c_nom = row.get(0);
+                        r_reg = row.get(1);
+                        rev_nom = row.get(2);
+                        c_rfc = row.get::<_, Option<String>>(3).unwrap_or_default();
+                    }
+                } else if let Ok(rp_uuid) = uuid::Uuid::parse_str(&rp_id) {
+                    if let Ok(Some(row)) = client.query_opt(
+                        "SELECT c.nombre, rp.registro, 'GENERAL', c.rfc
+                         FROM registros_patronales rp
+                         JOIN clientes c ON rp.id_cliente = c.id
+                         WHERE rp.id = $1",
+                        &[&rp_uuid],
                     ) {
                         c_nom = row.get(0);
                         r_reg = row.get(1);
@@ -1867,16 +1881,30 @@ fn handle_cedulas_upload_and_inspect(
             });
         }
 
-        // 3. Consultar estado en PostgreSQL para esta revisión específica
+        // 3. Consultar estado en PostgreSQL para este registro patronal específico
         let mut _db_existing_liq_count = 0i64;
-        if let Some(ref pool) = pool_clone
-            && let Ok(mut client) = pool.get()
-            && let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id)
-            && let Ok(row) = client.query_one(
-                "SELECT COUNT(*) FROM public.liquidaciones WHERE id_revision = $1",
-                &[&rev_uuid],
-            ) {
-            _db_existing_liq_count = row.get(0);
+        if let Some(ref pool) = pool_clone {
+            if let Ok(mut client) = pool.get() {
+                let target_uuid = uuid::Uuid::parse_str(&revision_id).ok()
+                    .or_else(|| uuid::Uuid::parse_str(&rp_id).ok());
+                if let Some(u) = target_uuid {
+                    let rp_uuid_opt = if let Ok(Some(r)) = client.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&u]) {
+                        Some(r.get::<_, uuid::Uuid>(0))
+                    } else if let Ok(Some(r)) = client.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&u]) {
+                        Some(r.get::<_, uuid::Uuid>(0))
+                    } else {
+                        None
+                    };
+                    if let Some(rp_uuid) = rp_uuid_opt {
+                        if let Ok(row) = client.query_one(
+                            "SELECT COUNT(*) FROM public.liquidaciones WHERE id_registro_patronal = $1",
+                            &[&rp_uuid],
+                        ) {
+                            _db_existing_liq_count = row.get(0);
+                        }
+                    }
+                }
+            }
         }
 
         // 4. Procesar archivos: Estandarizar nombre 'Nombre Cliente__Registro Patronal__Mes__Anio.pdf',
@@ -1939,7 +1967,8 @@ fn handle_cedulas_upload_and_inspect(
                 if let Some(ref pool) = pool_clone {
                     if let Ok(mut client) = pool.get() {
                         let anio_num: i32 = anio_str.parse().unwrap_or(2026);
-                        if let Err(e) = crate::cedulas::view_logic::delete_cedula_for_month(&mut client, &revision_id, &mes_str, anio_num) {
+                        let target_del_id = if !revision_id.trim().is_empty() { &revision_id } else { &rp_id };
+                        if let Err(e) = crate::cedulas::view_logic::delete_cedula_for_month(&mut client, target_del_id, &mes_str, anio_num) {
                             log::error!("Error al eliminar liquidaciones de mes {} en BD: {}", mes_str, e);
                         }
                     }
@@ -6332,12 +6361,17 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let cedulas_session_clone = cedulas_session.clone();
         let pool_clone = db_pool.clone();
-        app_logic.on_cargar_cedulas_from_revision(move || {
+        app_logic.on_cargar_cedulas_from_revision(move |rp_id| {
             let Some(ui) = ui_weak.upgrade() else { return; };
             let app_data = ui.global::<AppData>();
-            let rev_id = app_data.get_selected_revision_id().to_string();
-            if rev_id.trim().is_empty() {
-                show_toast_message(&ui, "Seleccione una revisión para cargar cédulas de cuotas.");
+            let rp_str = rp_id.to_string();
+            let effective_rp_id = if !rp_str.trim().is_empty() {
+                rp_str
+            } else {
+                app_data.get_selected_rp_id().to_string()
+            };
+            if effective_rp_id.trim().is_empty() && app_data.get_selected_revision_id().to_string().trim().is_empty() {
+                show_toast_message(&ui, "Seleccione un registro patronal para cargar cédulas de cuotas.");
                 return;
             }
 

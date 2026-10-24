@@ -1315,7 +1315,11 @@ pub fn check_cedulas_exists(
     revision_id: Uuid,
 ) -> Result<bool, String> {
     let row = client.query_opt(
-        "SELECT 1 FROM public.liquidaciones WHERE id_revision = $1 LIMIT 1",
+        r#"
+        SELECT 1 FROM public.liquidaciones l
+        JOIN public.revisiones r ON r.id_registro_patronal = l.id_registro_patronal
+        WHERE r.id = $1 LIMIT 1
+        "#,
         &[&revision_id],
     ).map_err(|e| format!("Error verificando cédulas: {}", e))?;
     Ok(row.is_some())
@@ -1339,7 +1343,11 @@ pub fn check_reportes_liquidaciones_exists(
     revision_id: Uuid,
 ) -> Result<bool, String> {
     let row = client.query_opt(
-        "SELECT 1 FROM public.reportes_liquidaciones WHERE id_revision = $1 LIMIT 1",
+        r#"
+        SELECT 1 FROM public.reportes_liquidaciones rl
+        JOIN public.revisiones r ON r.id_registro_patronal = rl.id_registro_patronal
+        WHERE r.id = $1 LIMIT 1
+        "#,
         &[&revision_id],
     ).map_err(|e| format!("Error verificando reportes liquidaciones: {}", e))?;
     Ok(row.is_some())
