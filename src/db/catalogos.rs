@@ -371,10 +371,9 @@ pub fn create_cliente(
 
     // Obtener nombre de tipo de persona si se proporcionó id
     let mut tipo_persona_str: Option<String> = None;
-    if let Ok(tp_uuid) = Uuid::parse_str(id_tipo_persona.trim()) {
-        if let Ok(Some(row)) = client.query_opt("SELECT tipo FROM public.tipos_personas WHERE id = $1", &[&tp_uuid]) {
+    if let Ok(tp_uuid) = Uuid::parse_str(id_tipo_persona.trim())
+        && let Ok(Some(row)) = client.query_opt("SELECT tipo FROM public.tipos_personas WHERE id = $1", &[&tp_uuid]) {
             tipo_persona_str = Some(row.get::<usize, String>(0).trim().to_string());
-        }
     }
 
     validate_cliente_data(&clean_nombre, &clean_rfc, curp, tipo_persona_str.as_deref())?;
@@ -405,8 +404,8 @@ pub fn create_cliente(
 
     // Obtener o crear clasificacion_cliente si se seleccionó tipo de persona y régimen
     let mut id_clasificacion_cliente: Option<Uuid> = None;
-    if !id_tipo_persona.trim().is_empty() && !id_regimen_fiscal.trim().is_empty() {
-        if let (Ok(tp_uuid), Ok(rf_uuid)) = (Uuid::parse_str(id_tipo_persona.trim()), Uuid::parse_str(id_regimen_fiscal.trim())) {
+    if !id_tipo_persona.trim().is_empty() && !id_regimen_fiscal.trim().is_empty()
+        && let (Ok(tp_uuid), Ok(rf_uuid)) = (Uuid::parse_str(id_tipo_persona.trim()), Uuid::parse_str(id_regimen_fiscal.trim())) {
             let row_cc = client
                 .query_opt(
                     "SELECT id FROM public.clasificaciones_clientes WHERE id_tipo_persona = $1 AND id_regimen_fiscal = $2",
@@ -426,7 +425,6 @@ pub fn create_cliente(
                 id_clasificacion_cliente = Some(new_cc_id);
             }
         }
-    }
 
     let r_social = clean_uppercase_opt(razon_social);
     let curp_raw = clean_alphanumeric(curp);
@@ -472,6 +470,7 @@ pub fn create_cliente(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_cliente(
     client: &mut Client,
     id: &str,
@@ -496,10 +495,9 @@ pub fn update_cliente(
 
     // Obtener nombre de tipo de persona si se proporcionó id
     let mut tipo_persona_str: Option<String> = None;
-    if let Ok(tp_uuid) = Uuid::parse_str(id_tipo_persona.trim()) {
-        if let Ok(Some(row)) = client.query_opt("SELECT tipo FROM public.tipos_personas WHERE id = $1", &[&tp_uuid]) {
+    if let Ok(tp_uuid) = Uuid::parse_str(id_tipo_persona.trim())
+        && let Ok(Some(row)) = client.query_opt("SELECT tipo FROM public.tipos_personas WHERE id = $1", &[&tp_uuid]) {
             tipo_persona_str = Some(row.get::<usize, String>(0).trim().to_string());
-        }
     }
 
     validate_cliente_data(&clean_nombre, &clean_rfc, curp, tipo_persona_str.as_deref())?;
@@ -528,8 +526,8 @@ pub fn update_cliente(
 
     // Obtener o crear clasificacion_cliente
     let mut id_clasificacion_cliente: Option<Uuid> = None;
-    if !id_tipo_persona.trim().is_empty() && !id_regimen_fiscal.trim().is_empty() {
-        if let (Ok(tp_uuid), Ok(rf_uuid)) = (Uuid::parse_str(id_tipo_persona.trim()), Uuid::parse_str(id_regimen_fiscal.trim())) {
+    if !id_tipo_persona.trim().is_empty() && !id_regimen_fiscal.trim().is_empty()
+        && let (Ok(tp_uuid), Ok(rf_uuid)) = (Uuid::parse_str(id_tipo_persona.trim()), Uuid::parse_str(id_regimen_fiscal.trim())) {
             let row_cc = client
                 .query_opt(
                     "SELECT id FROM public.clasificaciones_clientes WHERE id_tipo_persona = $1 AND id_regimen_fiscal = $2",
@@ -549,7 +547,6 @@ pub fn update_cliente(
                 id_clasificacion_cliente = Some(new_cc_id);
             }
         }
-    }
 
     let r_social = clean_uppercase_opt(razon_social);
     let curp_raw = clean_alphanumeric(curp);
@@ -680,6 +677,7 @@ pub fn fetch_registros_patronales_by_cliente(
     Ok(list)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_registro_patronal(
     client: &mut Client,
     id_cliente: &str,
@@ -828,6 +826,7 @@ pub fn create_registro_patronal(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_registro_patronal(
     client: &mut Client,
     id: &str,

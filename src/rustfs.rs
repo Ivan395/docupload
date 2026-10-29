@@ -2,7 +2,7 @@ use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
 use s3::BucketConfiguration;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::fs;
 use crate::cedulas::view_logic::{inspect_cedula_file, CedulaFileCardInfo};
 use crate::db::client::DbPool;
@@ -193,7 +193,180 @@ pub fn is_trash_key(key: &str) -> bool {
     lower.starts_with("trash/") || lower.contains("/trash/")
 }
 
-/// Lista los archivos en RustFS bajo la carpeta dada (recursivo, preservando subcarpetas pero omitiendo "Trash")
+pub fn is_staging_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    lower.starts_with(".staging_") || lower.contains("/.staging_")
+}
+
+/// Fase 2 (Staging en `rustfs`): Sube un archivo a un prefijo temporal `.staging_<batch_id>`
+/// dentro de la subcarpeta destino para mantener aislamiento hasta que la transacción de
+/// PostgreSQL haga `COMMIT`.
+pub fn upload_staging_file_to_rustfs(
+    cliente: &str,
+    rp: &str,
+    revision: &str,
+    subfolder: &str,
+    batch_id: &str,
+    rel_path: &str,
+    data: &[u8],
+) -> Result<String, String> {
+    ensure_bucket_exists()?;
+    let bucket = get_rustfs_bucket(BUCKET_NAME)?;
+
+    let clean_c = sanitize_path_component(cliente);
+    let clean_rp = sanitize_path_component(rp);
+    let clean_r = sanitize_path_component(revision);
+    let clean_batch = sanitize_path_component(batch_id);
+    let clean_rel = sanitize_relative_path(rel_path);
+
+    let staging_key = format!(
+        "{}/{}/{}/{}/.staging_{}/{}",
+        clean_c, clean_rp, clean_r, subfolder, clean_batch, clean_rel
+    );
+
+    bucket
+        .put_object(&staging_key, data)
+        .map_err(|e| format!("Error subiendo archivo staging a RustFS ({}): {}", staging_key, e))?;
+
+    log::info!(
+        "Archivo preparado en staging de RustFS: s3://{}/{}",
+        BUCKET_NAME,
+        staging_key
+    );
+    Ok(staging_key)
+}
+
+/// Fase 4A (Commit en `rustfs`): Promueve todos los archivos desde `.staging_<batch_id>/...`
+/// hacia su ubicación definitiva `<Anio>/<Mes>/<Archivo>` y limpia el directorio de staging.
+pub fn commit_staging_files_in_rustfs(
+    cliente: &str,
+    rp: &str,
+    revision: &str,
+    subfolder: &str,
+    batch_id: &str,
+) -> Result<usize, String> {
+    ensure_bucket_exists()?;
+    let bucket = get_rustfs_bucket(BUCKET_NAME)?;
+
+    let clean_c = sanitize_path_component(cliente);
+    let clean_rp = sanitize_path_component(rp);
+    let clean_r = sanitize_path_component(revision);
+    let clean_batch = sanitize_path_component(batch_id);
+
+    let staging_prefix = format!(
+        "{}/{}/{}/{}/.staging_{}/",
+        clean_c, clean_rp, clean_r, subfolder, clean_batch
+    );
+    let base_prefix = format!("{}/{}/{}/{}/", clean_c, clean_rp, clean_r, subfolder);
+
+    let list_res = bucket
+        .list(staging_prefix.clone(), None)
+        .map_err(|e| format!("Error listando staging en RustFS ({}): {}", staging_prefix, e))?;
+
+    let mut staged_keys = Vec::new();
+    for page in list_res {
+        for obj in page.contents {
+            if !obj.key.ends_with('/') {
+                staged_keys.push(obj.key);
+            }
+        }
+    }
+
+    let mut promoted_keys: Vec<String> = Vec::new();
+    for src_key in &staged_keys {
+        let rel = match src_key.strip_prefix(&staging_prefix) {
+            Some(r) if !r.is_empty() => r,
+            _ => continue,
+        };
+        let final_key = format!("{}{}", base_prefix, rel);
+
+        let res = match bucket.get_object(src_key) {
+            Ok(r) if r.status_code() == 200 => r,
+            Ok(r) => {
+                for pk in &promoted_keys {
+                    let _ = bucket.delete_object(pk);
+                }
+                return Err(format!(
+                    "Código HTTP {} leyendo objeto staging en RustFS ({})",
+                    r.status_code(),
+                    src_key
+                ));
+            }
+            Err(e) => {
+                for pk in &promoted_keys {
+                    let _ = bucket.delete_object(pk);
+                }
+                return Err(format!(
+                    "Error leyendo objeto staging en RustFS ({}): {}",
+                    src_key, e
+                ));
+            }
+        };
+
+        if let Err(e) = bucket.put_object(&final_key, res.bytes()) {
+            for pk in &promoted_keys {
+                let _ = bucket.delete_object(pk);
+            }
+            return Err(format!(
+                "Error promoviendo archivo definitivo en RustFS ({}): {}",
+                final_key, e
+            ));
+        }
+
+        promoted_keys.push(final_key);
+    }
+
+    for src_key in &staged_keys {
+        let _ = bucket.delete_object(src_key);
+    }
+
+    Ok(promoted_keys.len())
+}
+
+/// Fase 4B (Rollback en `rustfs`): Elimina inmediatamente cualquier archivo temporal o parcial
+/// creado bajo `.staging_<batch_id>/...` cuando ocurre un error en la base de datos o en el sistema.
+pub fn rollback_staging_files_in_rustfs(
+    cliente: &str,
+    rp: &str,
+    revision: &str,
+    subfolder: &str,
+    batch_id: &str,
+) -> Result<usize, String> {
+    ensure_bucket_exists()?;
+    let bucket = get_rustfs_bucket(BUCKET_NAME)?;
+
+    let clean_c = sanitize_path_component(cliente);
+    let clean_rp = sanitize_path_component(rp);
+    let clean_r = sanitize_path_component(revision);
+    let clean_batch = sanitize_path_component(batch_id);
+
+    let staging_prefix = format!(
+        "{}/{}/{}/{}/.staging_{}/",
+        clean_c, clean_rp, clean_r, subfolder, clean_batch
+    );
+
+    let list_res = bucket
+        .list(staging_prefix.clone(), None)
+        .map_err(|e| format!("Error listando staging para rollback en RustFS ({}): {}", staging_prefix, e))?;
+
+    let mut deleted = 0usize;
+    for page in list_res {
+        for obj in page.contents {
+            if bucket.delete_object(&obj.key).is_ok() {
+                deleted += 1;
+            }
+        }
+    }
+
+    log::warn!(
+        "Rollback de staging ejecutado en RustFS ({}): {} objetos temporales eliminados.",
+        staging_prefix,
+        deleted
+    );
+    Ok(deleted)
+}
+
+/// Lista los archivos en RustFS bajo la carpeta dada (recursivo, preservando subcarpetas pero omitiendo "Trash" y ".staging_")
 pub fn list_rustfs_files(
     cliente: &str,
     rp: &str,
@@ -219,7 +392,7 @@ pub fn list_rustfs_files(
             if obj.key.ends_with("/.keep") || obj.key.ends_with('/') {
                 continue;
             }
-            if is_trash_key(&obj.key) {
+            if is_trash_key(&obj.key) || is_staging_key(&obj.key) {
                 continue;
             }
             let rel = obj.key.strip_prefix(&prefix).unwrap_or(&obj.key);
@@ -469,6 +642,111 @@ pub fn move_revision_to_trash(cliente: &str, rp: &str, revision: &str) -> Result
         }
     }
     Ok(moved_count)
+}
+
+/// Alcance de eliminación segura hacia la papelera (`Trash`) en RustFS (`correcciones`).
+#[derive(Debug, Clone)]
+pub enum TrashScope<'a> {
+    /// Mueve toda la carpeta del cliente a `/correcciones/Trash/<Nombre_Empresa>/`
+    Cliente { cliente: &'a str },
+    /// Mueve el Registro Patronal a `/correcciones/<Nombre_Empresa>/Trash/<Registro_Patronal>/`
+    RegistroPatronal { cliente: &'a str, rp: &'a str },
+    /// Mueve la revisión a `/correcciones/<Nombre_Empresa>/<Registro_Patronal>/Trash/<Nombre_Revision>/`
+    Revision {
+        cliente: &'a str,
+        rp: &'a str,
+        revision: &'a str,
+    },
+    /// Mueve todas las Cédulas de Cuotas de una revisión a:
+    /// `/correcciones/<Nombre_Empresa>/<Registro_Patronal>/<Nombre_Revision>/Cedulas_de_cuotas/Trash/`
+    CedulasRevision {
+        cliente: &'a str,
+        rp: &'a str,
+        revision: &'a str,
+    },
+    /// Mueve un archivo individual de una categoría (p. ej. `"Cedulas_de_cuotas"`) a su `Trash/`
+    ArchivoCategoria {
+        cliente: &'a str,
+        rp: &'a str,
+        revision: &'a str,
+        categoria: &'a str,
+        filename: &'a str,
+    },
+}
+
+/// Punto de entrada unificado para borrado seguro en RustFS (`Trash`).
+/// Garantiza que ningún archivo sea destruido directamente, reubicándolo en su carpeta `Trash` correspondiente.
+pub fn move_to_trash(scope: TrashScope<'_>) -> Result<usize, String> {
+    match scope {
+        TrashScope::Cliente { cliente } => move_client_to_trash(cliente),
+        TrashScope::RegistroPatronal { cliente, rp } => move_rp_to_trash(cliente, rp),
+        TrashScope::Revision {
+            cliente,
+            rp,
+            revision,
+        } => move_revision_to_trash(cliente, rp, revision),
+        TrashScope::CedulasRevision {
+            cliente,
+            rp,
+            revision,
+        } => move_all_files_to_trash(cliente, rp, revision, "Cedulas_de_cuotas"),
+        TrashScope::ArchivoCategoria {
+            cliente,
+            rp,
+            revision,
+            categoria,
+            filename,
+        } => move_file_to_trash(cliente, rp, revision, categoria, filename).map(|_| 1),
+    }
+}
+
+/// Mueve de forma segura y multiplataforma (`std::path::PathBuf`) un archivo o directorio local
+/// hacia su carpeta `Trash` destino, creándola si no existe (`fs::create_dir_all`) y aplicando
+/// `fs::rename` con fallback de copia + borrado cuando origen y destino están en distintos volúmenes.
+pub fn move_local_path_to_trash(src: &Path, trash_dir: &Path) -> Result<PathBuf, String> {
+    if !src.exists() {
+        return Err(format!("La ruta de origen no existe: {}", src.display()));
+    }
+    fs::create_dir_all(trash_dir).map_err(|e| {
+        format!(
+            "No se pudo crear el directorio Trash ({}): {}",
+            trash_dir.display(),
+            e
+        )
+    })?;
+
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| format!("Nombre de archivo o carpeta inválido: {}", src.display()))?;
+    let dst = trash_dir.join(file_name);
+
+    if fs::rename(src, &dst).is_err() {
+        if src.is_file() {
+            fs::copy(src, &dst).map_err(|e| {
+                format!(
+                    "Error copiando archivo hacia Trash ({} -> {}): {}",
+                    src.display(),
+                    dst.display(),
+                    e
+                )
+            })?;
+            fs::remove_file(src).map_err(|e| {
+                format!(
+                    "Error removiendo archivo original tras copia a Trash ({}): {}",
+                    src.display(),
+                    e
+                )
+            })?;
+        } else {
+            return Err(format!(
+                "No se pudo mover el directorio hacia Trash ({} -> {})",
+                src.display(),
+                dst.display()
+            ));
+        }
+    }
+
+    Ok(dst)
 }
 
 /// Descarga un archivo de RustFS por su key

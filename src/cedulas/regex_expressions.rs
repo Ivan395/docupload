@@ -88,12 +88,12 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
         r"(?i)nombre\s+o\s+raz[óo]n\s+social\s*:\s*(?P<razon_social>[^ ].*?)(?:\s{2,}|\n|\z)",
     )?;
     let business_delegacion = Regex::new(
-        r"(?i)delegaci[óo]n\s+imss\s*:\s*(?P<delegacion>[a-zñáéíóúü ]+?)\s+(?P<codigo>\d+)",
+        r"(?i)delegaci[óo]n\s*(?:imss)?\s*:\s*(?:(?P<delegacion>[a-zñáéíóúü ]+?)\s+(?P<codigo>\d+)|(?P<codigo_alt>\d+)\s*[-]?\s*(?P<delegacion_alt>[a-zñáéíóúü ]+))",
     )?;
     let business_actividad =
         Regex::new(r"(?i)actividad\s*:\s*(?P<actividad>[^ ].*?)(?:\s{2,}|\n|\z)")?;
     let business_subdelegacion = Regex::new(
-        r"(?i)(?P<subdelegacion>[a-zñáéíóúü ]+?)\s+(?P<codigo_subdelegacion>\d+)\s*\n[^\n]*subdelegaci[óo]n\s+imss\s*:",
+        r"(?i)subdelegaci[óo]n\s*(?:imss)?\s*:\s*(?:(?P<subdelegacion>[a-zñáéíóúü ]+?)\s+(?P<codigo_subdelegacion>\d+)|(?P<codigo_subdelegacion_alt>\d+)\s*[-]?\s*(?P<subdelegacion_alt>[a-zñáéíóúü ]+))",
     )?;
     let business_domicilio =
         Regex::new(r"(?i)domicilio\s*:\s*(?P<domicilio>[^ ].*?)(?:\s{2,}|\n|\z)")?;

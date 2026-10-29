@@ -12,7 +12,7 @@ use crate::{
     ReporteFilterOptionItem, ReporteMesTotalItem, ReporteGuarderiaObraItem,
     ReporteObraUsuarioItem, ReporteSuaObraItem, ReporteBatchWorkerItem,
     ReporteSelectedItem, ReporteBatchObraItem, ReporteEditObraItem,
-    ReporteUniqueEmpleadoItem,
+    ReporteUniqueEmpleadoItem, InconsistenciaDetalle,
 };
 use crate::cedulas::business::month_to_num;
 use crate::db::DbPool;
@@ -1059,6 +1059,19 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             false
         };
 
+        let tiene_inconsistencia = r.tiene_inconsistencia || dias_mismatch;
+        let observacion_validacion = if !r.observacion_validacion.trim().is_empty() {
+            r.observacion_validacion.clone()
+        } else if dias_mismatch {
+            if is_baja {
+                "Movimiento de BAJA no debe tener días de obra ni importe asignado.".to_string()
+            } else {
+                format!("Suma de días asignados ({}) no coincide con los días de cédula ({}).", total_dias_obras, r.dias_cedula)
+            }
+        } else {
+            String::new()
+        };
+
         let is_expanded = state.expanded_row_id == Some(r.id_reporte_liq);
         let movimientos_resumen = if is_expanded {
             let mov_rows: Vec<&ReporteLiquidacionRowDb> = state.all_rows.iter().filter(|x| {
@@ -1102,6 +1115,8 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             can_delete_split,
             is_expanded,
             movimientos_resumen: movimientos_resumen.into(),
+            tiene_inconsistencia,
+            observacion_validacion: observacion_validacion.into(),
             is_baja,
             idx: (start_idx + page_offset + 1) as i32,
             id_reporte_liq: r.id_reporte_liq.to_string().into(),
@@ -1352,12 +1367,7 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
 
     // 9. Guarderías por Registro de Obra creado por el usuario (Tope 18%)
     let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
-        let opt = &state.obras_options[state.filter_obra_idx - 1];
-        if opt.creado_usuario {
-            Some(opt.id)
-        } else {
-            None
-        }
+        Some(state.obras_options[state.filter_obra_idx - 1].id)
     } else {
         None
     };
@@ -1517,14 +1527,37 @@ pub fn sync_and_load_reporte_data(
     let client_name = app_data.get_selected_cliente_nombre().to_string();
     let rp_name = app_data.get_selected_rp_registro().to_string();
     let rev_name = app_data.get_selected_revision_nombre().to_string();
-    let mut rev_folio = app_data.get_selected_revision_folio().to_string();
-    if rev_folio.trim().is_empty() {
-        if let Ok(Some(row)) = client.query_opt("SELECT folio FROM public.revisiones WHERE id = $1", &[&rev_uuid]) {
-            rev_folio = row.get::<_, Option<String>>(0).unwrap_or_default().trim().to_string();
-        }
-    }
-    if rev_folio.trim().is_empty() || rev_folio.trim() == "S/F" {
-        rev_folio = rev_name.clone();
+    let rev_folio = app_data.get_selected_revision_folio().to_string();
+    // 4. Calcular diagnóstico de meses requeridos de los ROs vs disponibles para warning
+    let diag = crate::db::reporte_liquidaciones::check_missing_cedulas_for_revision(
+        &mut client,
+        rev_uuid,
+    ).unwrap_or_default();
+
+    let missing_slint: Vec<SharedString> = diag
+        .missing_periods
+        .iter()
+        .map(|s| SharedString::from(s.as_str()))
+        .collect();
+
+    let inconsistencias_slint: Vec<InconsistenciaDetalle> = diag
+        .inconsistencias
+        .iter()
+        .map(|it| InconsistenciaDetalle {
+            periodo: SharedString::from(it.periodo.as_str()),
+            mes_anio: SharedString::from(it.mes_anio.as_str()),
+            obras_vinculadas: SharedString::from(it.obras_vinculadas.as_str()),
+            obras_count: it.obras_count as i32,
+        })
+        .collect();
+
+    app_data.set_reporte_has_missing_cedulas_warning(diag.has_missing);
+    app_data.set_reporte_missing_cedulas_msg(SharedString::from(diag.summary_msg));
+    app_data.set_reporte_missing_cedulas_reason(SharedString::from(diag.reason_msg));
+    app_data.set_reporte_missing_cedulas_meses(ModelRc::new(VecModel::from(missing_slint)));
+    app_data.set_reporte_inconsistencias_detalles(ModelRc::new(VecModel::from(inconsistencias_slint)));
+    if !diag.has_missing {
+        app_data.set_reporte_show_missing_cedulas_details(false);
     }
 
     // 4. Actualizar estado de sesión
@@ -1661,26 +1694,28 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 let rev_id = app_data.get_selected_revision_id().to_string();
+                let rp_id = app_data.get_selected_rp_id().to_string();
+                let target_id = if !rev_id.trim().is_empty() { rev_id } else { rp_id };
                 crate::app_logger::log_ui_action(
                     "Reporte Liquidaciones",
                     "Navegación",
                     "Botón Abrir Reporte",
                     "Abrir vista de Reporte Liquidaciones",
-                    &format!("id_revision={}", rev_id),
+                    &format!("target_id={}", target_id),
                 );
-                if rev_id.is_empty() {
+                if target_id.is_empty() {
                     crate::app_logger::log_ui_error(
                         "Reporte Liquidaciones",
                         "Navegación",
                         "Validación",
-                        "No hay revisión seleccionada",
+                        "No hay registro patronal seleccionado",
                     );
-                    crate::show_toast_message(&ui, "Seleccione primero una revisión.");
+                    crate::show_toast_message(&ui, "Seleccione primero un Registro Patronal.");
                     return;
                 }
                 app_data.set_reporte_liquidaciones_access_allowed(true);
                 app_data.set_current_view(7);
-                sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &rev_id);
+                sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id);
             }
         });
     }
@@ -1692,16 +1727,19 @@ pub fn wire_reporte_liquidaciones_callbacks(
         let session_clone = reporte_session.clone();
         app_logic.on_reload_reporte_liquidaciones(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let rev_id = ui.global::<AppData>().get_selected_revision_id().to_string();
+                let app_data = ui.global::<AppData>();
+                let rev_id = app_data.get_selected_revision_id().to_string();
+                let rp_id = app_data.get_selected_rp_id().to_string();
+                let target_id = if !rev_id.trim().is_empty() { rev_id } else { rp_id };
                 crate::app_logger::log_ui_action(
                     "Reporte Liquidaciones",
                     "Barra Superior",
                     "Botón Recargar",
                     "Recargar datos del reporte",
-                    &format!("id_revision={}", rev_id),
+                    &format!("target_id={}", target_id),
                 );
-                if !rev_id.is_empty() {
-                    sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &rev_id);
+                if !target_id.is_empty() {
+                    sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id);
                     crate::show_toast_message(&ui, "Reporte de liquidaciones recargado.");
                 }
             }
@@ -2733,6 +2771,10 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             row.obra_label = "⚠️ Sin Asignar (Pendiente)".to_string();
                             row.obra_creado_usuario = false;
                         }
+                        if new_dias_obr <= max_permitido {
+                            row.tiene_inconsistencia = false;
+                            row.observacion_validacion = String::new();
+                        }
                         recalculate_row_in_memory(row);
                     }
 
@@ -2988,6 +3030,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             row.obra_label = "⚠️ Sin Asignar (Pendiente)".to_string();
                             row.dias_obra = 0;
                             row.obra_creado_usuario = false;
+                            row.tiene_inconsistencia = false;
+                            row.observacion_validacion = String::new();
                             recalculate_row_in_memory(row);
                         }
                         state.all_rows.retain(|x| !(x.id_parent_reporte_liq == parent_id && x.id_reporte_liq != row_uuid));
@@ -3001,6 +3045,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             row.obra_label = first_lbl;
                             row.dias_obra = first_dias;
                             row.obra_creado_usuario = first_creado;
+                            row.tiene_inconsistencia = false;
+                            row.observacion_validacion = String::new();
                             recalculate_row_in_memory(row);
                         }
 
@@ -3017,6 +3063,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                     row.obra_label = sub_lbl;
                                     row.dias_obra = sub_dias;
                                     row.obra_creado_usuario = sub_creado;
+                                    row.tiene_inconsistencia = false;
+                                    row.observacion_validacion = String::new();
                                     recalculate_row_in_memory(row);
                                 }
                                 current_sib_idx += 1;
@@ -3029,6 +3077,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                     new_split.obra_label = sub_lbl;
                                     new_split.dias_obra = sub_dias;
                                     new_split.obra_creado_usuario = sub_creado;
+                                    new_split.tiene_inconsistencia = false;
+                                    new_split.observacion_validacion = String::new();
                                     recalculate_row_in_memory(&mut new_split);
                                     state.all_rows.push(new_split);
                                 }
@@ -6447,6 +6497,7 @@ mod tests {
                 id_reporte_liq: Uuid::now_v7(),
                 id_parent_reporte_liq: Uuid::now_v7(),
                 id_liquidacion: Uuid::now_v7(),
+                id_revision: Uuid::now_v7(),
                 id_empleado: Uuid::now_v7(),
                 nombre_trabajador: "TRABAJADOR".into(),
                 rfc: "XAXX010101000".into(),
@@ -6455,6 +6506,7 @@ mod tests {
                 pensionado: String::new(),
                 registro_patronal: "Y5410204108".into(),
                 mes_periodo: "ENERO".into(),
+                mes_periodo_int: 1,
                 anio_periodo: 2024,
                 periodo_str: "01/2024".into(),
                 dias_cedula: 30,
@@ -6498,6 +6550,8 @@ mod tests {
                 patronal_orig: 80.0,
                 obrera_orig: 20.0,
                 subtotal_orig: 100.0,
+                tiene_inconsistencia: false,
+                observacion_validacion: String::new(),
             }
         };
 
@@ -6553,9 +6607,11 @@ mod tests {
                 id_reporte_liq: id,
                 id_parent_reporte_liq: Uuid::now_v7(),
                 id_liquidacion: Uuid::now_v7(),
+                id_revision: Uuid::now_v7(),
                 id_empleado: Uuid::now_v7(),
                 periodo_str: "01/2026".to_string(),
                 mes_periodo: "Enero".to_string(),
+                mes_periodo_int: 1,
                 anio_periodo: 2026,
                 nss: "12345678901".to_string(),
                 rfc: "TEST010101XX1".to_string(),
@@ -6604,6 +6660,8 @@ mod tests {
                 patronal_orig: 80.0,
                 obrera_orig: 20.0,
                 subtotal_orig: 100.0,
+                tiene_inconsistencia: false,
+                observacion_validacion: String::new(),
             }
         };
 

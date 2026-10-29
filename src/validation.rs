@@ -704,7 +704,7 @@ pub fn validate_registro_obra(obra: &str) -> Result<RegistroObraInfo, String> {
         })
     } else if chars[0].is_ascii_digit() {
         // Formato SATIC: 8 a 10 dígitos numéricos (ej. 08-12345-67)
-        if len < 8 || len > 10 {
+        if !(8..=10).contains(&len) {
             return Err(format!(
                 "La estructura del registro de obra no es correcta. El formato SATIC debe contener entre 8 y 10 dígitos (ej. 08-12345-67; se ingresaron {} dígitos).",
                 len
@@ -777,7 +777,7 @@ pub fn format_integer_with_commas(digits: &str) -> String {
     let chars: Vec<char> = effective.chars().collect();
     let mut result = String::with_capacity(chars.len() + chars.len() / 3);
     for (i, ch) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i) % 3 == 0 {
+        if i > 0 && (chars.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(*ch);

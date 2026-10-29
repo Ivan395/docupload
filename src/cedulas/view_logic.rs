@@ -492,6 +492,18 @@ pub fn extract_cedula_standard_naming(
     default_cliente: &str,
     default_rp: &str,
 ) -> (String, String, String, String, String) {
+    let (std_fname, anio, mes, c_name, rp_name, _is_valid) =
+        inspect_cedula_upload_naming(path, default_cliente, default_rp);
+    (std_fname, anio, mes, c_name, rp_name)
+}
+
+/// Inspecciona un PDF para subida y determina su nombre estándar ('Cliente__RP__Mes__Anio.pdf')
+/// además de verificar si contiene formato oficial SUA/EMA con renglones de trabajadores y periodo válido.
+pub fn inspect_cedula_upload_naming(
+    path: &Path,
+    default_cliente: &str,
+    default_rp: &str,
+) -> (String, String, String, String, String, bool) {
     let raw_text = extract_with_layout(path).unwrap_or_default();
     let patterns = crate::cedulas::regex_expressions::initialize_patterns().ok();
 
@@ -499,9 +511,11 @@ pub fn extract_cedula_standard_naming(
     let mut mes_found = None;
     let mut anio_found = None;
     let mut cliente_found = None;
+    let mut has_workers = false;
 
-    if !raw_text.is_empty() {
-        if crate::cedulas::ema::is_ema_document(&raw_text) {
+    if raw_text.trim().len() >= 50 {
+        let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
+        if is_ema {
             if let Some(r) = crate::cedulas::ema::extract_ema_rp(&raw_text) {
                 rp_found = Some(r);
             }
@@ -512,47 +526,62 @@ pub fn extract_cedula_standard_naming(
                 mes_found = Some(month_num_to_name(valid_m).to_string());
                 anio_found = Some(y);
             }
+            if let Ok((_, emps)) = crate::cedulas::ema::parse_ema_document(&raw_text, "") {
+                has_workers = !emps.is_empty();
+            }
         }
 
         if let Some(ref patterns) = patterns {
             let cleaned = clean_text(&raw_text.to_lowercase(), patterns);
-            if rp_found.is_none() {
-                if let Ok(Some(mat)) = patterns.business_registro_patronal.find(&cleaned) {
-                    let chunk = &cleaned[mat.start()..cleaned.len().min(mat.start() + 200)];
-                    if let Ok(Some(caps)) = patterns.business_registro_patronal.captures(chunk) {
-                        if let Some(m) = caps.name("registro_patronal") {
-                            let filtered: String = m.as_str().chars().filter(|c| c.is_alphanumeric()).collect();
-                            if !filtered.is_empty() {
-                                rp_found = Some(filtered.to_uppercase());
-                            }
-                        }
+            if rp_found.is_none()
+                && let Ok(Some(mat)) = patterns.business_registro_patronal.find(&cleaned)
+            {
+                let chunk = &cleaned[mat.start()..cleaned.len().min(mat.start() + 200)];
+                if let Ok(Some(caps)) = patterns.business_registro_patronal.captures(chunk)
+                    && let Some(m) = caps.name("registro_patronal")
+                {
+                    let filtered: String = m.as_str().chars().filter(|c| c.is_alphanumeric()).collect();
+                    if !filtered.is_empty() {
+                        rp_found = Some(filtered.to_uppercase());
                     }
                 }
             }
 
-            if mes_found.is_none() || anio_found.is_none() {
-                if let Ok(Some(caps)) = patterns.employee_periodo_proceso.captures(&cleaned) {
-                    if let Some(m) = caps.name("mes_periodo") {
-                        let num = month_to_num(m.as_str().trim());
-                        let valid_num = if (1..=12).contains(&num) { num } else { 1 };
-                        mes_found = Some(month_num_to_name(valid_num).to_string());
+            if (mes_found.is_none() || anio_found.is_none())
+                && let Ok(Some(caps)) = patterns.employee_periodo_proceso.captures(&cleaned)
+            {
+                if let Some(m) = caps.name("mes_periodo") {
+                    let num = month_to_num(m.as_str().trim());
+                    if (1..=12).contains(&num) {
+                        mes_found = Some(month_num_to_name(num).to_string());
                     }
-                    if let Some(y) = caps.name("anio_periodo") {
-                        anio_found = Some(y.as_str().trim().to_string());
-                    }
+                }
+                if let Some(y) = caps.name("anio_periodo") {
+                    anio_found = Some(y.as_str().trim().to_string());
                 }
             }
 
-            if let Ok(Some(caps)) = patterns.business_razon_social.captures(&cleaned) {
-                if let Some(rs) = caps.name("razon_social") {
-                    let clean_rs = rs.as_str().trim().to_uppercase();
-                    if !clean_rs.is_empty() {
-                        cliente_found = Some(clean_rs);
-                    }
+            if let Ok(Some(caps)) = patterns.business_razon_social.captures(&cleaned)
+                && let Some(rs) = caps.name("razon_social")
+            {
+                let clean_rs = rs.as_str().trim().to_uppercase();
+                if !clean_rs.is_empty() {
+                    cliente_found = Some(clean_rs);
                 }
+            }
+
+            if !is_ema && !has_workers {
+                has_workers = patterns
+                    .employee_data_per_employee
+                    .find(&cleaned)
+                    .ok()
+                    .flatten()
+                    .is_some();
             }
         }
     }
+
+    let is_valid_with_workers = has_workers && mes_found.is_some() && anio_found.is_some();
 
     let final_cliente = if !default_cliente.trim().is_empty() && default_cliente != "Todos los Clientes" {
         default_cliente.trim().to_uppercase()
@@ -574,7 +603,7 @@ pub fn extract_cedula_standard_naming(
 
     let standard_filename = format!("{}__{}__{}__{}.pdf", clean_c_name, clean_rp_name, final_mes, final_anio);
 
-    (standard_filename, final_anio, final_mes, clean_c_name, clean_rp_name)
+    (standard_filename, final_anio, final_mes, clean_c_name, clean_rp_name, is_valid_with_workers)
 }
 
 pub struct AuditAssignment {
@@ -650,12 +679,15 @@ pub fn process_and_audit_cedulas(
     let patterns = crate::cedulas::regex_expressions::initialize_patterns()
         .map_err(|e| (format!("Error en expresiones regulares: {}", e), mismatch_report.clone()))?;
 
-    // Extracción concurrente multi-hilo de las capas de texto con MuPDF nativo
+    // Extracción concurrente multi-hilo de las capas de texto con MuPDF nativo y reporte en tiempo real
+    let extracted_counter = std::sync::atomic::AtomicUsize::new(0);
     let extracted_pdfs: Vec<(PathBuf, String, Result<String, String>)> = pdf_files
         .par_iter()
         .map(|pdf_path| {
             let file_display_name = pdf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
             let res = extract_with_layout(pdf_path);
+            let done = extracted_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            progress_callback(done, total_archivos_analizados, &file_display_name);
             (pdf_path.clone(), file_display_name, res)
         })
         .collect();
@@ -664,7 +696,7 @@ pub fn process_and_audit_cedulas(
         progress_callback(
             idx + 1,
             total_archivos_analizados,
-            &format!("Analizando {} ({}/{})...", file_display_name, idx + 1, total_archivos_analizados),
+            &file_display_name,
         );
 
         let raw_text = match extract_res {
@@ -820,9 +852,17 @@ pub fn process_and_audit_cedulas(
         }
 
         let mut file_had_valid_section = false;
-        for (mut biz, emps) in pdf_sections {
+        let mut file_mismatches: Vec<CedulaMismatchItem> = Vec::new();
+        for (mut biz, mut emps) in pdf_sections {
             if emps.is_empty() {
                 continue;
+            }
+
+            // Asegurar que cada empleado conserve el nombre del archivo fuente para trazabilidad
+            for emp in &mut emps {
+                if emp.file_name.is_none() {
+                    emp.file_name = Some(file_display_name.clone());
+                }
             }
 
             // Validar si pertenece al cliente auditado y al Registro Patronal de la revisión
@@ -835,7 +875,7 @@ pub fn process_and_audit_cedulas(
                     let clean_t = canonical_reg(target_rp);
                     if !clean_b.is_empty() && !clean_t.is_empty() && clean_b != clean_t {
                         mismatch = true;
-                        mismatch_report.items.push(CedulaMismatchItem {
+                        file_mismatches.push(CedulaMismatchItem {
                             filename: file_display_name.clone(),
                             error_type: "Registro Patronal no coincide".to_string(),
                             expected_val: format!("RP: {}", clean_t),
@@ -856,7 +896,7 @@ pub fn process_and_audit_cedulas(
                     let clean_t: String = target_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
                     if !clean_b.is_empty() && !clean_t.is_empty() && clean_b != clean_t {
                         mismatch = true;
-                        mismatch_report.items.push(CedulaMismatchItem {
+                        file_mismatches.push(CedulaMismatchItem {
                             filename: file_display_name.clone(),
                             error_type: "RFC no coincide".to_string(),
                             expected_val: format!("RFC: {}", clean_t),
@@ -880,7 +920,7 @@ pub fn process_and_audit_cedulas(
                             if !b_name_clean.contains(&t_name_clean) && !t_name_clean.contains(&b_name_clean) {
                                 if clean_target_rfc.is_none() && clean_target_rp.is_none() {
                                     mismatch = true;
-                                    mismatch_report.items.push(CedulaMismatchItem {
+                                    file_mismatches.push(CedulaMismatchItem {
                                         filename: file_display_name.clone(),
                                         error_type: "Empresa no coincide".to_string(),
                                         expected_val: format!("Empresa: {}", target_client_name.unwrap_or("")),
@@ -898,7 +938,6 @@ pub fn process_and_audit_cedulas(
             }
 
             if mismatch {
-                archivos_cliente_invalido_count += 1;
                 continue;
             }
 
@@ -911,6 +950,10 @@ pub fn process_and_audit_cedulas(
             validos_sua += 1;
         } else {
             no_procesados += 1;
+            if !file_mismatches.is_empty() {
+                archivos_cliente_invalido_count += 1;
+                mismatch_report.items.extend(file_mismatches);
+            }
         }
     }
 
@@ -1359,7 +1402,7 @@ pub fn build_cedulas_audit_from_businesses(
 pub fn load_cedulas_from_db(
     client: &mut Client,
     id_revision: &str,
-) -> Result<Option<(CedulasAuditResult, Vec<Business>)>, String> {
+) -> Result<Option<(CedulasAuditResult, Vec<Business>, bool)>, String> {
     let target_uuid = match Uuid::parse_str(id_revision.trim()) {
         Ok(u) => u,
         Err(_) => return Ok(None),
@@ -1381,19 +1424,91 @@ pub fn load_cedulas_from_db(
         return Ok(None);
     }
 
-    // 1. Obras registradas en la revisión
+    // 1. Obras registradas por el usuario en el registro patronal / revisión con sus periodos de vigencia (fecha_inicio - fecha_fin)
     let obra_rows = client
-        .query("SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND COALESCE(creado_usuario, false) = true", &[&target_uuid, &rp_uuid])
-        .map_err(|e| format!("Error consultando obras de la revisión: {}", e))?;
+        .query(
+            r#"
+            SELECT 
+                COALESCE(numero, '') AS numero,
+                fecha_inicio,
+                fecha_fin,
+                COALESCE(creado_usuario, false) AS creado_usuario
+            FROM public.registros_obras 
+            WHERE (id_revision = $1 OR id_registro_patronal = $2)
+            ORDER BY fecha_inicio ASC;
+            "#,
+            &[&target_uuid, &rp_uuid],
+        )
+        .map_err(|e| format!("Error consultando obras de la revisión: {}", crate::db::schema::format_pg_error(&e)))?;
+
     let mut revision_obras = HashSet::new();
-    for r in obra_rows {
-        if let Some(num) = r.get::<_, Option<String>>(0) {
-            let t = num.trim().to_uppercase();
-            if !t.is_empty() {
-                revision_obras.insert(t);
+    let mut active_obra_ranges: Vec<(String, NaiveDate, NaiveDate)> = Vec::new();
+    let mut required_periods: std::collections::BTreeSet<(i32, i16)> = std::collections::BTreeSet::new();
+    for r in &obra_rows {
+        let num: String = r.get(0);
+        let f_ini: Option<NaiveDate> = r.get(1);
+        let f_fin: Option<NaiveDate> = r.get(2);
+        let creado_usuario: bool = r.get(3);
+        let t = num.trim().to_uppercase();
+        if !t.is_empty() && creado_usuario {
+            revision_obras.insert(t.clone());
+        }
+        if creado_usuario {
+            if let Some(ini) = f_ini {
+                let fin = f_fin.unwrap_or(ini).max(ini);
+                if !t.is_empty() {
+                    active_obra_ranges.push((t, ini, fin));
+                }
+                let mut curr_y = ini.year();
+                let mut curr_m = ini.month() as i16;
+                let end_y = fin.year();
+                let end_m = fin.month() as i16;
+                while (curr_y < end_y) || (curr_y == end_y && curr_m <= end_m) {
+                    if (1..=12).contains(&curr_m) {
+                        required_periods.insert((curr_y, curr_m));
+                    }
+                    curr_m += 1;
+                    if curr_m > 12 {
+                        curr_m = 1;
+                        curr_y += 1;
+                    }
+                }
             }
         }
     }
+
+    // Consultar todos los periodos cargados en liquidaciones para este registro patronal usando mes_periodo_int numérico
+    let avail_rows = client
+        .query(
+            "SELECT DISTINCT mes_periodo_int, mes_periodo, anio_periodo FROM public.liquidaciones WHERE id_registro_patronal = $1",
+            &[&rp_uuid],
+        )
+        .map_err(|e| format!("Error consultando periodos de liquidaciones disponibles: {}", crate::db::schema::format_pg_error(&e)))?;
+
+    let mut available_periods: std::collections::BTreeSet<(i32, i16)> = std::collections::BTreeSet::new();
+    for r in &avail_rows {
+        let m_int_opt: Option<i16> = r.get(0);
+        let m_str: Option<String> = r.get(1);
+        let y_val: Option<i16> = r.get(2);
+        if let Some(y) = y_val {
+            let m_int = match m_int_opt {
+                Some(v) if (1..=12).contains(&v) => v,
+                _ => m_str
+                    .as_deref()
+                    .map(crate::cedulas::business::mes_to_periodo_int)
+                    .unwrap_or(0),
+            };
+            if (1..=12).contains(&m_int) {
+                available_periods.insert((y as i32, m_int));
+            }
+        }
+    }
+
+    let has_missing_cedulas = if !required_periods.is_empty() {
+        required_periods.iter().any(|req| !available_periods.contains(req))
+    } else {
+        false
+    };
 
     // 2. Vinculaciones de obras por liquidación
     let vinc_rows = client
@@ -1462,29 +1577,37 @@ pub fn load_cedulas_from_db(
                 dl.gps,
                 dl.patronal,
                 dl.obrera,
-                dl.subtotal
+                dl.subtotal,
+                l.mes_periodo_int
             FROM public.liquidaciones l
             JOIN public.empleados e ON l.id_empleado = e.id
             JOIN public.registros_patronales rp ON l.id_registro_patronal = rp.id
             JOIN public.clientes c ON rp.id_cliente = c.id
             LEFT JOIN public.detalles_liquidaciones dl ON dl.id_liquidacion = l.id
             WHERE l.id_registro_patronal = $1
-            ORDER BY rp.registro, l.anio_periodo, l.mes_periodo, e.nombre, l.id, dl.fecha;
+            ORDER BY rp.registro, l.anio_periodo, COALESCE(l.mes_periodo_int, 0), l.mes_periodo, e.nombre, l.id, dl.fecha;
             "#,
             &[&rp_uuid],
         )
-        .map_err(|e| format!("Error consultando liquidaciones de la revisión: {}", e))?;
+        .map_err(|e| format!("Error consultando liquidaciones de la revisión: {}", crate::db::schema::format_pg_error(&e)))?;
 
     let mut distinct_files = HashSet::new();
     let mut businesses_map: HashMap<(String, String), Business> = HashMap::new();
     let mut current_liq_id: Option<Uuid> = None;
     let mut current_emp: Option<Employee> = None;
     let mut current_bp_key: Option<(String, String)> = None;
-
     for row in rows {
         let id_liq: Uuid = row.get(0);
         let mes_per: Option<String> = row.get(1);
         let anio_per: Option<i16> = row.get(2);
+        let mes_per_int_db: Option<i16> = row.get(35);
+        let resolved_mes_int: i16 = match mes_per_int_db {
+            Some(v) if (1..=12).contains(&v) => v,
+            _ => crate::cedulas::business::mes_to_periodo_int(
+                mes_per.as_deref().unwrap_or("ENERO"),
+            ),
+        };
+
         let nom_arch: Option<String> = row.get(3);
         if let Some(ref na) = nom_arch {
             distinct_files.insert(na.clone());
@@ -1525,9 +1648,37 @@ pub fn load_cedulas_from_db(
             emp.curp = emp_curp.map(|s| s.trim().to_string());
             emp.clave_ubicacion = emp_ubicacion.map(|s| s.trim().to_string());
             emp.mes_periodo = mes_per.clone().map(|s| s.trim().to_string());
+            emp.mes_periodo_int = resolved_mes_int;
             emp.anio_periodo = anio_per.map(|a| a.to_string());
             if let Some(obras) = vinc_map.remove(&id_liq) {
                 emp.registro_obras = obras;
+            } else if !active_obra_ranges.is_empty() {
+                let anio_val: i32 = anio_per.unwrap_or(2024) as i32;
+                let valid_m = if (1..=12).contains(&resolved_mes_int) {
+                    resolved_mes_int as u32
+                } else {
+                    1
+                };
+                let p_start = NaiveDate::from_ymd_opt(anio_val, valid_m, 1).unwrap_or_default();
+                let p_end = if valid_m == 12 {
+                    NaiveDate::from_ymd_opt(anio_val, 12, 31).unwrap_or_default()
+                } else {
+                    NaiveDate::from_ymd_opt(anio_val, valid_m + 1, 1).and_then(|d| d.pred_opt()).unwrap_or_default()
+                };
+
+                let matching_nums: Vec<String> = active_obra_ranges
+                    .iter()
+                    .filter(|(_, ini, fin)| p_start <= *fin && p_end >= *ini)
+                    .map(|(num, _, _)| num.clone())
+                    .collect();
+
+                if !matching_nums.is_empty() {
+                    let d_str = "30".to_string();
+                    emp.registro_obras = matching_nums
+                        .iter()
+                        .map(|num| RegistroObra::new(num, &d_str))
+                        .collect();
+                }
             }
 
             current_liq_id = Some(id_liq);
@@ -1543,6 +1694,7 @@ pub fn load_cedulas_from_db(
         if dl_clave.is_some() || dl_fecha.is_some() || dl_dias.is_some() || dl_sdi.is_some() {
             let de = DataEmployee {
                 mes_periodo: mes_per.clone().map(|s| s.trim().to_string()),
+                mes_periodo_int: resolved_mes_int,
                 anio_periodo: anio_per.map(|a| a.to_string()),
                 clave: dl_clave.map(|s| s.trim().to_string()),
                 fecha: dl_fecha,
@@ -1602,20 +1754,25 @@ pub fn load_cedulas_from_db(
         None,
     );
 
-    Ok(Some((audit, valid_businesses)))
+    Ok(Some((audit, valid_businesses, has_missing_cedulas)))
 }
 
 pub fn save_cedulas_audit_to_db(
     pool: &DbPool,
     id_revision: &str,
     businesses: &[Business],
+    overwrite_months: &[(String, String)],
+    rustfs_commit_hook: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
     progress_cb: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
 ) -> Result<CedulasDbStats, String> {
     if businesses.is_empty() {
         return Ok(CedulasDbStats::default());
     }
 
-    let mut client = pool.get().map_err(|e| format!("Error conectando a PostgreSQL: {}", e))?;
+    let mut client = pool
+        .get()
+        .map_err(|e| format!("Error conectando al pool de PostgreSQL: {}", e))?;
+
     let mut stats = CedulasDbStats::default();
     let rev_uuid_opt = if !id_revision.trim().is_empty() {
         Uuid::parse_str(id_revision.trim()).ok()
@@ -1623,23 +1780,63 @@ pub fn save_cedulas_audit_to_db(
         None
     };
 
+    // Fase 1 (Transacción Atómica Única): todo el lote de cédulas, sincronización de
+    // reportes_liquidaciones y promoción desde staging en rustfs ocurren como una sola unidad atómica.
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("Error iniciando transacción en PostgreSQL: {}", crate::db::schema::format_pg_error(&e)))?;
+
     let total_emps: usize = businesses.iter().map(|b| b.employees.len()).sum();
     let mut current_emp_idx = 0;
+    let total_biz = businesses.len();
 
-    for biz in businesses {
-        let mut tx = match client.transaction() {
-            Ok(t) => t,
-            Err(e) => {
-                stats.errores.push(format!("Error iniciando transacción: {}", e));
-                continue;
+    let tx_result: Result<(), String> = (|| {
+        if !id_revision.trim().is_empty() {
+            for (anio_str, mes_str) in overwrite_months {
+                let anio_num: i32 = anio_str.parse().unwrap_or(2026);
+                delete_cedula_for_month_tx(&mut tx, id_revision.trim(), mes_str, anio_num)?;
             }
-        };
+        }
 
-        let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = (|| {
-            let ctx = resolve_business_context_for_revision(&mut tx, biz, rev_uuid_opt)?;
+        let mut resolved_rev_id: Option<Uuid> = rev_uuid_opt;
+        let mut resolved_rp_id: Option<Uuid> = None;
+
+        for (biz_idx, biz) in businesses.iter().enumerate() {
+            let current_file_label = biz
+                .employees
+                .first()
+                .and_then(|e| e.file_name.as_deref())
+                .unwrap_or("cedula_sua.pdf");
+            if let Some(cb) = progress_cb {
+                cb(biz_idx + 1, total_biz, current_file_label);
+            }
+
+            let ctx = resolve_business_context_for_revision(&mut tx, biz, rev_uuid_opt).map_err(|e| {
+                format!(
+                    "Error resolviendo contexto patronal (archivo '{}'): {}",
+                    current_file_label,
+                    crate::db::schema::format_boxed_pg_error(e.as_ref())
+                )
+            })?;
+
+            if resolved_rev_id.is_none() {
+                resolved_rev_id = Some(ctx.id_revision);
+            }
+            if resolved_rp_id.is_none() {
+                resolved_rp_id = Some(ctx.id_registro_patronal);
+            }
 
             for emp in &biz.employees {
-                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx)?;
+                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx).map_err(|e| {
+                    format!(
+                        "Error insertando liquidación de trabajador '{}' (NSS: {}, archivo: '{}'): {}",
+                        emp.nombre.as_deref().unwrap_or("SIN NOMBRE"),
+                        emp.no_seguro_social.as_deref().unwrap_or("N/D"),
+                        current_file_label,
+                        crate::db::schema::format_boxed_pg_error(e.as_ref())
+                    )
+                })?;
+
                 stats.empleados_guardados += e_c;
                 stats.liquidaciones_guardadas += l_c;
                 stats.detalles_guardados += d_c;
@@ -1648,32 +1845,61 @@ pub fn save_cedulas_audit_to_db(
 
                 current_emp_idx += 1;
                 if let Some(cb) = progress_cb {
-                    if current_emp_idx % 10 == 0 || current_emp_idx == total_emps {
-                        cb(
-                            current_emp_idx,
-                            total_emps,
-                            &format!(
-                                "Guardando en BD: trabajador {}/{}...",
-                                current_emp_idx, total_emps
-                            ),
-                        );
+                    if current_emp_idx % 15 == 0 || current_emp_idx == total_emps {
+                        cb(biz_idx + 1, total_biz, current_file_label);
                     }
                 }
             }
-            Ok(())
-        })();
-
-        match result {
-            Ok(_) => {
-                if let Err(e) = tx.commit() {
-                    stats.errores.push(format!("Error en commit de cédula: {}", e));
-                }
-            }
-            Err(e) => {
-                let _ = tx.rollback();
-                stats.errores.push(format!("Error guardando cédula: {}", e));
-            }
         }
+
+        if let Some(rev_uuid) = resolved_rev_id {
+            crate::db::reporte_liquidaciones::sync_reportes_liquidaciones_for_revision_tx(&mut tx, rev_uuid)
+                .map_err(|e| format!("Error sincronizando reportes_liquidaciones de la revisión: {}", e))?;
+        }
+
+        // Fase 4A (Coordinación con rustfs antes del COMMIT de PostgreSQL):
+        // Si la promoción de staging en rustfs falla, se aborta y revierte también la transacción de PostgreSQL.
+        if let Some(commit_hook) = rustfs_commit_hook {
+            commit_hook()?;
+        }
+
+        stats.id_revision = resolved_rev_id;
+        stats.id_registro_patronal = resolved_rp_id;
+
+        Ok(())
+    })();
+
+    if let Err(err_msg) = tx_result {
+        let _ = tx.rollback();
+        crate::app_logger::log_db_error(
+            "ROLLBACK save_cedulas_audit_to_db",
+            &[
+                "public.liquidaciones",
+                "public.detalles_liquidaciones",
+                "public.vinculaciones_obras_liquidaciones",
+                "public.reportes_liquidaciones",
+            ],
+            "ROLLBACK TRANSACTION",
+            &err_msg,
+        );
+        return Err(err_msg);
+    }
+
+    if let Err(e) = tx.commit() {
+        let detailed = crate::db::schema::format_pg_error(&e);
+        let msg = format!("Error confirmando transacción (COMMIT) en PostgreSQL: {}", detailed);
+        crate::app_logger::log_db_error(
+            "COMMIT_FAILED save_cedulas_audit_to_db",
+            &[
+                "public.liquidaciones",
+                "public.detalles_liquidaciones",
+                "public.vinculaciones_obras_liquidaciones",
+                "public.reportes_liquidaciones",
+            ],
+            "COMMIT TRANSACTION",
+            &msg,
+        );
+        return Err(msg);
     }
 
     Ok(stats)
@@ -1763,6 +1989,87 @@ pub fn delete_all_cedulas_for_revision(
     }
 }
 
+/// Elimina dentro de una transacción activa los registros en PostgreSQL de una cédula de cuotas
+/// para un mes y año específicos dentro de un registro patronal (soporta sobreescritura atómica).
+pub fn delete_cedula_for_month_tx(
+    tx: &mut postgres::Transaction,
+    id_revision: &str,
+    mes_periodo: &str,
+    anio_periodo: i32,
+) -> Result<u64, String> {
+    let parsed_uuid = Uuid::parse_str(id_revision).map_err(|e| format!("UUID inválido: {}", e))?;
+    let rp_uuid: Uuid = if let Some(r) = tx
+        .query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&parsed_uuid])
+        .map_err(|e| crate::db::schema::format_pg_error(&e))?
+    {
+        r.get(0)
+    } else if let Some(r) = tx
+        .query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&parsed_uuid])
+        .map_err(|e| crate::db::schema::format_pg_error(&e))?
+    {
+        r.get(0)
+    } else {
+        parsed_uuid
+    };
+    let mes_clean = mes_periodo.trim().to_uppercase();
+    let mes_int = crate::cedulas::business::mes_to_periodo_int(&mes_clean);
+    let anio_i16: i16 = anio_periodo as i16;
+
+    tx.execute(
+        "DELETE FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion IN (
+            SELECT id FROM public.reportes_liquidaciones 
+            WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint
+        )",
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
+    )
+    .map_err(|e| crate::db::schema::format_pg_error(&e))?;
+
+    tx.execute(
+        "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion IN (
+            SELECT id FROM public.reportes_liquidaciones 
+            WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint
+        )",
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
+    )
+    .map_err(|e| crate::db::schema::format_pg_error(&e))?;
+
+    tx.execute(
+        "DELETE FROM public.reportes_liquidaciones 
+         WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint",
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
+    )
+    .map_err(|e| crate::db::schema::format_pg_error(&e))?;
+
+    tx.execute(
+        "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion IN (
+            SELECT id FROM public.liquidaciones 
+            WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint
+        )",
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
+    )
+    .map_err(|e| crate::db::schema::format_pg_error(&e))?;
+
+    tx.execute(
+        "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion IN (
+            SELECT id FROM public.liquidaciones 
+            WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint
+        )",
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
+    )
+    .map_err(|e| crate::db::schema::format_pg_error(&e))?;
+
+    let n = tx
+        .execute(
+            "DELETE FROM public.liquidaciones 
+             WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint",
+            &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
+        )
+        .map_err(|e| format!("Error al borrar liquidación del periodo {}/{}: {}", mes_clean, anio_periodo, crate::db::schema::format_pg_error(&e)))?;
+
+    log::info!("Eliminadas {} liquidaciones en transacción del mes {}/{} para el registro patronal {}", n, mes_clean, anio_periodo, rp_uuid);
+    Ok(n)
+}
+
 /// Elimina los registros físicos y lógicos en PostgreSQL de una cédula de cuotas
 /// para un mes y año específicos dentro de un registro patronal (soporta sobreescritura limpia).
 pub fn delete_cedula_for_month(
@@ -1780,46 +2087,48 @@ pub fn delete_cedula_for_month(
         parsed_uuid
     };
     let mes_clean = mes_periodo.trim().to_uppercase();
+    let mes_int = crate::cedulas::business::mes_to_periodo_int(&mes_clean);
+    let anio_i16: i16 = anio_periodo as i16;
 
     let _ = client.execute(
         "DELETE FROM public.reportes_detalles_liquidaciones WHERE id_reporte_liquidacion IN (
             SELECT id FROM public.reportes_liquidaciones 
-            WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+            WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint
         )",
-        &[&rp_uuid, &mes_clean, &anio_periodo],
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
     );
     let _ = client.execute(
         "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion IN (
             SELECT id FROM public.reportes_liquidaciones 
-            WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+            WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint
         )",
-        &[&rp_uuid, &mes_clean, &anio_periodo],
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
     );
     let _ = client.execute(
         "DELETE FROM public.reportes_liquidaciones 
-         WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3",
-        &[&rp_uuid, &mes_clean, &anio_periodo],
+         WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint",
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
     );
 
     let _ = client.execute(
         "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion IN (
             SELECT id FROM public.liquidaciones 
-            WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+            WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint
         )",
-        &[&rp_uuid, &mes_clean, &anio_periodo],
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
     );
     let _ = client.execute(
         "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion IN (
             SELECT id FROM public.liquidaciones 
-            WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3
+            WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint
         )",
-        &[&rp_uuid, &mes_clean, &anio_periodo],
+        &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
     );
     let n = client
         .execute(
             "DELETE FROM public.liquidaciones 
-             WHERE id_registro_patronal = $1 AND UPPER(TRIM(mes_periodo)) = $2 AND anio_periodo = $3",
-            &[&rp_uuid, &mes_clean, &anio_periodo],
+             WHERE id_registro_patronal = $1::uuid AND (UPPER(TRIM(mes_periodo)) = $2::text OR mes_periodo_int = $4::smallint) AND anio_periodo = $3::smallint",
+            &[&rp_uuid, &mes_clean, &anio_i16, &mes_int],
         )
         .map_err(|e| format!("Error al borrar liquidación del periodo {}/{}: {}", mes_clean, anio_periodo, e))?;
 
@@ -2281,7 +2590,7 @@ mod tests {
 
         let res_gondesa = load_cedulas_from_db(&mut client, "01a0eea6-73ad-7048-98d0-9e634f7ca391");
         assert!(res_gondesa.is_ok(), "Error cargando GONDESA: {:?}", res_gondesa.err());
-        if let Ok(Some((audit, businesses))) = res_gondesa {
+        if let Ok(Some((audit, businesses, _missing))) = res_gondesa {
             println!("GONDESA DB load OK!");
             println!("  validos_sua: {}", audit.validos_sua);
             println!("  trabajadores_unicos: {}", audit.trabajadores_unicos);

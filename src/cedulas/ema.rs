@@ -219,6 +219,7 @@ fn parse_ema_movement_line(line: &str, mes: &str, anio: &str) -> Option<DataEmpl
 
     Some(DataEmployee {
         mes_periodo: Some(mes.to_string()),
+        mes_periodo_int: crate::cedulas::business::mes_to_periodo_int(mes),
         anio_periodo: Some(anio.to_string()),
         clave,
         fecha,
@@ -449,6 +450,7 @@ pub fn parse_ema_employees(raw_text: &str, mes: &str, anio: &str) -> Vec<Employe
                     new_emp.curp = Some(curp);
                     new_emp.rfc = final_rfc;
                     new_emp.mes_periodo = Some(mes.to_string());
+                    new_emp.mes_periodo_int = crate::cedulas::business::mes_to_periodo_int(mes);
                     new_emp.anio_periodo = Some(anio.to_string());
 
                     current_emp = Some(new_emp);

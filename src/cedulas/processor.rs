@@ -502,17 +502,6 @@ pub fn process_cedulas(
 
             match crate::db::create_pool(pool_size) {
                 Ok(pool) => {
-                    match pool.get() {
-                        Ok(mut init_client) => {
-                            if let Err(e) = crate::db::ensure_schema(&mut init_client) {
-                                log::error!("Error al verificar esquema en PostgreSQL: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("No se pudo obtener cliente inicial del pool para cédulas: {}", e);
-                        }
-                    }
-
                     let cb = |done: usize, total: usize| {
                         progress_callback(
                             done,

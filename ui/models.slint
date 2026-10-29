@@ -206,6 +206,13 @@ export struct ReporteGuarderiaObraItem {
     registros_patronales_str: string,
 }
 
+export struct InconsistenciaDetalle {
+    periodo: string,
+    mes_anio: string,
+    obras_vinculadas: string,
+    obras_count: int,
+}
+
 export struct ReporteObraItem {
     id: string,
     numero: string,
@@ -317,6 +324,8 @@ export struct ReporteLiquidacionRow {
     can_delete_split: bool,
     is_expanded: bool,
     movimientos_resumen: string,
+    tiene_inconsistencia: bool,
+    observacion_validacion: string,
     idx: int,
     id_reporte_liq: string,
     id_liquidacion: string,
@@ -913,6 +922,10 @@ export global AppData {
     in-out property <bool> cedulas_view_is_processing: false;
     in-out property <float> cedulas_view_progress_fraction: 0.0;
     in-out property <string> cedulas_view_progress_text: "";
+    in-out property <float> progress_percentage: 0.0;
+    in-out property <string> current_file_name: "";
+    in-out property <int> processed_count: 0;
+    in-out property <int> total_files_count: 0;
 
     // Indicadores generales superiores
     in-out property <string> cedulas_periodo_rango_str: "Oct 2023 – Dic 2023";
@@ -993,6 +1006,7 @@ export global AppData {
 
     // Control de acceso a Cédulas de Cuotas (deshabilitado hasta acceder desde Registros de Obras)
     in-out property <bool> cedulas_access_allowed: false;
+    in-out property <bool> show_cargar_cedulas_modal: false;
 
     // ─── VISTA DE CARGA DE NÓMINAS (máquina de estados: 0=vacío, 1=archivos, 2=procesado) ───
     // Estado de la vista: 0 = En blanco / Solo subir, 1 = Archivos seleccionados / Por guardar, 2 = Procesado y Guardado en BD
@@ -1062,11 +1076,20 @@ export global AppData {
     in-out property <bool> reportes_liquidaciones_data_exists: false;
     in-out property <bool> registros_obras_data_exists: false;
 
-    // Control granular de acceso por paso del flujo (para la revisión seleccionada)
+    // Control granular de acceso por paso del flujo (para el registro patronal / revisión seleccionada)
+    in-out property <bool> rp_has_cedulas: false;
     in-out property <bool> revision_has_obras: false;
     in-out property <bool> revision_has_cedulas: false;
     in-out property <bool> revision_has_nominas: false;
     in-out property <bool> revision_has_liquidaciones: false;
+
+    // Warning interactivo para periodos de obra sin cédula de cuotas ingresada
+    in-out property <bool> reporte_has_missing_cedulas_warning: false;
+    in-out property <string> reporte_missing_cedulas_msg: "";
+    in-out property <string> reporte_missing_cedulas_reason: "";
+    in-out property <[string]> reporte_missing_cedulas_meses: [];
+    in-out property <[InconsistenciaDetalle]> reporte_inconsistencias_detalles: [];
+    in-out property <bool> reporte_show_missing_cedulas_details: false;
 
     // Indica si la revisión tiene TODA la información completa
     in-out property <bool> revision_has_all_data: false;
@@ -1392,6 +1415,11 @@ export global AppData {
     in-out property <bool> nominas_faltantes_all_selected: false;
     in-out property <string> nominas_faltantes_search: "";
     in-out property <string> nominas_faltantes_status_msg: "";
+
+    // Modal global de Error de Sistema / Guardado Atómico (PostgreSQL + rustfs)
+    in-out property <bool> show_system_error_modal: false;
+    in-out property <string> system_error_modal_title: "Error al Guardar la Información";
+    in-out property <string> system_error_modal_detail: "";
 }
 
 export global AppLogic {
@@ -1400,10 +1428,13 @@ export global AppLogic {
     callback toggle_sidebar();
     callback set_sidebar_open(bool);
     callback cargar_cedulas_from_revision(string);
+    callback cargar_cedulas_folder_from_revision(string);
+    callback solicitar_cargar_mas_cedulas();
     callback open_resumen_cedulas_from_obras();
     callback open_cedulas_from_obras();
     callback close_cedulas_success_modal();
     callback close_cedulas_duplicate_modal();
+    callback close_system_error_modal();
     callback select_cliente_for_rp(string, string, string, bool);
     callback select_cliente_for_empleados(string, string, string);
 

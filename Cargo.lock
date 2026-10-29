@@ -1336,6 +1336,7 @@ dependencies = [
  "slint",
  "slint-build",
  "tempfile",
+ "tokio",
  "unidecode",
  "uuid",
  "walkdir",

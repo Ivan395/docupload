@@ -26,7 +26,7 @@ pub use nominas::{save_nominas_concurrent, save_nominas_to_db, delete_all_nomina
 pub use nominas_reporte::*;
 pub use reporte_liquidaciones::*;
 pub use revisiones::*;
-pub use schema::ensure_schema;
+pub use schema::{ensure_schema, format_boxed_pg_error, format_pg_error};
 
 #[cfg(test)]
 mod tests {

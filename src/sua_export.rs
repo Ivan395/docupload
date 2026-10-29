@@ -1328,6 +1328,7 @@ mod tests {
             id_reporte_liq: uuid::Uuid::now_v7(),
             id_parent_reporte_liq: uuid::Uuid::now_v7(),
             id_liquidacion: uuid::Uuid::now_v7(),
+            id_revision: uuid::Uuid::now_v7(),
             id_empleado: uuid::Uuid::now_v7(),
             nombre_trabajador: nombre.into(),
             rfc: "PEJU800101XYZ".into(),
@@ -1336,6 +1337,7 @@ mod tests {
             pensionado: String::new(),
             registro_patronal: rp.into(),
             mes_periodo: mes.into(),
+            mes_periodo_int: crate::cedulas::business::mes_to_periodo_int(mes),
             anio_periodo: anio,
             periodo_str: format!("{}/{}", mes, anio),
             dias_cedula: 30,
@@ -1379,6 +1381,8 @@ mod tests {
             patronal_orig: 800.0,
             obrera_orig: 200.0,
             subtotal_orig: 1000.0,
+            tiene_inconsistencia: false,
+            observacion_validacion: String::new(),
         }
     }
 

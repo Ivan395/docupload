@@ -1,4 +1,39 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::collapsible_str_replace,
+    clippy::doc_lazy_continuation,
+    clippy::explicit_auto_deref,
+    clippy::get_first,
+    clippy::if_same_then_else,
+    clippy::manual_clamp,
+    clippy::manual_contains,
+    clippy::manual_div_ceil,
+    clippy::manual_flatten,
+    clippy::manual_is_multiple_of,
+    clippy::manual_pattern_char_comparison,
+    clippy::manual_unwrap_or,
+    clippy::manual_unwrap_or_default,
+    clippy::map_entry,
+    clippy::needless_borrow,
+    clippy::needless_borrows_for_generic_args,
+    clippy::needless_late_init,
+    clippy::needless_range_loop,
+    clippy::new_without_default,
+    clippy::ptr_arg,
+    clippy::redundant_closure,
+    clippy::redundant_pattern_matching,
+    clippy::result_large_err,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_map_or,
+    clippy::unnecessary_sort_by,
+    clippy::unwrap_or_default,
+    clippy::vec_init_then_push,
+    clippy::while_let_on_iterator
+)]
 // Comentario
 
 pub mod app_logger;
@@ -36,7 +71,6 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use uuid::Uuid;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use sha2::{Digest, Sha256};
 
 slint::include_modules!();
 
@@ -1444,6 +1478,11 @@ pub struct CedulasViewState {
     pub mes_options: Vec<String>,
     pub obra_options: Vec<String>,
     pub current_revision_id: Option<String>,
+    pub current_rp_id: Option<String>,
+    pub pending_staging_batch_id: Option<String>,
+    pub pending_staged_local_paths: Vec<PathBuf>,
+    pub pending_overwrite_months: Vec<(String, String)>,
+    pub pending_overwrite_old_files: Vec<String>,
 }
 
 fn update_cedulas_view_file_list_ui(ui: &MainWindow, state: &CedulasViewState) {
@@ -1697,6 +1736,7 @@ fn reset_cedulas_ui_to_state_zero(ui: &MainWindow, session: &mut CedulasViewStat
     session.mes_options.clear();
     session.obra_options.clear();
     session.current_revision_id = None;
+    session.current_rp_id = None;
 
     let app_data = ui.global::<AppData>();
     app_data.set_show_delete_all_cedulas_modal(false);
@@ -1732,6 +1772,44 @@ fn reset_cedulas_ui_to_state_zero(ui: &MainWindow, session: &mut CedulasViewStat
     app_data.set_cedulas_sbc_max_str("$0.00".into());
     app_data.set_cedulas_ramas_rt_str("RT: 0.00000%".into());
     app_data.set_cedulas_ramas_sub_str("".into());
+    app_data.set_reporte_has_missing_cedulas_warning(false);
+    app_data.set_reporte_missing_cedulas_msg("".into());
+    app_data.set_reporte_missing_cedulas_reason("".into());
+    app_data.set_reporte_missing_cedulas_meses(ModelRc::new(VecModel::default()));
+    app_data.set_reporte_inconsistencias_detalles(ModelRc::new(VecModel::default()));
+    app_data.set_reporte_show_missing_cedulas_details(false);
+    app_data.set_progress_percentage(0.0);
+    app_data.set_current_file_name("".into());
+    app_data.set_processed_count(0);
+    app_data.set_total_files_count(0);
+}
+
+#[derive(Debug, Clone)]
+struct CedulaProgressUpdate {
+    processed_count: i32,
+    total_count: i32,
+    progress_percentage: f32,
+    current_file_name: String,
+    status_text: String,
+}
+
+fn get_tokio_handle() -> &'static tokio::runtime::Handle {
+    static TOKIO_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+    TOKIO_HANDLE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("tokio-cedulas-runtime".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Error inicializando runtime asíncrono de Tokio");
+                let _ = tx.send(rt.handle().clone());
+                rt.block_on(std::future::pending::<()>());
+            })
+            .expect("Error creando hilo para runtime de Tokio");
+        rx.recv().expect("Error obteniendo Handle de Tokio")
+    })
 }
 
 fn handle_cedulas_upload_and_inspect(
@@ -1746,6 +1824,13 @@ fn handle_cedulas_upload_and_inspect(
 
     let (cliente_nombre, rp_registro, revision_nombre, revision_id, rp_id) = if let Some(ui) = ui_weak.upgrade() {
         let app_data = ui.global::<AppData>();
+        app_data.set_cedulas_view_is_processing(true);
+        app_data.set_processed_count(0);
+        app_data.set_total_files_count(paths.len() as i32);
+        app_data.set_progress_percentage(1.0);
+        app_data.set_cedulas_view_progress_fraction(0.01);
+        app_data.set_current_file_name("Escaneando y preparando archivos seleccionados...".into());
+        app_data.set_cedulas_view_progress_text("Escaneando y preparando archivos seleccionados...".into());
         (
             app_data.get_selected_cliente_nombre().to_string(),
             app_data.get_selected_rp_registro().to_string(),
@@ -1757,46 +1842,63 @@ fn handle_cedulas_upload_and_inspect(
         return;
     };
 
-    if let Some(ui) = ui_weak.upgrade() {
-        show_toast_message(&ui, "Analizando archivos y verificando duplicados...");
-    }
+    let (prog_tx, mut prog_rx) = tokio::sync::mpsc::unbounded_channel::<CedulaProgressUpdate>();
+    let ui_for_rx = ui_weak.clone();
 
-    thread::spawn(move || {
+    get_tokio_handle().spawn(async move {
+        while let Some(upd) = prog_rx.recv().await {
+            let ui_clone = ui_for_rx.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_clone.upgrade() {
+                    let app_data = ui.global::<AppData>();
+                    app_data.set_cedulas_view_is_processing(true);
+                    app_data.set_processed_count(upd.processed_count);
+                    app_data.set_total_files_count(upd.total_count);
+                    app_data.set_progress_percentage(upd.progress_percentage);
+                    app_data.set_cedulas_view_progress_fraction(upd.progress_percentage / 100.0);
+                    app_data.set_current_file_name(upd.current_file_name.into());
+                    app_data.set_cedulas_view_progress_text(upd.status_text.into());
+                }
+            });
+        }
+    });
+
+    get_tokio_handle().spawn_blocking(move || {
         let mut c_nom = cliente_nombre;
         let mut r_reg = rp_registro;
         let mut rev_nom = revision_nombre;
         let mut c_rfc = String::new();
 
-        if let Some(ref pool) = pool_clone {
-            if let Ok(mut client) = pool.get() {
-                if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
-                    if let Ok(Some(row)) = client.query_opt(
-                        "SELECT c.nombre, rp.registro, r.nombre, c.rfc
-                         FROM revisiones r
-                         JOIN registros_patronales rp ON r.id_registro_patronal = rp.id
-                         JOIN clientes c ON rp.id_cliente = c.id
-                         WHERE r.id = $1",
-                        &[&rev_uuid],
-                    ) {
-                        c_nom = row.get(0);
-                        r_reg = row.get(1);
-                        rev_nom = row.get(2);
-                        c_rfc = row.get::<_, Option<String>>(3).unwrap_or_default();
-                    }
-                } else if let Ok(rp_uuid) = uuid::Uuid::parse_str(&rp_id) {
-                    if let Ok(Some(row)) = client.query_opt(
-                        "SELECT c.nombre, rp.registro, 'GENERAL', c.rfc
-                         FROM registros_patronales rp
-                         JOIN clientes c ON rp.id_cliente = c.id
-                         WHERE rp.id = $1",
-                        &[&rp_uuid],
-                    ) {
-                        c_nom = row.get(0);
-                        r_reg = row.get(1);
-                        rev_nom = row.get(2);
-                        c_rfc = row.get::<_, Option<String>>(3).unwrap_or_default();
-                    }
+        if let Some(ref pool) = pool_clone
+            && let Ok(mut client) = pool.get()
+        {
+            if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
+                if let Ok(Some(row)) = client.query_opt(
+                    "SELECT c.nombre, rp.registro, r.nombre, c.rfc
+                     FROM revisiones r
+                     JOIN registros_patronales rp ON r.id_registro_patronal = rp.id
+                     JOIN clientes c ON rp.id_cliente = c.id
+                     WHERE r.id = $1",
+                    &[&rev_uuid],
+                ) {
+                    c_nom = row.get(0);
+                    r_reg = row.get(1);
+                    rev_nom = row.get(2);
+                    c_rfc = row.get::<_, Option<String>>(3).unwrap_or_default();
                 }
+            } else if let Ok(rp_uuid) = uuid::Uuid::parse_str(&rp_id)
+                && let Ok(Some(row)) = client.query_opt(
+                    "SELECT c.nombre, rp.registro, 'GENERAL', c.rfc
+                     FROM registros_patronales rp
+                     JOIN clientes c ON rp.id_cliente = c.id
+                     WHERE rp.id = $1",
+                    &[&rp_uuid],
+                )
+            {
+                c_nom = row.get(0);
+                r_reg = row.get(1);
+                rev_nom = row.get(2);
+                c_rfc = row.get::<_, Option<String>>(3).unwrap_or_default();
             }
         }
 
@@ -1806,50 +1908,42 @@ fn handle_cedulas_upload_and_inspect(
             Err(_) => std::env::temp_dir(),
         };
 
-        let mut items = match crate::archives::collect_prepared_upload_items(&paths, "pdf", &temp_dir) {
+        let items = match crate::archives::collect_prepared_upload_items(&paths, "pdf", &temp_dir) {
             Ok(it) => it,
             Err(e) => {
                 log::error!("Error preparando archivos para subida: {}", e);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.global::<AppData>().set_cedulas_view_is_processing(false);
+                    }
+                });
                 return;
             }
         };
 
-        // Asignar a cada archivo su nombre (Cédula SUA <rp> - <mes>.pdf o nombre original si desambigua)
-        let mut seen_batch_names: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // gen_name -> hash
-        for item in &mut items {
-            let data = fs::read(&item.local_path).unwrap_or_default();
-            let mut h = Sha256::new();
-            h.update(&data);
-            let item_hash = format!("{:x}", h.finalize());
-
-            let gen_name = crate::cedulas::view_logic::extract_cedula_pdf_postgres_filename(&item.local_path, &r_reg);
-            if let Some(prev_hash) = seen_batch_names.get(&gen_name) {
-                if *prev_hash != item_hash {
-                    // Contenido diferente: conservar el nombre original del archivo para no colisionar
-                    let orig_name = Path::new(&item.local_path)
-                        .file_name()
-                        .map(|f| f.to_string_lossy().to_string())
-                        .unwrap_or_else(|| gen_name.clone());
-                    item.rel_path = orig_name;
-                } else {
-                    item.rel_path = gen_name;
-                }
-            } else {
-                seen_batch_names.insert(gen_name.clone(), item_hash);
-                item.rel_path = gen_name;
-            }
-        }
-
         if items.is_empty() {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = ui_weak.upgrade() {
+                    let app_data = ui.global::<AppData>();
+                    app_data.set_cedulas_view_is_processing(false);
+                    app_data.set_progress_percentage(0.0);
                     show_toast_message(&ui, "No se encontraron archivos de cédula PDF válidos en la selección.");
                 }
             });
             return;
         }
 
-        let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&revision_id);
+        let total_items = items.len();
+        let _ = prog_tx.send(CedulaProgressUpdate {
+            processed_count: 0,
+            total_count: total_items as i32,
+            progress_percentage: 2.0,
+            current_file_name: "Sincronizando archivos existentes...".into(),
+            status_text: format!("Preparando {} archivos encontrados...", total_items),
+        });
+
+        let cache_key_dir = if !revision_id.trim().is_empty() { &revision_id } else { &rp_id };
+        let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(cache_key_dir);
 
         // 1. Obtener archivos existentes en RustFS estrictamente para esta revisión
         let existing_cards = crate::rustfs::sync_and_load_cedulas_view_files(
@@ -1859,60 +1953,35 @@ fn handle_cedulas_upload_and_inspect(
             &cache_dir,
         ).unwrap_or_default();
 
-        // 2. Extraer metadatos de archivos existentes (ruta normalizada y SHA-256)
-        #[allow(dead_code)]
-        struct ExistingFileMeta {
-            rel_path: String,
-            full_sha256: String,
-        }
-
-        let mut existing_metas: Vec<ExistingFileMeta> = Vec::new();
-        for card in &existing_cards {
-            let full_hash = if let Ok(bytes) = fs::read(&card.path) {
-                let mut h = Sha256::new();
-                h.update(&bytes);
-                format!("{:x}", h.finalize())
-            } else {
-                String::new()
-            };
-            existing_metas.push(ExistingFileMeta {
-                rel_path: card.filename.clone(),
-                full_sha256: full_hash,
-            });
-        }
-
-        // 3. Consultar estado en PostgreSQL para este registro patronal específico
-        let mut _db_existing_liq_count = 0i64;
-        if let Some(ref pool) = pool_clone {
-            if let Ok(mut client) = pool.get() {
-                let target_uuid = uuid::Uuid::parse_str(&revision_id).ok()
-                    .or_else(|| uuid::Uuid::parse_str(&rp_id).ok());
-                if let Some(u) = target_uuid {
-                    let rp_uuid_opt = if let Ok(Some(r)) = client.query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[&u]) {
-                        Some(r.get::<_, uuid::Uuid>(0))
-                    } else if let Ok(Some(r)) = client.query_opt("SELECT id FROM public.registros_patronales WHERE id = $1", &[&u]) {
-                        Some(r.get::<_, uuid::Uuid>(0))
-                    } else {
-                        None
-                    };
-                    if let Some(rp_uuid) = rp_uuid_opt {
-                        if let Ok(row) = client.query_one(
-                            "SELECT COUNT(*) FROM public.liquidaciones WHERE id_registro_patronal = $1",
-                            &[&rp_uuid],
-                        ) {
-                            _db_existing_liq_count = row.get(0);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. Procesar archivos: Estandarizar nombre 'Nombre Cliente__Registro Patronal__Mes__Anio.pdf',
-        //    estructurar físicamente en Año/Mes, y aplicar lógica de sobreescritura si el mes ya existe.
+        // 2. Fase 2 (Preparación / Staging en rustfs):
+        //    Estandarizar nombre 'Nombre Cliente__Registro Patronal__Mes__Anio.pdf',
+        //    preparar en un prefijo temporal `.staging_<batch_id>/...` en rustfs y caché local,
+        //    sin modificar ni borrar datos definitivos hasta que PostgreSQL confirme el COMMIT.
+        let batch_id = Uuid::now_v7().simple().to_string();
         let mut overwritten_count = 0;
         let mut new_count = 0;
+        let mut cleaned_months_in_batch: HashSet<(String, String)> = HashSet::new();
+        let mut batch_month_file_counters: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+        let mut staged_local_paths: Vec<PathBuf> = Vec::new();
+        let mut overwrite_months: Vec<(String, String)> = Vec::new();
+        let mut overwrite_old_files: Vec<String> = Vec::new();
+        let mut staged_cards: Vec<CedulaFileCardInfo> = Vec::new();
 
-        for item in items {
+        for (idx, item) in items.into_iter().enumerate() {
+            let orig_display = Path::new(&item.local_path)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| item.rel_path.clone());
+
+            let pct = ((idx + 1) as f32 / total_items.max(1) as f32) * 45.0;
+            let _ = prog_tx.send(CedulaProgressUpdate {
+                processed_count: (idx + 1) as i32,
+                total_count: total_items as i32,
+                progress_percentage: pct.max(2.0),
+                current_file_name: orig_display.clone(),
+                status_text: format!("Preparando en staging {} de {} archivos...", idx + 1, total_items),
+            });
+
             let data = match fs::read(&item.local_path) {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -1924,111 +1993,165 @@ fn handle_cedulas_upload_and_inspect(
                     &r_reg,
                     &rev_nom,
                     "Cedulas_de_cuotas",
-                    &format!("Trash/{}", item.rel_path),
+                    &format!("Trash/{}", orig_display),
                     &data,
                 );
                 continue;
             }
 
-            // Extraer metadatos para nombre estricto y estructura Año/Mes
-            let (std_fname, anio_str, mes_str, _, _) = crate::cedulas::view_logic::extract_cedula_standard_naming(
-                &item.local_path,
-                &c_nom,
-                &r_reg,
-            );
-            let structured_rel_path = format!("{}/{}/{}", anio_str, mes_str, std_fname);
+            // Extraer metadatos para nombre estricto y validar si contiene trabajadores SUA/EMA
+            let (std_fname, anio_str, mes_str, _, _, is_valid_with_workers) =
+                crate::cedulas::view_logic::inspect_cedula_upload_naming(
+                    &item.local_path,
+                    &c_nom,
+                    &r_reg,
+                );
 
-            // Verificar si el mes ya existe previamente
-            let existing_match = existing_cards.iter().find(|ex| {
-                let fn_up = ex.filename.to_uppercase();
-                fn_up.contains(&format!("__{}__{}.PDF", mes_str, anio_str))
-                    || fn_up.contains(&format!("{}/{}", anio_str, mes_str))
-                    || fn_up == std_fname.to_uppercase()
-            });
-
-            if let Some(old_card) = existing_match {
-                overwritten_count += 1;
-                log::info!("Sobreescribiendo cédula previa del mes {}/{}: {}", mes_str, anio_str, old_card.filename);
-
-                // 1. Mover el archivo físico anterior a la papelera (trash)
-                let _ = crate::rustfs::move_file_to_trash(
+            if !is_valid_with_workers {
+                // Archivo sin trabajadores o sin formato SUA/EMA válido (ej. resumen o comprobante):
+                // enviarlo a Trash sin sobreescribir ni borrar la cédula válida del mes
+                let _ = crate::rustfs::upload_file_to_rustfs(
                     &c_nom,
                     &r_reg,
                     &rev_nom,
                     "Cedulas_de_cuotas",
-                    &old_card.filename,
+                    &format!("Trash/{}", orig_display),
+                    &data,
                 );
+                continue;
+            }
 
-                // Limpiar caché local
-                let old_local = cache_dir.join("cedulas_de_cuotas").join(&old_card.filename);
-                let _ = std::fs::remove_file(&old_local);
+            let month_key = (anio_str.clone(), mes_str.clone());
+            if cleaned_months_in_batch.insert(month_key.clone()) {
+                // Primera vez que se toca este mes en el lote actual: verificar si existían archivos previos en RustFS
+                let existing_matches: Vec<_> = existing_cards
+                    .iter()
+                    .filter(|ex| {
+                        let fn_up = ex.filename.to_uppercase();
+                        fn_up.contains(&format!("__{}__{}", mes_str, anio_str))
+                            || fn_up.contains(&format!("{}/{}", anio_str, mes_str))
+                            || fn_up == std_fname.to_uppercase()
+                    })
+                    .collect();
 
-                // 2. En PostgreSQL, eliminar (DELETE) la información correspondiente a ese mes específico
-                if let Some(ref pool) = pool_clone {
-                    if let Ok(mut client) = pool.get() {
-                        let anio_num: i32 = anio_str.parse().unwrap_or(2026);
-                        let target_del_id = if !revision_id.trim().is_empty() { &revision_id } else { &rp_id };
-                        if let Err(e) = crate::cedulas::view_logic::delete_cedula_for_month(&mut client, target_del_id, &mes_str, anio_num) {
-                            log::error!("Error al eliminar liquidaciones de mes {} en BD: {}", mes_str, e);
-                        }
+                if !existing_matches.is_empty() {
+                    overwritten_count += 1;
+                    overwrite_months.push((anio_str.clone(), mes_str.clone()));
+                    for old_card in existing_matches {
+                        overwrite_old_files.push(old_card.filename.clone());
                     }
+                } else {
+                    new_count += 1;
                 }
             } else {
                 new_count += 1;
             }
 
-            // 3. Guardar el nuevo archivo en la ruta correspondiente (Año/Mes)
-            if let Err(e) = crate::rustfs::upload_file_to_rustfs(
+            let file_seq = batch_month_file_counters.entry(month_key).or_insert(0);
+            *file_seq += 1;
+            let final_fname = if *file_seq == 1 {
+                std_fname.clone()
+            } else {
+                format!("{}__{}.pdf", std_fname.trim_end_matches(".pdf"), file_seq)
+            };
+
+            let structured_rel_path = format!("{}/{}/{}", anio_str, mes_str, final_fname);
+
+            let _ = prog_tx.send(CedulaProgressUpdate {
+                processed_count: (idx + 1) as i32,
+                total_count: total_items as i32,
+                progress_percentage: pct.max(2.0),
+                current_file_name: final_fname.clone(),
+                status_text: format!("Subiendo a staging {} de {} archivos...", idx + 1, total_items),
+            });
+
+            // Guardar primero en staging de RustFS (.staging_<batch_id>/Año/Mes/Archivo.pdf)
+            if let Err(e) = crate::rustfs::upload_staging_file_to_rustfs(
                 &c_nom,
                 &r_reg,
                 &rev_nom,
                 "Cedulas_de_cuotas",
+                &batch_id,
                 &structured_rel_path,
                 &data,
             ) {
-                log::error!("Error subiendo archivo {} a RustFS: {}", structured_rel_path, e);
+                log::error!("Error subiendo archivo {} a staging de RustFS: {}", structured_rel_path, e);
+                let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                    &c_nom,
+                    &r_reg,
+                    &rev_nom,
+                    "Cedulas_de_cuotas",
+                    &batch_id,
+                );
+                for p in &staged_local_paths {
+                    let _ = std::fs::remove_file(p);
+                }
+                drop(prog_tx);
+                let err_detail = format!("Error almacenando archivo '{}' en rustfs (staging): {}", structured_rel_path, e);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        let app_data = ui.global::<AppData>();
+                        app_data.set_cedulas_view_is_processing(false);
+                        app_data.set_is_processing(false);
+                        app_data.set_cedulas_view_progress_fraction(0.0);
+                        app_data.set_cedulas_view_progress_text("".into());
+                        app_data.set_progress_percentage(0.0);
+                        app_data.set_system_error_modal_title("Error de Almacenamiento en rustfs".into());
+                        app_data.set_system_error_modal_detail(err_detail.into());
+                        app_data.set_show_system_error_modal(true);
+                    }
+                });
+                return;
             }
-        }
 
-        // 5. Sincronizar y recargar la lista activa desde RustFS
-        let mut final_cards = crate::rustfs::sync_and_load_cedulas_view_files(
-            &c_nom,
-            &r_reg,
-            &rev_nom,
-            &cache_dir,
-        ).unwrap_or(existing_cards);
-
-        let exp_rfc_opt = if !c_rfc.trim().is_empty() { Some(c_rfc.trim()) } else { None };
-        let exp_rp_opt = if !r_reg.trim().is_empty() && r_reg != "GENERAL" { Some(r_reg.trim()) } else { None };
-
-        for card in &mut final_cards {
-            let path_buf = PathBuf::from(&card.id);
-            if path_buf.exists() {
-                let inspected = crate::cedulas::view_logic::inspect_cedula_file_with_context(
-                    &path_buf,
+            let local_dest = cache_dir.join("cedulas_de_cuotas").join(&structured_rel_path);
+            if let Some(parent) = local_dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::write(&local_dest, &data).is_ok() {
+                staged_local_paths.push(local_dest.clone());
+                let exp_rfc_opt = if !c_rfc.trim().is_empty() { Some(c_rfc.trim()) } else { None };
+                let exp_rp_opt = if !r_reg.trim().is_empty() && r_reg != "GENERAL" { Some(r_reg.trim()) } else { None };
+                let mut card = crate::cedulas::view_logic::inspect_cedula_file_with_context(
+                    &local_dest,
                     exp_rfc_opt,
                     exp_rp_opt,
                 );
-                card.warning_msg = inspected.warning_msg;
+                card.filename = structured_rel_path;
+                staged_cards.push(card);
             }
         }
 
-        // 6. Actualizar la interfaz Slint
+        // Combinar tarjetas previas (excluyendo las que serán sobreescritas) con las tarjetas en staging
+        let old_set: HashSet<String> = overwrite_old_files.iter().cloned().collect();
+        let mut final_cards: Vec<CedulaFileCardInfo> = existing_cards
+            .into_iter()
+            .filter(|c| !old_set.contains(&c.filename))
+            .collect();
+        final_cards.extend(staged_cards);
+
+        drop(prog_tx);
+
+        // 4. Actualizar la interfaz Slint e iniciar procesamiento y guardado persistente atómico
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let mut sess = session_clone.lock().unwrap();
-                sess.current_revision_id = Some(revision_id);
-                sess.files = final_cards;
-                update_cedulas_view_file_list_ui(&ui, &sess);
-                if ui.global::<AppData>().get_cedulas_view_state() == 0 && !sess.files.is_empty() {
-                    ui.global::<AppData>().set_cedulas_view_state(1);
+                {
+                    let mut sess = session_clone.lock().unwrap();
+                    sess.current_revision_id = Some(revision_id.clone());
+                    sess.files = final_cards;
+                    sess.pending_staging_batch_id = Some(batch_id);
+                    sess.pending_staged_local_paths = staged_local_paths;
+                    sess.pending_overwrite_months = overwrite_months;
+                    sess.pending_overwrite_old_files = overwrite_old_files;
+                    update_cedulas_view_file_list_ui(&ui, &sess);
                 }
 
                 if overwritten_count > 0 {
-                    show_toast_message(&ui, &format!("Se estructuraron {} cédula(s) nueva(s) y se sobreescribieron {} de meses existentes (movidas a papelera).", new_count, overwritten_count));
-                } else {
-                    show_toast_message(&ui, &format!("Se estructuraron y cargaron {} cédula(s) en carpetas Año/Mes en RustFS.", new_count));
+                    show_toast_message(&ui, &format!("Se prepararon {} cédula(s) nueva(s) y {} para actualizar meses existentes.", new_count, overwritten_count));
                 }
+
+                // Iniciar procesamiento y guardado atómico bidireccional (PostgreSQL + rustfs)
+                spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
             }
         });
     });
@@ -2039,53 +2162,109 @@ fn spawn_cedulas_view_worker(
     session_arc: Arc<Mutex<CedulasViewState>>,
     pool_opt: Option<Arc<DbPool>>,
 ) {
-    let (input_paths, client_rfc, client_nombre, revision_id, revision_nombre) = {
+    let (
+        input_paths,
+        client_rfc,
+        client_nombre,
+        selected_rp_registro,
+        effective_rp_id,
+        revision_id,
+        revision_nombre,
+        staging_batch_id_opt,
+        staged_local_paths,
+        overwrite_months,
+        overwrite_old_files,
+    ) = {
         let Some(ui) = ui_weak.upgrade() else { return; };
         let app_data = ui.global::<AppData>();
         let mut session = session_arc.lock().unwrap();
-        if session.files.is_empty() {
-            let rev_id = app_data.get_selected_revision_id().to_string();
-            let c_nom = app_data.get_selected_cliente_nombre().to_string();
-            let rp = app_data.get_selected_rp_registro().to_string();
-            let rev_nom = app_data.get_selected_revision_nombre().to_string();
-            if !rev_id.is_empty() && !c_nom.is_empty() {
-                let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&rev_id);
-                let rustfs_cards = crate::rustfs::sync_and_load_cedulas_view_files(
-                    &c_nom,
-                    &rp,
-                    &rev_nom,
-                    &cache_dir,
-                ).unwrap_or_default();
-                if !rustfs_cards.is_empty() {
-                    session.files = rustfs_cards;
-                }
+        let c_nom = app_data.get_selected_cliente_nombre().to_string();
+        let rp = app_data.get_selected_rp_registro().to_string();
+        let rp_id_sel = app_data.get_selected_rp_id().to_string();
+        let rev_id_sel = app_data.get_selected_revision_id().to_string();
+        let rev_nom = app_data.get_selected_revision_nombre().to_string();
+
+        let effective_rp = if !rp_id_sel.trim().is_empty() {
+            rp_id_sel
+        } else {
+            rev_id_sel.clone()
+        };
+
+        if session.files.is_empty() && !effective_rp.is_empty() && !c_nom.is_empty() {
+            let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&effective_rp);
+            let rustfs_cards = crate::rustfs::sync_and_load_cedulas_view_files(
+                &c_nom,
+                &rp,
+                &rev_nom,
+                &cache_dir,
+            ).unwrap_or_default();
+            if !rustfs_cards.is_empty() {
+                session.files = rustfs_cards;
             }
         }
         if session.files.is_empty() {
             app_data.set_cedulas_view_is_processing(false);
+            app_data.set_progress_percentage(0.0);
             show_toast_message(&ui, "Por favor agrega al menos un archivo antes de procesar.");
             return;
         }
-        if app_data.get_cedulas_view_is_processing() {
-            return;
-        }
         app_data.set_cedulas_view_is_processing(true);
-        app_data.set_cedulas_view_progress_fraction(0.02);
+        if app_data.get_progress_percentage() < 45.0 {
+            app_data.set_progress_percentage(45.0);
+            app_data.set_cedulas_view_progress_fraction(0.45);
+        }
+        app_data.set_total_files_count(session.files.len() as i32);
         app_data.set_cedulas_view_progress_text("Iniciando motor de layout SUA y auditoría documental...".into());
 
         let paths: Vec<PathBuf> = session.files.iter().map(|f| f.path.clone()).collect();
         let rfc = app_data.get_selected_cliente_rfc().to_string();
         let nombre = app_data.get_selected_cliente_nombre().to_string();
-        let rev_id = app_data.get_selected_revision_id().to_string();
-        let rev_nom = app_data.get_selected_revision_nombre().to_string();
-        (paths, rfc, nombre, rev_id, rev_nom)
+        let batch_opt = session.pending_staging_batch_id.take();
+        let st_locals = std::mem::take(&mut session.pending_staged_local_paths);
+        let ov_months = std::mem::take(&mut session.pending_overwrite_months);
+        let ov_files = std::mem::take(&mut session.pending_overwrite_old_files);
+        (
+            paths,
+            rfc,
+            nombre,
+            rp,
+            effective_rp,
+            rev_id_sel,
+            rev_nom,
+            batch_opt,
+            st_locals,
+            ov_months,
+            ov_files,
+        )
     };
 
     let ui_w = ui_weak.clone();
     let session_w = session_arc.clone();
     let pool_w = pool_opt.or_else(crate::db::get_global_pool);
 
-    thread::spawn(move || {
+    let (prog_tx, mut prog_rx) = tokio::sync::mpsc::unbounded_channel::<CedulaProgressUpdate>();
+    let ui_for_rx = ui_w.clone();
+
+    get_tokio_handle().spawn(async move {
+        while let Some(upd) = prog_rx.recv().await {
+            let ui_clone = ui_for_rx.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_clone.upgrade() {
+                    let app_data = ui.global::<AppData>();
+                    app_data.set_cedulas_view_is_processing(true);
+                    app_data.set_processed_count(upd.processed_count);
+                    app_data.set_total_files_count(upd.total_count);
+                    app_data.set_progress_percentage(upd.progress_percentage);
+                    app_data.set_cedulas_view_progress_fraction(upd.progress_percentage / 100.0);
+                    app_data.set_current_file_name(upd.current_file_name.into());
+                    app_data.set_cedulas_view_progress_text(upd.status_text.into());
+                }
+            });
+        }
+    });
+
+    get_tokio_handle().spawn_blocking(move || {
+
         let temp_dir_handle = tempfile::Builder::new()
             .prefix("docu_ffacd_cedview_")
             .tempdir();
@@ -2127,35 +2306,35 @@ fn spawn_cedulas_view_worker(
         };
 
         let mut rp_for_rustfs = String::new();
-        if let Some(ref pool) = pool_w {
-            if let Ok(mut c) = pool.get() {
-                if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
-                    if let Ok(row) = c.query_opt(
-                        "SELECT rp.registro FROM revisiones r JOIN registros_patronales rp ON r.id_registro_patronal = rp.id WHERE r.id = $1",
-                        &[&rev_uuid],
-                    ) {
-                        if let Some(r) = row {
-                            rp_for_rustfs = r.get::<_, String>(0);
-                        }
-                    }
-                }
+        if let Some(ref pool) = pool_w
+            && let Ok(mut c) = pool.get()
+        {
+            if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id)
+                && let Ok(Some(r)) = c.query_opt(
+                    "SELECT rp.registro FROM revisiones r JOIN registros_patronales rp ON r.id_registro_patronal = rp.id WHERE r.id = $1",
+                    &[&rev_uuid],
+                )
+            {
+                rp_for_rustfs = r.get::<_, String>(0);
+            } else if let Ok(rp_uuid) = uuid::Uuid::parse_str(&effective_rp_id)
+                && let Ok(Some(r)) = c.query_opt(
+                    "SELECT registro FROM registros_patronales WHERE id = $1",
+                    &[&rp_uuid],
+                )
+            {
+                rp_for_rustfs = r.get::<_, String>(0);
             }
         }
         if rp_for_rustfs.is_empty() {
-            let app_data_rp = if let Some(ui) = ui_w.upgrade() {
-                ui.global::<AppData>().get_selected_rp_registro().to_string()
-            } else {
-                String::new()
-            };
-            if !app_data_rp.is_empty() {
-                rp_for_rustfs = app_data_rp;
+            if !selected_rp_registro.is_empty() {
+                rp_for_rustfs = selected_rp_registro;
             } else {
                 rp_for_rustfs = "GENERAL".to_string();
             }
         }
 
-        // Usar los archivos que ya están en memoria/disco local si existen; solo sincronizar de RustFS si está vacío
-        let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&revision_id);
+        let cache_key = if !effective_rp_id.is_empty() { effective_rp_id.clone() } else { revision_id.clone() };
+        let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&cache_key);
         let files_to_process: Vec<PathBuf> = if !input_paths.is_empty() {
             input_paths.clone()
         } else {
@@ -2168,21 +2347,19 @@ fn spawn_cedulas_view_worker(
             rustfs_cards.iter().map(|c| c.path.clone()).collect()
         };
 
-        let ui_for_cb = ui_w.clone();
-        let progress_cb = move |current: usize, total: usize, msg: &str| {
-            let frac = if total > 0 {
-                0.05 + (current as f32 / total as f32) * 0.55
+        let tx_for_audit = prog_tx.clone();
+        let progress_cb = move |current: usize, total: usize, file_label: &str| {
+            let pct = if total > 0 {
+                45.0 + (current as f32 / total as f32) * 30.0
             } else {
-                0.05
+                45.0
             };
-            let text = msg.to_string();
-            let ui_clone = ui_for_cb.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = ui_clone.upgrade() {
-                    let app_data = ui.global::<AppData>();
-                    app_data.set_cedulas_view_progress_fraction(frac);
-                    app_data.set_cedulas_view_progress_text(text.into());
-                }
+            let _ = tx_for_audit.send(CedulaProgressUpdate {
+                processed_count: current as i32,
+                total_count: total as i32,
+                progress_percentage: pct,
+                current_file_name: file_label.to_string(),
+                status_text: format!("Procesando {} de {} archivos...", current, total),
             });
         };
 
@@ -2203,7 +2380,7 @@ fn spawn_cedulas_view_worker(
             progress_cb,
         ) {
             Ok((audit_res, businesses, mismatch_report)) => {
-                // Mover a Trash en RustFS todos los archivos que no se pudieron procesar
+                // Mover a Trash en RustFS únicamente los archivos que fallaron por completo
                 for bad_item in &mismatch_report.items {
                     if let Err(e) = crate::rustfs::move_file_to_trash(
                         &client_nombre,
@@ -2212,7 +2389,7 @@ fn spawn_cedulas_view_worker(
                         "Cedulas_de_cuotas",
                         &bad_item.filename,
                     ) {
-                        log::warn!("No se pudo mover archivo {} a Trash en RustFS: {}", bad_item.filename, e);
+                        log::debug!("No se pudo mover archivo {} a Trash en RustFS: {}", bad_item.filename, e);
                     } else {
                         log::info!("Archivo con error {} movido directamente a Trash en RustFS", bad_item.filename);
                     }
@@ -2220,51 +2397,185 @@ fn spawn_cedulas_view_worker(
                     let _ = std::fs::remove_file(&local_cached);
                 }
 
-                // Guardar en Base de Datos PostgreSQL con progreso interactivo en la UI
+                let target_sync_id = if !revision_id.trim().is_empty() {
+                    revision_id.clone()
+                } else {
+                    effective_rp_id.clone()
+                };
+
+                // Fase 3 y Fase 4: Guardado Atómico Bidireccional (PostgreSQL + rustfs) con Rollback Seguro
                 let mut db_saved_summary = String::new();
                 let mut saved_stats_opt: Option<CedulasDbStats> = None;
-                if let Some(ref pool) = pool_w {
-                    let ui_for_db_cb = ui_w.clone();
-                    let db_progress_cb = move |current: usize, total: usize, msg: &str| {
-                        let frac = if total > 0 {
-                            0.60 + (current as f32 / total as f32) * 0.35
-                        } else {
-                            0.75
+                let mut atomic_save_err: Option<String> = None;
+
+                if !businesses.is_empty() {
+                    if let Some(ref pool) = pool_w {
+                        let tx_for_db = prog_tx.clone();
+                        let db_progress_cb = move |current: usize, total: usize, file_label: &str| {
+                            let pct = if total > 0 {
+                                75.0 + (current as f32 / total as f32) * 23.0
+                            } else {
+                                85.0
+                            };
+                            let _ = tx_for_db.send(CedulaProgressUpdate {
+                                processed_count: current as i32,
+                                total_count: total as i32,
+                                progress_percentage: pct,
+                                current_file_name: file_label.to_string(),
+                                status_text: format!("Guardando atómicamente en BD y rustfs: {} de {}...", current, total),
+                            });
                         };
-                        let text = msg.to_string();
-                        let ui_clone = ui_for_db_cb.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = ui_clone.upgrade() {
-                                let app_data = ui.global::<AppData>();
-                                app_data.set_cedulas_view_progress_fraction(frac);
-                                app_data.set_cedulas_view_progress_text(text.into());
-                            }
-                        });
-                    };
 
-                    match save_cedulas_audit_to_db(pool, &revision_id, &businesses, Some(&db_progress_cb)) {
-                        Ok(stats) => {
-                            db_saved_summary = format!(
-                                "Guardadas {} liquidaciones y {} detalles de cédulas.",
-                                stats.liquidaciones_guardadas, stats.detalles_guardados
-                            );
-                            log::info!("Guardado DB Cédulas: {:?}", stats);
-                            saved_stats_opt = Some(stats);
+                        let c_nom_hook = client_nombre.clone();
+                        let rp_hook = rp_for_rustfs.clone();
+                        let rev_nom_hook = revision_nombre.clone();
+                        let batch_hook_opt = staging_batch_id_opt.clone();
+                        let ov_files_hook = overwrite_old_files.clone();
+                        let cache_dir_hook = cache_dir.clone();
 
-                            // Sincronizar automáticamente hacia reportes_liquidaciones
-                            if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
-                                if let Ok(mut client) = pool.get() {
-                                    match crate::db::reporte_liquidaciones::sync_reportes_liquidaciones_for_revision(&mut client, rev_uuid) {
-                                        Ok(c) => log::info!("Sincronizadas {} filas hacia reportes_liquidaciones", c),
-                                        Err(e) => log::error!("Error sincronizando reportes_liquidaciones: {}", e),
-                                    }
+                        let rustfs_commit_hook = move || -> Result<(), String> {
+                            if let Some(ref batch_id) = batch_hook_opt {
+                                for old_fname in &ov_files_hook {
+                                    let _ = crate::rustfs::move_file_to_trash(
+                                        &c_nom_hook,
+                                        &rp_hook,
+                                        &rev_nom_hook,
+                                        "Cedulas_de_cuotas",
+                                        old_fname,
+                                    );
+                                    let old_local = cache_dir_hook.join("cedulas_de_cuotas").join(old_fname);
+                                    let _ = std::fs::remove_file(&old_local);
                                 }
+                                crate::rustfs::commit_staging_files_in_rustfs(
+                                    &c_nom_hook,
+                                    &rp_hook,
+                                    &rev_nom_hook,
+                                    "Cedulas_de_cuotas",
+                                    batch_id,
+                                )?;
+                            }
+                            Ok(())
+                        };
+
+                        match save_cedulas_audit_to_db(
+                            pool,
+                            &target_sync_id,
+                            &businesses,
+                            &overwrite_months,
+                            Some(&rustfs_commit_hook),
+                            Some(&db_progress_cb),
+                        ) {
+                            Ok(stats) => {
+                                db_saved_summary = format!(
+                                    "Guardadas {} liquidaciones y {} detalles de cédulas.",
+                                    stats.liquidaciones_guardadas, stats.detalles_guardados
+                                );
+                                log::info!("Guardado Atómico DB + rustfs Cédulas exitoso: {:?}", stats);
+                                saved_stats_opt = Some(stats);
+                            }
+                            Err(e) => {
+                                log::error!("Error en guardado atómico de cédulas (ejecutando rollback): {}", e);
+                                if let Some(ref batch_id) = staging_batch_id_opt {
+                                    let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                                        &client_nombre,
+                                        &rp_for_rustfs,
+                                        &revision_nombre,
+                                        "Cedulas_de_cuotas",
+                                        batch_id,
+                                    );
+                                }
+                                for p in &staged_local_paths {
+                                    let _ = std::fs::remove_file(p);
+                                }
+                                atomic_save_err = Some(e);
                             }
                         }
-                        Err(e) => {
-                            log::error!("Error guardando cédulas en BD: {}", e);
-                            db_saved_summary = format!("Advertencia DB: {}", e);
+                    } else {
+                        let err_msg = "No hay conexión activa con el servidor PostgreSQL. Se canceló el guardado y se limpiaron los archivos temporales en rustfs.".to_string();
+                        log::error!("{}", err_msg);
+                        if let Some(ref batch_id) = staging_batch_id_opt {
+                            let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                                &client_nombre,
+                                &rp_for_rustfs,
+                                &revision_nombre,
+                                "Cedulas_de_cuotas",
+                                batch_id,
+                            );
                         }
+                        for p in &staged_local_paths {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        atomic_save_err = Some(err_msg);
+                    }
+                }
+                drop(prog_tx);
+
+                // Si ocurrió cualquier error en PostgreSQL o en rustfs, revertir el estado visual y mostrar el modal de error
+                if let Some(err_detail) = atomic_save_err {
+                    let existing_committed_cards = crate::rustfs::sync_and_load_cedulas_view_files(
+                        &client_nombre,
+                        &rp_for_rustfs,
+                        &revision_nombre,
+                        &cache_dir,
+                    ).unwrap_or_default();
+                    let committed_db_opt = pool_w
+                        .as_ref()
+                        .and_then(|p| p.get().ok())
+                        .and_then(|mut c| load_cedulas_from_db(&mut c, &target_sync_id).ok().flatten());
+
+                    let ui_err = ui_w.clone();
+                    let session_err = session_w.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_err.upgrade() {
+                            let mut sess = session_err.lock().unwrap();
+                            sess.files = existing_committed_cards;
+                            if let Some((db_audit, db_businesses, _)) = committed_db_opt {
+                                sess.audit_res = Some(db_audit);
+                                sess.businesses = db_businesses;
+                                update_cedulas_view_file_list_ui(&ui, &sess);
+                                update_cedulas_audit_view_ui(&ui, &mut sess);
+                                ui.global::<AppData>().set_cedulas_view_state(2);
+                            } else {
+                                reset_cedulas_ui_to_state_zero(&ui, &mut sess);
+                            }
+                            drop(sess);
+
+                            let app_data = ui.global::<AppData>();
+                            app_data.set_cedulas_view_is_processing(false);
+                            app_data.set_is_processing(false);
+                            app_data.set_cedulas_view_progress_fraction(0.0);
+                            app_data.set_cedulas_view_progress_text("".into());
+                            app_data.set_progress_percentage(0.0);
+                            app_data.set_current_file_name("".into());
+                            app_data.set_system_error_modal_title("Error al Guardar la Información".into());
+                            app_data.set_system_error_modal_detail(err_detail.into());
+                            app_data.set_show_system_error_modal(true);
+                        }
+                    });
+                    return;
+                }
+
+                // Recargar desde BD con el filtro estricto de las obras registradas y mes_periodo_int numérico
+                let mut final_audit = audit_res;
+                let mut final_businesses = businesses;
+                let mut diag_from_db = crate::db::reporte_liquidaciones::MissingCedulasDiagnostic::default();
+                let effective_sync_id = if let Some(ref stats) = saved_stats_opt {
+                    stats.id_revision.map(|u| u.to_string())
+                        .or_else(|| stats.id_registro_patronal.map(|u| u.to_string()))
+                        .unwrap_or_else(|| target_sync_id.clone())
+                } else {
+                    target_sync_id.clone()
+                };
+                if let Some(mut client) = pool_w.as_ref().and_then(|p| p.get().ok()) {
+                    if let Ok(Some((db_audit, db_businesses, _missing_warning))) = load_cedulas_from_db(&mut client, &effective_sync_id) {
+                        final_audit = db_audit;
+                        final_businesses = db_businesses;
+                    }
+                    let diag_res = Uuid::parse_str(&effective_sync_id)
+                        .map_err(|e| e.to_string())
+                        .and_then(|u| crate::db::reporte_liquidaciones::check_missing_cedulas_for_revision(&mut client, u));
+                    if let Ok(diag) = diag_res {
+                        diag_from_db = diag;
                     }
                 }
 
@@ -2272,10 +2583,11 @@ fn spawn_cedulas_view_worker(
                 let ui_final = ui_w.clone();
                 let session_final = session_w.clone();
                 let pool_stats = pool_w.clone();
+                let saved_stats_for_ui = saved_stats_opt.clone();
 
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_final.upgrade() {
-                        let is_all_failed = audit_res.validos_sua == 0 || businesses.is_empty();
+                        let is_all_failed = final_audit.validos_sua == 0 || final_businesses.is_empty();
                         if is_all_failed {
                             {
                                 let mut sess = session_final.lock().unwrap();
@@ -2285,6 +2597,8 @@ fn spawn_cedulas_view_worker(
                             app_data.set_cedulas_view_is_processing(false);
                             app_data.set_cedulas_view_progress_fraction(0.0);
                             app_data.set_cedulas_view_progress_text("".into());
+                            app_data.set_progress_percentage(0.0);
+                            app_data.set_current_file_name("".into());
 
                             let ui_items: Vec<crate::MismatchDetailItem> = mismatch_report.items.into_iter().map(|it| crate::MismatchDetailItem {
                                 filename: it.filename.into(),
@@ -2310,22 +2624,62 @@ fn spawn_cedulas_view_worker(
                             let mut sess = session_final.lock().unwrap();
                             let bad_names: HashSet<String> = mismatch_report.items.iter().map(|it| it.filename.clone()).collect();
                             sess.files.retain(|f| !bad_names.contains(&f.filename));
-                            sess.audit_res = Some(audit_res);
-                            sess.businesses = businesses;
-                            sess.current_revision_id = Some(revision_id.clone());
+                            sess.audit_res = Some(final_audit);
+                            sess.businesses = final_businesses;
+                            sess.current_rp_id = Some(cache_key.clone());
+                            sess.current_revision_id = if let Some(ref stats) = saved_stats_for_ui {
+                                stats.id_revision.map(|u| u.to_string()).or_else(|| if !revision_id.is_empty() { Some(revision_id.clone()) } else { None })
+                            } else if !revision_id.is_empty() {
+                                Some(revision_id.clone())
+                            } else {
+                                None
+                            };
                             update_cedulas_audit_view_ui(&ui, &mut sess);
                         }
                         let app_data = ui.global::<AppData>();
+                        app_data.set_rp_has_cedulas(true);
+                        app_data.set_reporte_has_missing_cedulas_warning(diag_from_db.has_missing);
+                        app_data.set_reporte_missing_cedulas_msg(diag_from_db.summary_msg.into());
+                        app_data.set_reporte_missing_cedulas_reason(diag_from_db.reason_msg.into());
+                        let missing_slint: Vec<slint::SharedString> = diag_from_db
+                            .missing_periods
+                            .iter()
+                            .map(|s| slint::SharedString::from(s.as_str()))
+                            .collect();
+                        let inconsistencias_slint: Vec<InconsistenciaDetalle> = diag_from_db
+                            .inconsistencias
+                            .iter()
+                            .map(|it| InconsistenciaDetalle {
+                                periodo: it.periodo.clone().into(),
+                                mes_anio: it.mes_anio.clone().into(),
+                                obras_vinculadas: it.obras_vinculadas.clone().into(),
+                                obras_count: it.obras_count as i32,
+                            })
+                            .collect();
+                        app_data.set_reporte_missing_cedulas_meses(ModelRc::new(VecModel::from(missing_slint)));
+                        app_data.set_reporte_inconsistencias_detalles(ModelRc::new(VecModel::from(inconsistencias_slint)));
+                        if !diag_from_db.has_missing {
+                            app_data.set_reporte_show_missing_cedulas_details(false);
+                        }
                         app_data.set_cedulas_view_is_processing(false);
                         app_data.set_cedulas_view_state(2);
                         app_data.set_cedulas_view_progress_fraction(1.0);
                         app_data.set_cedulas_view_progress_text("¡Procesamiento y guardado completado!".into());
+                        app_data.set_progress_percentage(100.0);
+                        app_data.set_current_file_name("¡Procesamiento y guardado completado!".into());
                         app_data.set_reporte_liquidaciones_access_allowed(true);
 
                         // Actualizar propiedades de navegación tras guardar cédulas
                         if let Some(ref pool) = pool_stats {
                             if let Ok(mut client) = pool.get() {
-                                if let Ok(rev_uuid) = Uuid::parse_str(&revision_id) {
+                                let effective_rev_uuid = if let Ok(rev_uuid) = Uuid::parse_str(&revision_id) {
+                                    Some(rev_uuid)
+                                } else if let Some(ref stats) = saved_stats_for_ui {
+                                    stats.id_revision
+                                } else {
+                                    None
+                                };
+                                if let Some(rev_uuid) = effective_rev_uuid {
                                     if let Ok((has_cedulas, has_nominas, has_liquidaciones, has_obras)) = 
                                         check_all_data_exists(&mut client, rev_uuid) {
                                         app_data.set_revision_has_cedulas(has_cedulas);
@@ -2420,6 +2774,19 @@ fn spawn_cedulas_view_worker(
                 });
             }
             Err((err_msg, mismatch_report)) => {
+                drop(prog_tx);
+                if let Some(ref batch_id) = staging_batch_id_opt {
+                    let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                        &client_nombre,
+                        &rp_for_rustfs,
+                        &revision_nombre,
+                        "Cedulas_de_cuotas",
+                        batch_id,
+                    );
+                }
+                for p in &staged_local_paths {
+                    let _ = std::fs::remove_file(p);
+                }
                 // Mover a Trash en RustFS todos los archivos que no se pudieron procesar
                 for bad_item in &mismatch_report.items {
                     if let Err(e) = crate::rustfs::move_file_to_trash(
@@ -2444,8 +2811,11 @@ fn spawn_cedulas_view_worker(
                     if let Some(ui) = ui_err.upgrade() {
                         let app_data = ui.global::<AppData>();
                         app_data.set_cedulas_view_is_processing(false);
+                        app_data.set_is_processing(false);
                         app_data.set_cedulas_view_progress_fraction(0.0);
                         app_data.set_cedulas_view_progress_text("".into());
+                        app_data.set_progress_percentage(0.0);
+                        app_data.set_current_file_name("".into());
 
                         if is_client_mismatch {
                             {
@@ -2470,7 +2840,9 @@ fn spawn_cedulas_view_worker(
                             );
                             app_data.set_show_cedulas_client_mismatch_modal(true);
                         } else {
-                            show_toast_message(&ui, &format!("Error al procesar: {}", err_msg));
+                            app_data.set_system_error_modal_title("Error al Procesar las Cédulas".into());
+                            app_data.set_system_error_modal_detail(err_msg.into());
+                            app_data.set_show_system_error_modal(true);
                         }
                     }
                 });
@@ -2483,9 +2855,9 @@ fn sync_and_load_cedulas_view_data(
     ui: &MainWindow,
     pool_opt: &Option<Arc<DbPool>>,
     session_arc: &Arc<Mutex<CedulasViewState>>,
-    rev_id: &str,
+    target_id: &str,
 ) {
-    if rev_id.is_empty() {
+    if target_id.is_empty() {
         return;
     }
 
@@ -2499,47 +2871,79 @@ fn sync_and_load_cedulas_view_data(
         }
     };
 
-    // 1. Obtener metadatos de la revisión (cliente, registro patronal, nombre revisión, rfc)
-    let rev_meta = match uuid::Uuid::parse_str(rev_id.trim()) {
-        Ok(rev_uuid) => {
-            client.query_opt(
+    // 1. Obtener metadatos directamente del Registro Patronal (o fallback si pasaron revision)
+    let parsed_uuid = uuid::Uuid::parse_str(target_id.trim()).ok();
+    let mut cliente_nombre = String::new();
+    let mut rp_registro = String::new();
+    let mut revision_nombre = String::new();
+    let mut cliente_rfc = String::new();
+    let mut effective_rp_id = target_id.to_string();
+
+    if let Some(target_uuid) = parsed_uuid {
+        // Intentar primero como Registro Patronal
+        let rp_meta = client.query_opt(
+            r#"
+            SELECT 
+                c.nombre AS cliente_nombre,
+                rp.registro AS rp_registro,
+                c.rfc AS cliente_rfc,
+                rp.id::text AS rp_id
+            FROM public.registros_patronales rp
+            JOIN public.clientes c ON rp.id_cliente = c.id
+            WHERE rp.id = $1
+            "#,
+            &[&target_uuid],
+        ).ok().flatten();
+
+        if let Some(row) = rp_meta {
+            cliente_nombre = row.get::<_, String>(0);
+            rp_registro = row.get::<_, String>(1);
+            cliente_rfc = row.get::<_, Option<String>>(2).unwrap_or_default();
+            effective_rp_id = row.get::<_, String>(3);
+            let ui_rev_nom = ui.global::<AppData>().get_selected_revision_nombre().to_string();
+            revision_nombre = if !ui_rev_nom.trim().is_empty() {
+                ui_rev_nom
+            } else {
+                "GENERAL".to_string()
+            };
+        } else {
+            // Intentar como Revisión (para compatibilidad)
+            let rev_meta = client.query_opt(
                 r#"
                 SELECT 
                     c.nombre AS cliente_nombre,
                     rp.registro AS rp_registro,
                     r.nombre AS revision_nombre,
-                    c.rfc AS cliente_rfc
+                    c.rfc AS cliente_rfc,
+                    rp.id::text AS rp_id
                 FROM public.revisiones r
                 JOIN public.registros_patronales rp ON r.id_registro_patronal = rp.id
                 JOIN public.clientes c ON rp.id_cliente = c.id
                 WHERE r.id = $1
                 "#,
-                &[&rev_uuid],
-            ).ok().flatten()
-        }
-        Err(_) => None,
-    };
+                &[&target_uuid],
+            ).ok().flatten();
 
-    let (cliente_nombre, rp_registro, revision_nombre, cliente_rfc) = match rev_meta {
-        Some(row) => (
-            row.get::<_, String>(0),
-            row.get::<_, String>(1),
-            row.get::<_, String>(2),
-            row.get::<_, Option<String>>(3).unwrap_or_default(),
-        ),
-        None => {
-            let app_data = ui.global::<AppData>();
-            (
-                app_data.get_selected_cliente_nombre().to_string(),
-                app_data.get_selected_rp_registro().to_string(),
-                app_data.get_selected_revision_nombre().to_string(),
-                app_data.get_selected_cliente_rfc().to_string(),
-            )
+            if let Some(row) = rev_meta {
+                cliente_nombre = row.get::<_, String>(0);
+                rp_registro = row.get::<_, String>(1);
+                revision_nombre = row.get::<_, String>(2);
+                cliente_rfc = row.get::<_, Option<String>>(3).unwrap_or_default();
+                effective_rp_id = row.get::<_, String>(4);
+            }
         }
-    };
+    }
+
+    if cliente_nombre.is_empty() {
+        let app_data = ui.global::<AppData>();
+        cliente_nombre = app_data.get_selected_cliente_nombre().to_string();
+        rp_registro = app_data.get_selected_rp_registro().to_string();
+        revision_nombre = app_data.get_selected_revision_nombre().to_string();
+        cliente_rfc = app_data.get_selected_cliente_rfc().to_string();
+    }
 
     // 2. Sincronizar y descargar archivos de RustFS
-    let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(rev_id);
+    let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&effective_rp_id);
     let mut rustfs_files = crate::rustfs::sync_and_load_cedulas_view_files(
         &cliente_nombre,
         &rp_registro,
@@ -2562,29 +2966,76 @@ fn sync_and_load_cedulas_view_data(
         }
     }
 
-    // 3. Cargar liquidaciones y calcular estadísticos desde PostgreSQL
-    let db_res = load_cedulas_from_db(&mut client, rev_id);
+    // 3. Cargar liquidaciones y calcular estadísticos desde PostgreSQL (ligadas al RP / Revisión)
+    let ui_rev_id = ui.global::<AppData>().get_selected_revision_id().to_string();
+    let effective_query_id = if !ui_rev_id.trim().is_empty() {
+        ui_rev_id.clone()
+    } else {
+        target_id.to_string()
+    };
+    let db_res = load_cedulas_from_db(&mut client, &effective_query_id);
+    let diag = if let Ok(rev_or_rp_uuid) = uuid::Uuid::parse_str(effective_query_id.trim()) {
+        crate::db::reporte_liquidaciones::check_missing_cedulas_for_revision(&mut client, rev_or_rp_uuid).unwrap_or_default()
+    } else if let Some(target_uuid) = parsed_uuid {
+        crate::db::reporte_liquidaciones::check_missing_cedulas_for_revision(&mut client, target_uuid).unwrap_or_default()
+    } else {
+        crate::db::reporte_liquidaciones::MissingCedulasDiagnostic::default()
+    };
+    let missing_slint: Vec<slint::SharedString> = diag
+        .missing_periods
+        .iter()
+        .map(|s| slint::SharedString::from(s.as_str()))
+        .collect();
 
     // 4. Actualizar sesión y componentes Slint UI
     let mut sess = session_arc.lock().unwrap();
-    sess.current_revision_id = Some(rev_id.to_string());
+    sess.current_rp_id = Some(effective_rp_id.clone());
+    sess.current_revision_id = Some(target_id.to_string());
     sess.files = rustfs_files;
 
+    let app_data = ui.global::<AppData>();
     match db_res {
-        Ok(Some((audit, businesses))) => {
+        Ok(Some((audit, businesses, _missing_cedulas))) => {
             sess.audit_res = Some(audit);
             sess.businesses = businesses;
+            app_data.set_rp_has_cedulas(true);
+            app_data.set_reporte_has_missing_cedulas_warning(diag.has_missing);
+            app_data.set_reporte_missing_cedulas_msg(slint::SharedString::from(diag.summary_msg));
+            app_data.set_reporte_missing_cedulas_reason(slint::SharedString::from(diag.reason_msg));
+            let inconsistencias_slint: Vec<InconsistenciaDetalle> = diag
+                .inconsistencias
+                .iter()
+                .map(|it| InconsistenciaDetalle {
+                    periodo: it.periodo.clone().into(),
+                    mes_anio: it.mes_anio.clone().into(),
+                    obras_vinculadas: it.obras_vinculadas.clone().into(),
+                    obras_count: it.obras_count as i32,
+                })
+                .collect();
+            app_data.set_reporte_missing_cedulas_meses(ModelRc::new(VecModel::from(missing_slint)));
+            app_data.set_reporte_inconsistencias_detalles(ModelRc::new(VecModel::from(inconsistencias_slint)));
+            if !diag.has_missing {
+                app_data.set_reporte_show_missing_cedulas_details(false);
+            }
             update_cedulas_view_file_list_ui(ui, &sess);
             update_cedulas_audit_view_ui(ui, &mut sess);
-            ui.global::<AppData>().set_cedulas_view_state(2);
+            app_data.set_cedulas_view_state(2);
         }
         Ok(None) | Err(_) => {
             sess.audit_res = None;
             sess.businesses.clear();
             sess.filtered_details.clear();
+            app_data.set_rp_has_cedulas(!sess.files.is_empty());
+            app_data.set_reporte_has_missing_cedulas_warning(false);
+            app_data.set_reporte_missing_cedulas_msg(slint::SharedString::from(""));
+            app_data.set_reporte_missing_cedulas_reason(slint::SharedString::from(""));
+            app_data.set_reporte_missing_cedulas_meses(ModelRc::new(VecModel::default()));
+            app_data.set_reporte_inconsistencias_detalles(ModelRc::new(VecModel::default()));
+            app_data.set_reporte_show_missing_cedulas_details(false);
             if !sess.files.is_empty() {
-                update_cedulas_view_file_list_ui(ui, &sess);
-                ui.global::<AppData>().set_cedulas_view_state(1);
+                // Si hay archivos en disco/RustFS pero la BD aún no tiene liquidaciones procesadas, auto-procesar
+                drop(sess);
+                spawn_cedulas_view_worker(ui.as_weak(), session_arc.clone(), pool_opt.clone());
             } else {
                 reset_cedulas_ui_to_state_zero(ui, &mut sess);
             }
@@ -2599,7 +3050,9 @@ fn handle_confirmar_borrar_todas_cedulas(
 ) {
     let app_data = ui.global::<AppData>();
     app_data.set_show_delete_all_cedulas_modal(false);
+    let rp_id = app_data.get_selected_rp_id().to_string();
     let revision_id = app_data.get_selected_revision_id().to_string();
+    let target_id = if !revision_id.is_empty() { revision_id } else { rp_id };
     let cliente_nombre = app_data.get_selected_cliente_nombre().to_string();
     let rp_registro = app_data.get_selected_rp_registro().to_string();
     let revision_nombre = app_data.get_selected_revision_nombre().to_string();
@@ -2620,14 +3073,24 @@ fn handle_confirmar_borrar_todas_cedulas(
         let pool_to_use = pool_clone.or_else(crate::db::get_global_pool);
         if let Some(ref pool) = pool_to_use {
             if let Ok(mut client) = pool.get() {
-                if let Ok(rev_uuid) = uuid::Uuid::parse_str(&revision_id) {
+                if let Ok(parsed_uuid) = uuid::Uuid::parse_str(&target_id) {
                     if let Ok(Some(row)) = client.query_opt(
+                        "SELECT c.nombre, rp.registro, 'GENERAL'
+                         FROM registros_patronales rp
+                         JOIN clientes c ON rp.id_cliente = c.id
+                         WHERE rp.id = $1",
+                        &[&parsed_uuid],
+                    ) {
+                        c_nom = row.get(0);
+                        r_reg = row.get(1);
+                        rev_nom = row.get(2);
+                    } else if let Ok(Some(row)) = client.query_opt(
                         "SELECT c.nombre, rp.registro, r.nombre
                          FROM revisiones r
                          JOIN registros_patronales rp ON r.id_registro_patronal = rp.id
                          JOIN clientes c ON rp.id_cliente = c.id
                          WHERE r.id = $1",
-                        &[&rev_uuid],
+                        &[&parsed_uuid],
                     ) {
                         c_nom = row.get(0);
                         r_reg = row.get(1);
@@ -2635,7 +3098,7 @@ fn handle_confirmar_borrar_todas_cedulas(
                     }
                 }
 
-                match delete_all_cedulas_for_revision(&mut client, &revision_id) {
+                match delete_all_cedulas_for_revision(&mut client, &target_id) {
                     Ok(n) => {
                         deleted_count = n;
                         log::info!("Eliminadas {} liquidaciones de la BD", n);
@@ -2661,7 +3124,7 @@ fn handle_confirmar_borrar_todas_cedulas(
         }
 
         // Limpiar caché local
-        let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&revision_id);
+        let cache_dir = std::env::temp_dir().join("docu_ffacd_rustfs_cache").join(&target_id);
         let _ = std::fs::remove_dir_all(&cache_dir);
 
         let pool_for_ui = pool_to_use.clone();
@@ -2874,12 +3337,13 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut inhabiles_set = HashSet::new();
             if let Ok(mut client) = arc_pool.get() {
                 if let Err(e) = ensure_schema(&mut client) {
-                    eprintln!("Error inicializando esquema de BD: {}", e);
-                    log::error!("Error inicializando esquema de BD: {}", e);
+                    let detailed = crate::db::format_pg_error(&e);
+                    eprintln!("Error inicializando esquema de BD: {}", detailed);
+                    log::error!("Error inicializando esquema de BD: {}", detailed);
                     crate::app_logger::log_db_simple_error(
                         "esquema",
                         "ensure_schema",
-                        &format!("Error inicializando esquema: {}", e),
+                        &format!("Error inicializando esquema: {}", detailed),
                     );
                 }
                 if let Ok(set) = fetch_imss_inhabiles(&mut client) {
@@ -3753,26 +4217,29 @@ fn main() -> Result<(), slint::PlatformError> {
                     app_data.set_current_view(if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
-                // View 6 (Cédula de Cuotas) deshabilitada hasta acceder desde Registros de Obras ("Cargar Cédulas de Cuotas")
-                if view_idx == 6 && !app_data.get_cedulas_access_allowed() {
+                // View 6 (Cédula de Cuotas) requiere registro patronal seleccionado
+                if view_idx == 6 && rp_id.is_empty() {
                     crate::app_logger::log_ui_error(
                         "Navegación",
                         "Sidebar / Menú",
                         "Acceso Denegado a Vista",
-                        &format!("No se puede acceder a {} (ID {}): acceso a cédulas no permitido", view_name, view_idx),
+                        &format!("No se puede acceder a {} (ID {}): requiere registro patronal seleccionado", view_name, view_idx),
                     );
-                    app_data.set_current_view(if !rev_id.is_empty() { 4 } else if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
+                    app_data.set_current_view(if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
-                // View 7 (Reporte Liquidaciones) deshabilitada hasta tener revisión seleccionada
-                if view_idx == 7 && rev_id.is_empty() {
+                if view_idx == 6 {
+                    app_data.set_cedulas_access_allowed(true);
+                }
+                // View 7 (Reporte Liquidaciones) requiere registro patronal seleccionado
+                if view_idx == 7 && rp_id.is_empty() && rev_id.is_empty() {
                     crate::app_logger::log_ui_error(
                         "Navegación",
                         "Sidebar / Menú",
                         "Acceso Denegado a Vista",
-                        &format!("No se puede acceder a {} (ID {}): requiere revisión seleccionada", view_name, view_idx),
+                        &format!("No se puede acceder a {} (ID {}): requiere registro patronal seleccionado", view_name, view_idx),
                     );
-                    app_data.set_current_view(if !rp_id.is_empty() { 3 } else if !client_id.is_empty() { 2 } else { 1 });
+                    app_data.set_current_view(if !client_id.is_empty() { 2 } else { 1 });
                     return;
                 }
                 if view_idx == 7 {
@@ -3801,12 +4268,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_current_view(view_idx);
 
                 if view_idx == 6 {
+                    let effective_rp = if !rp_id.is_empty() { rp_id.clone() } else { app_data.get_selected_rp_id().to_string() };
                     let need_load = {
                         let sess = cedulas_session_clone.lock().unwrap();
-                        !rev_id.is_empty() && (sess.audit_res.is_none() || sess.current_revision_id.as_deref() != Some(&rev_id) || sess.files.is_empty())
+                        !effective_rp.is_empty() && (sess.audit_res.is_none() || sess.current_rp_id.as_deref() != Some(&effective_rp) || sess.files.is_empty())
                     };
                     if need_load {
-                        sync_and_load_cedulas_view_data(&ui, &pool_clone, &cedulas_session_clone, &rev_id);
+                        sync_and_load_cedulas_view_data(&ui, &pool_clone, &cedulas_session_clone, &effective_rp);
                     } else {
                         let mut sess = cedulas_session_clone.lock().unwrap();
                         if sess.audit_res.is_some() {
@@ -3818,7 +4286,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
 
                 if view_idx == 7 {
-                    sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &rev_id);
+                    let target_id = if !rev_id.is_empty() { rev_id.clone() } else { rp_id.clone() };
+                    sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &target_id);
                 }
 
 
@@ -4013,6 +4482,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                     app_data.set_nominas_access_allowed(true);
                                 }
                                 if has_liquidaciones || has_cedulas {
+                                    app_data.set_cedulas_access_allowed(true);
                                     app_data.set_reporte_liquidaciones_access_allowed(true);
                                 }
                             }
@@ -5869,11 +6339,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
         app_logic.on_filter_rp_search(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                if let Some(ref pool) = pool_clone {
+            if let Some(ui) = ui_weak.upgrade()
+                && let Some(ref pool) = pool_clone {
                     let client_id = ui.global::<AppData>().get_selected_cliente_id().to_string();
                     load_registros_patronales_ui(&ui, pool, &client_id);
-                }
             }
         });
     }
@@ -6069,11 +6538,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
         app_logic.on_filter_empleados_search(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                if let Some(ref pool) = pool_clone {
+            if let Some(ui) = ui_weak.upgrade()
+                && let Some(ref pool) = pool_clone {
                     let client_id = ui.global::<AppData>().get_selected_cliente_id().to_string();
                     load_empleados_ui(&ui, pool, &client_id);
-                }
             }
         });
     }
@@ -6334,8 +6802,10 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 let rev_id = app_data.get_selected_revision_id().to_string();
-                if !rev_id.is_empty() {
-                    sync_and_load_cedulas_view_data(&ui, &pool_clone, &session_clone, &rev_id);
+                let rp_id = app_data.get_selected_rp_id().to_string();
+                let target_id = if !rp_id.is_empty() { rp_id } else { rev_id };
+                if !target_id.is_empty() {
+                    sync_and_load_cedulas_view_data(&ui, &pool_clone, &session_clone, &target_id);
                     if let Some(ref pool) = pool_clone {
                         update_global_stats(&ui, pool);
                     }
@@ -6395,6 +6865,53 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // 51a.2 Cargar Cédulas de Cuotas desde Revisiones (Carpeta Completa)
+    {
+        let ui_weak = main_window.as_weak();
+        let cedulas_session_clone = cedulas_session.clone();
+        let pool_clone = db_pool.clone();
+        app_logic.on_cargar_cedulas_folder_from_revision(move |rp_id| {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            let app_data = ui.global::<AppData>();
+            let rp_str = rp_id.to_string();
+            let effective_rp_id = if !rp_str.trim().is_empty() {
+                rp_str
+            } else {
+                app_data.get_selected_rp_id().to_string()
+            };
+            if effective_rp_id.trim().is_empty() && app_data.get_selected_revision_id().to_string().trim().is_empty() {
+                show_toast_message(&ui, "Seleccione un registro patronal para cargar cédulas de cuotas.");
+                return;
+            }
+
+            let folder = rfd::FileDialog::new()
+                .set_title("Seleccionar Carpeta con Cédulas SUA (Búsqueda Recursiva)")
+                .pick_folder();
+
+            if let Some(folder_path) = folder {
+                app_data.set_cedulas_access_allowed(true);
+                app_data.set_current_view(6);
+                handle_cedulas_upload_and_inspect(
+                    ui_weak.clone(),
+                    cedulas_session_clone.clone(),
+                    pool_clone.clone(),
+                    vec![folder_path],
+                );
+            }
+        });
+    }
+
+    // 51a.3 Solicitar Cargar Más Cédulas desde el Resumen
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_solicitar_cargar_mas_cedulas(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_cedulas_view_state(0);
+                show_toast_message(&ui, "Seleccione o arrastre nuevas cédulas para incorporar a esta revisión.");
+            }
+        });
+    }
+
     // 51b. Resumen Cédulas de Cuotas desde Registros de Obras (renderiza resumen sin diálogo de carga)
     {
         let ui_weak = main_window.as_weak();
@@ -6406,13 +6923,15 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_cedulas_access_allowed(true);
                 app_data.set_current_view(6);
                 let rev_id = app_data.get_selected_revision_id().to_string();
+                let rp_id = app_data.get_selected_rp_id().to_string();
+                let target_id = if !rp_id.is_empty() { rp_id } else { rev_id };
 
                 let need_load = {
                     let sess = cedulas_session_clone.lock().unwrap();
-                    !rev_id.is_empty() && (sess.audit_res.is_none() || sess.current_revision_id.as_deref() != Some(&rev_id) || sess.files.is_empty())
+                    !target_id.is_empty() && (sess.audit_res.is_none() || sess.current_rp_id.as_deref() != Some(&target_id) || sess.files.is_empty())
                 };
                 if need_load {
-                    sync_and_load_cedulas_view_data(&ui, &pool_clone, &cedulas_session_clone, &rev_id);
+                    sync_and_load_cedulas_view_data(&ui, &pool_clone, &cedulas_session_clone, &target_id);
                 } else {
                     let mut sess = cedulas_session_clone.lock().unwrap();
                     if sess.audit_res.is_some() {
@@ -6463,6 +6982,16 @@ fn main() -> Result<(), slint::PlatformError> {
         app_logic.on_close_cedulas_duplicate_modal(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.global::<AppData>().set_show_cedulas_duplicate_modal(false);
+            }
+        });
+    }
+
+    // 54b. Cerrar modal global de error del sistema
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_close_system_error_modal(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_system_error_modal(false);
             }
         });
     }
@@ -6673,10 +7202,9 @@ fn main() -> Result<(), slint::PlatformError> {
         app_logic.on_install_update_now(move || {
             let path_opt = file_store.lock().unwrap().clone();
             if let Some(path) = path_opt {
-                if let Err(e) = crate::updater::apply_update_now(&path) {
-                    if let Some(ui) = ui_weak.upgrade() {
+                if let Err(e) = crate::updater::apply_update_now(&path)
+                    && let Some(ui) = ui_weak.upgrade() {
                         show_toast_message(&ui, &format!("Error al aplicar actualización: {}", e));
-                    }
                 }
             } else if let Some(ui) = ui_weak.upgrade() {
                 show_toast_message(&ui, "No se encontró el archivo de actualización para instalar");
@@ -6945,6 +7473,7 @@ mod tests_ui {
                 id_reporte_liq: Uuid::now_v7(),
                 id_parent_reporte_liq: Uuid::now_v7(),
                 id_liquidacion: Uuid::now_v7(),
+                id_revision: Uuid::now_v7(),
                 id_empleado: Uuid::now_v7(),
                 nombre_trabajador: format!("EMPLEADO TEST {:03}", i),
                 rfc: format!("TEST{:04}0101", i),
@@ -6953,6 +7482,7 @@ mod tests_ui {
                 pensionado: String::new(),
                 registro_patronal: "Y54-10204-10-8".into(),
                 mes_periodo: if i <= 100 { "enero".into() } else if i <= 200 { "febrero".into() } else { "marzo".into() },
+                mes_periodo_int: if i <= 100 { 1 } else if i <= 200 { 2 } else { 3 },
                 anio_periodo: 2026,
                 periodo_str: if i <= 100 { "2026-01".into() } else if i <= 200 { "2026-02".into() } else { "2026-03".into() },
                 dias_cedula: dias_ced,
@@ -6999,6 +7529,8 @@ mod tests_ui {
                 patronal_orig: 1656.92,
                 obrera_orig: 135.48,
                 subtotal_orig: 1792.40,
+                tiene_inconsistencia: false,
+                observacion_validacion: String::new(),
             };
 
             recalculate_row_in_memory(&mut r);

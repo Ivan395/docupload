@@ -16,6 +16,7 @@ fn parse_date(s: &str) -> Option<NaiveDate> {
 #[derive(Debug, Clone, Default)]
 pub struct DataEmployee {
     pub mes_periodo: Option<String>,
+    pub mes_periodo_int: i16,
     pub anio_periodo: Option<String>,
     pub clave: Option<String>,
     pub fecha: Option<NaiveDate>,
@@ -48,7 +49,10 @@ impl DataEmployee {
         }
 
         match field_name {
-            "mes_periodo" => self.mes_periodo = Some(trimmed.to_string()),
+            "mes_periodo" => {
+                self.mes_periodo_int = crate::cedulas::business::mes_to_periodo_int(trimmed);
+                self.mes_periodo = Some(trimmed.to_string());
+            }
             "anio_periodo" => self.anio_periodo = Some(trimmed.to_string()),
             "clave" => self.clave = Some(trimmed.to_string()),
             "fecha" => self.fecha = parse_date(trimmed),
@@ -106,7 +110,9 @@ pub struct Employee {
     pub clave_ubicacion: Option<String>,
     pub pensionado: Option<String>,
     pub mes_periodo: Option<String>,
+    pub mes_periodo_int: i16,
     pub anio_periodo: Option<String>,
+    pub file_name: Option<String>,
     pub data_employee: Vec<DataEmployee>,
     pub registro_obras: Vec<RegistroObra>,
 }
@@ -520,7 +526,9 @@ impl Employee {
     ) {
         if let Some(dp) = date_period {
             if let Some(mes) = dp.name("mes_periodo") {
-                self.mes_periodo = Some(mes.as_str().trim().to_string());
+                let m_str = mes.as_str().trim().to_string();
+                self.mes_periodo_int = crate::cedulas::business::mes_to_periodo_int(&m_str);
+                self.mes_periodo = Some(m_str);
             }
             if let Some(anio) = dp.name("anio_periodo") {
                 self.anio_periodo = Some(anio.as_str().trim().to_string());
@@ -658,7 +666,9 @@ impl Employee {
             let mut de = DataEmployee::default();
             if let Some(dp) = date_period {
                 if let Some(mes) = dp.name("mes_periodo") {
-                    de.mes_periodo = Some(mes.as_str().trim().to_uppercase());
+                    let m_upper = mes.as_str().trim().to_uppercase();
+                    de.mes_periodo_int = crate::cedulas::business::mes_to_periodo_int(&m_upper);
+                    de.mes_periodo = Some(m_upper);
                 }
                 if let Some(anio) = dp.name("anio_periodo") {
                     de.anio_periodo = Some(anio.as_str().trim().to_uppercase());

@@ -24,6 +24,53 @@ fn merge_field(
     }
 }
 
+#[repr(i16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MesPeriodo {
+    Enero = 1,
+    Febrero = 2,
+    Marzo = 3,
+    Abril = 4,
+    Mayo = 5,
+    Junio = 6,
+    Julio = 7,
+    Agosto = 8,
+    Septiembre = 9,
+    Octubre = 10,
+    Noviembre = 11,
+    Diciembre = 12,
+}
+
+impl MesPeriodo {
+    pub fn from_month_str(month: &str) -> Option<Self> {
+        match month_to_num(month) {
+            1 => Some(Self::Enero),
+            2 => Some(Self::Febrero),
+            3 => Some(Self::Marzo),
+            4 => Some(Self::Abril),
+            5 => Some(Self::Mayo),
+            6 => Some(Self::Junio),
+            7 => Some(Self::Julio),
+            8 => Some(Self::Agosto),
+            9 => Some(Self::Septiembre),
+            10 => Some(Self::Octubre),
+            11 => Some(Self::Noviembre),
+            12 => Some(Self::Diciembre),
+            _ => None,
+        }
+    }
+
+    pub fn as_i16(self) -> i16 {
+        self as i16
+    }
+}
+
+pub fn mes_to_periodo_int(month: &str) -> i16 {
+    MesPeriodo::from_month_str(month)
+        .map(MesPeriodo::as_i16)
+        .unwrap_or(0)
+}
+
 pub fn month_to_num(month: &str) -> u32 {
     let trimmed = month.trim();
     if let Ok(n) = trimmed.parse::<u32>() {
@@ -222,15 +269,52 @@ impl Business {
         merge_field("delegacion", &mut self.delegacion, &other.delegacion, file_name);
         merge_field("codigo_delegacion", &mut self.codigo_delegacion, &other.codigo_delegacion, file_name);
         merge_field("actividad", &mut self.actividad, &other.actividad, file_name);
-        merge_field("subdelegacion", &mut self.subdelegacion, &other.subdelegacion, file_name);
-        merge_field("codigo_subdelegacion", &mut self.codigo_subdelegacion, &other.codigo_subdelegacion, file_name);
+
+        // Protección contra contaminación Delegación vs Subdelegación
+        let mut sub_to_merge = other.subdelegacion.clone();
+        let mut cod_sub_to_merge = other.codigo_subdelegacion.clone();
+        if let Some(ref my_del) = self.delegacion {
+            if sub_to_merge.as_deref() == Some(my_del.as_str()) {
+                sub_to_merge = None;
+            }
+        }
+        if let Some(ref my_cod_del) = self.codigo_delegacion {
+            if cod_sub_to_merge.as_deref() == Some(my_cod_del.as_str()) {
+                cod_sub_to_merge = None;
+            }
+        }
+
+        merge_field("subdelegacion", &mut self.subdelegacion, &sub_to_merge, file_name);
+        merge_field("codigo_subdelegacion", &mut self.codigo_subdelegacion, &cod_sub_to_merge, file_name);
         merge_field("domicilio", &mut self.domicilio, &other.domicilio, file_name);
         merge_field("codigo_postal", &mut self.codigo_postal, &other.codigo_postal, file_name);
         merge_field("entidad", &mut self.entidad, &other.entidad, file_name);
         merge_field("rfc", &mut self.rfc, &other.rfc, file_name);
         merge_field("curp", &mut self.curp, &other.curp, file_name);
-        merge_field("area_geografica", &mut self.area_geografica, &other.area_geografica, file_name);
-        merge_field("prima", &mut self.prima, &other.prima, file_name);
+        // Manejo especializado para la prima de riesgo (PRIMA):
+        // La prima de riesgo del IMSS varía por año/periodo o puede venir en 0 en cédulas complementarias/diferencias.
+        // Si detecta una variación, toma el valor válido (> 0) o mantiene el histórico de manera silenciosa sin warning.
+        if let Some(ref new_prima_raw) = other.prima {
+            let new_is_zero = new_prima_raw.trim().parse::<f64>().map(|v| v.abs() < 1e-6).unwrap_or(false);
+            if let Some(ref cur_prima_raw) = self.prima {
+                let cur_is_zero = cur_prima_raw.trim().parse::<f64>().map(|v| v.abs() < 1e-6).unwrap_or(false);
+                if cur_is_zero && !new_is_zero {
+                    self.prima = Some(new_prima_raw.clone());
+                } else if !cur_is_zero && new_is_zero {
+                    // Mantener el valor histórico válido silenciosamente
+                } else if cur_prima_raw != new_prima_raw {
+                    log::debug!(
+                        "Variación de prima de riesgo detectada: anterior '{}', nueva '{}' (archivo: {})",
+                        cur_prima_raw,
+                        new_prima_raw,
+                        file_name
+                    );
+                    self.prima = Some(new_prima_raw.clone());
+                }
+            } else {
+                self.prima = Some(new_prima_raw.clone());
+            }
+        }
     }
 
     pub fn verify_data_full(&self) -> bool {
@@ -331,11 +415,24 @@ impl Business {
         }
         if self.delegacion.is_none() || self.codigo_delegacion.is_none() {
             if let Ok(Some(caps)) = patterns.business_delegacion.captures(page) {
-                if let Some(m) = caps.name("delegacion") {
-                    self.delegacion = Some(m.as_str().trim().to_uppercase());
+                if self.delegacion.is_none() {
+                    if let Some(m) = caps.name("delegacion").or_else(|| caps.name("delegacion_alt")) {
+                        let mut del = m.as_str().trim().to_uppercase();
+                        if let Some(idx) = del.find("SUBDELEG") {
+                            del = del[..idx].trim().to_string();
+                        }
+                        if !del.is_empty() {
+                            self.delegacion = Some(del);
+                        }
+                    }
                 }
-                if let Some(m) = caps.name("codigo") {
-                    self.codigo_delegacion = Some(m.as_str().trim().to_uppercase());
+                if self.codigo_delegacion.is_none() {
+                    if let Some(m) = caps.name("codigo").or_else(|| caps.name("codigo_alt")) {
+                        let cod = m.as_str().trim().to_uppercase();
+                        if !cod.is_empty() {
+                            self.codigo_delegacion = Some(cod);
+                        }
+                    }
                 }
             }
         }
@@ -351,11 +448,30 @@ impl Business {
         }
         if self.subdelegacion.is_none() || self.codigo_subdelegacion.is_none() {
             if let Ok(Some(caps)) = patterns.business_subdelegacion.captures(page) {
-                if let Some(m) = caps.name("subdelegacion") {
-                    self.subdelegacion = Some(m.as_str().trim().to_uppercase());
+                if self.subdelegacion.is_none() {
+                    if let Some(m) = caps.name("subdelegacion").or_else(|| caps.name("subdelegacion_alt")) {
+                        let mut sub = m.as_str().trim().to_uppercase();
+                        if let Some(idx) = sub.find("DELEG") {
+                            sub = sub[..idx].trim().to_string();
+                        }
+                        if !sub.is_empty() {
+                            let is_same_as_del = self.delegacion.as_deref().map(|d| d == sub).unwrap_or(false);
+                            if !is_same_as_del {
+                                self.subdelegacion = Some(sub);
+                            }
+                        }
+                    }
                 }
-                if let Some(m) = caps.name("codigo_subdelegacion") {
-                    self.codigo_subdelegacion = Some(m.as_str().trim().to_uppercase());
+                if self.codigo_subdelegacion.is_none() {
+                    if let Some(m) = caps.name("codigo_subdelegacion").or_else(|| caps.name("codigo_subdelegacion_alt")) {
+                        let cod = m.as_str().trim().to_uppercase();
+                        if !cod.is_empty() {
+                            let is_same_as_del_cod = self.codigo_delegacion.as_deref().map(|c| c == cod).unwrap_or(false);
+                            if !is_same_as_del_cod || self.codigo_delegacion.is_none() {
+                                self.codigo_subdelegacion = Some(cod);
+                            }
+                        }
+                    }
                 }
             }
         }

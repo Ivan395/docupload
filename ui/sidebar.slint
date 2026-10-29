@@ -15,8 +15,8 @@ export component Sidebar inherits Rectangle {
     property <bool> can_go_revisiones: root.client_selected && root.rp_selected;
     property <bool> can_go_obras: root.client_selected && root.rp_selected && root.revision_selected;
     property <bool> can_go_empleados: root.client_selected;
-    property <bool> can_go_cedulas: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_cedulas || AppData.cedulas_access_allowed);
-    property <bool> can_go_reporte: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_liquidaciones || AppData.revision_has_cedulas || AppData.reportes_liquidaciones_data_exists || AppData.reporte_liquidaciones_access_allowed);
+    property <bool> can_go_cedulas: root.client_selected && root.rp_selected;
+    property <bool> can_go_reporte: root.client_selected && root.rp_selected && (AppData.revision_has_liquidaciones || AppData.revision_has_cedulas || AppData.reportes_liquidaciones_data_exists || AppData.reporte_liquidaciones_access_allowed || AppData.rp_has_cedulas || AppData.cedulas_access_allowed);
     property <bool> can_go_nominas: root.client_selected && root.rp_selected && root.revision_selected && (AppData.revision_has_nominas || AppData.nominas_data_exists || AppData.nominas_access_allowed);
 
     VerticalLayout {
@@ -493,7 +493,7 @@ export component Sidebar inherits Rectangle {
                             if root.can_go_cedulas {
                                 AppLogic.navigate_view(6);
                             } else {
-                                AppLogic.show_navigation_warning("Seleccione una Revisión con Cédulas vinculadas.");
+                                AppLogic.show_navigation_warning("Seleccione un Registro Patronal para acceder a Cédulas.");
                             }
                         }
                     }
@@ -551,7 +551,7 @@ export component Sidebar inherits Rectangle {
                             if root.can_go_reporte {
                                 AppLogic.navigate_view(7);
                             } else {
-                                AppLogic.show_navigation_warning("Seleccione una Revisión para ver el Reporte de Liquidaciones.");
+                                AppLogic.show_navigation_warning("Seleccione un Registro Patronal con Cédulas para ver el Reporte.");
                             }
                         }
                     }
