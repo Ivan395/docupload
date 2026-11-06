@@ -2157,12 +2157,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     };
                     app_data.set_reporte_edit_total_disponibles(total_disp);
 
-                    // Buscar todos los registros hermanos del empleado en este mes/periodo
+                    // Buscar todos los registros hermanos de la liquidación en este mes/periodo
                     let sibling_rows: Vec<ReporteLiquidacionRowDb> = state.all_rows.iter().filter(|x| {
                         x.id_parent_reporte_liq == r.id_parent_reporte_liq
-                            || (x.id_empleado == r.id_empleado
-                                && x.mes_periodo.trim().eq_ignore_ascii_case(r.mes_periodo.trim())
-                                && x.anio_periodo == r.anio_periodo)
                     }).cloned().collect();
 
                     let mut edit_obras = Vec::with_capacity(sorted_obras.len());
@@ -3105,14 +3102,31 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             .collect()
                     };
                     std::thread::spawn(move || {
-                        if let Ok(mut client) = pool_bg.get() {
-                            for r in &current_worker_rows {
-                                let _ = update_single_reporte_row(
-                                    &mut client,
-                                    r.id_reporte_liq,
-                                    r.dias_cedula,
-                                    r.dias_obra,
-                                    r.id_registro_obra,
+                        match pool_bg.get() {
+                            Ok(mut client) => {
+                                for r in &current_worker_rows {
+                                    if let Err(e) = update_single_reporte_row(
+                                        &mut client,
+                                        r.id_reporte_liq,
+                                        r.dias_cedula,
+                                        r.dias_obra,
+                                        r.id_registro_obra,
+                                    ) {
+                                        crate::app_logger::log_ui_error(
+                                            "Reporte Liquidaciones",
+                                            "Modal Edición Unificada",
+                                            "Error Guardando Fila",
+                                            &format!("Fila {}: {}", r.id_reporte_liq, e),
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                crate::app_logger::log_ui_error(
+                                    "Reporte Liquidaciones",
+                                    "Modal Edición Unificada",
+                                    "Error Conexión DB Pool",
+                                    &format!("No se pudo obtener cliente del pool: {}", e),
                                 );
                             }
                         }

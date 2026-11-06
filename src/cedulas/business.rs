@@ -80,17 +80,17 @@ pub fn month_to_num(month: &str) -> u32 {
     }
     match trimmed.to_lowercase().as_str() {
         "enero" | "january" | "jan" => 1,
-        "febrero" | "february" | "feb" => 2,
+        "febrero" | "february" | "feb" | "1b" | "b1" | "1er bimestre" | "primer bimestre" | "bimestre 1" | "bimestre 01" => 2,
         "marzo" | "march" | "mar" => 3,
-        "abril" | "april" | "abr" => 4,
+        "abril" | "april" | "abr" | "2b" | "b2" | "2do bimestre" | "segundo bimestre" | "bimestre 2" | "bimestre 02" => 4,
         "mayo" | "may" => 5,
-        "junio" | "june" | "jun" => 6,
+        "junio" | "june" | "jun" | "3b" | "b3" | "3er bimestre" | "tercer bimestre" | "bimestre 3" | "bimestre 03" => 6,
         "julio" | "july" | "jul" => 7,
-        "agosto" | "august" | "ago" => 8,
+        "agosto" | "august" | "ago" | "4b" | "b4" | "4to bimestre" | "cuarto bimestre" | "bimestre 4" | "bimestre 04" => 8,
         "septiembre" | "setiembre" | "september" | "sep" => 9,
-        "octubre" | "october" | "oct" => 10,
+        "octubre" | "october" | "oct" | "5b" | "b5" | "5to bimestre" | "quinto bimestre" | "bimestre 5" | "bimestre 05" => 10,
         "noviembre" | "november" | "nov" => 11,
-        "diciembre" | "december" | "dic" => 12,
+        "diciembre" | "december" | "dic" | "6b" | "b6" | "6to bimestre" | "sexto bimestre" | "bimestre 6" | "bimestre 06" => 12,
         _ => 0,
     }
 }

@@ -720,6 +720,12 @@ pub fn process_and_audit_cedulas(
             || lower.contains("cedula de determinacion de cuotas")
             || lower.contains("sistema único de autodeterminación")
             || lower.contains("sistema unico de autodeterminacion")
+            || lower.contains("resumen de liquidación")
+            || lower.contains("resumen de liquidacion")
+            || lower.contains("emisión bimestral")
+            || lower.contains("emision bimestral")
+            || lower.contains("emisión mensual")
+            || lower.contains("emision mensual")
             || (lower.contains("registro patronal") && (lower.contains("delegación imss") || lower.contains("delegacion imss")));
 
         if (!is_sua && !is_ema) || raw_text.trim().len() < 50 {
@@ -873,7 +879,10 @@ pub fn process_and_audit_cedulas(
                 if let Some(ref b_rp) = biz.registro_patronal {
                     let clean_b = canonical_reg(b_rp);
                     let clean_t = canonical_reg(target_rp);
-                    if !clean_b.is_empty() && !clean_t.is_empty() && clean_b != clean_t {
+                    let is_same_rp = clean_b == clean_t
+                        || (clean_b.len() == 10 && clean_t.len() == 11 && clean_t.starts_with(&clean_b))
+                        || (clean_t.len() == 10 && clean_b.len() == 11 && clean_b.starts_with(&clean_t));
+                    if !clean_b.is_empty() && !clean_t.is_empty() && !is_same_rp {
                         mismatch = true;
                         file_mismatches.push(CedulaMismatchItem {
                             filename: file_display_name.clone(),
@@ -894,7 +903,8 @@ pub fn process_and_audit_cedulas(
                 if let Some(ref b_rfc) = biz.rfc {
                     let clean_b: String = b_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
                     let clean_t: String = target_rfc.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
-                    if !clean_b.is_empty() && !clean_t.is_empty() && clean_b != clean_t {
+                    let is_generic = crate::validation::is_generic_sat_identifier(&clean_b) || crate::validation::is_generic_sat_identifier(&clean_t);
+                    if !clean_b.is_empty() && !clean_t.is_empty() && clean_b != clean_t && !is_generic {
                         mismatch = true;
                         file_mismatches.push(CedulaMismatchItem {
                             filename: file_display_name.clone(),
@@ -2555,15 +2565,17 @@ mod tests {
         emp.clave_ubicacion = Some("OBRA-NORTE".to_string());
         emp.registro_obras.push(RegistroObra::new("OBRA-NORTE", "30"));
 
-        let mut de = DataEmployee::default();
-        de.mes_periodo = Some("ENERO".to_string());
-        de.anio_periodo = Some("2026".to_string());
-        de.dias = Some(30.0);
-        de.sdi = Some(500.0);
-        de.cf = Some(150.0);
-        de.patronal = Some(450.0);
-        de.obrera = Some(90.0);
-        de.subtotal = Some(540.0);
+        let de = DataEmployee {
+            mes_periodo: Some("ENERO".to_string()),
+            anio_periodo: Some("2026".to_string()),
+            dias: Some(30.0),
+            sdi: Some(500.0),
+            cf: Some(150.0),
+            patronal: Some(450.0),
+            obrera: Some(90.0),
+            subtotal: Some(540.0),
+            ..Default::default()
+        };
         emp.data_employee.push(de);
 
         biz.employees.push(emp);

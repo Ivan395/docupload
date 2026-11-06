@@ -607,7 +607,7 @@ mod tests {
         let mut existing_names = HashSet::new();
         let mut sheet_names = Vec::new();
 
-        for (_key, biz) in &grouped {
+        for biz in grouped.values() {
             let name = crate::cedulas::excel::make_cedula_sheet_name(
                 biz.razon_social.as_deref(),
                 biz.registro_patronal.as_deref(),
