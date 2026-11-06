@@ -1761,7 +1761,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                             Text { text: "✏️"; font-size: 12px; vertical-alignment: center; }
                             Text {
-                                text: AppData.reporte_selected_count > 0 ? "Modificar en Lote (" + AppData.reporte_selected_count + ")..." : "Modificar en Lote...";
+                                text: AppData.reporte_selected_count > 0 ? "Modificar por Lote (" + AppData.reporte_selected_count + ")..." : "Modificar por Lote...";
                                 font-size: 12px;
                                 font-weight: 700;
                                 color: #ffffff;
@@ -1806,6 +1806,39 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             mouse-cursor: pointer;
                             clicked => {
                                 AppLogic.reporte_request_confirm_igualar_dias();
+                            }
+                        }
+                    }
+
+                    // Botón Desvincular Obra (Solo si hay seleccionados)
+                    if AppData.reporte_selected_count > 0 : Rectangle {
+                        height: 34px;
+                        border-radius: 5px;
+                        background: btn_batch_desvincular.has-hover ? #fef2f2 : #ffffff;
+                        border-width: 1px;
+                        border-color: #fca5a5;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 10px;
+                            spacing: 5px;
+                            alignment: center;
+                            cross-axis-alignment: center;
+
+                            Text { text: "🔗❌"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Desvincular";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #dc2626;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_batch_desvincular := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_batch_desvincular_obra();
                             }
                         }
                     }
@@ -3226,6 +3259,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     vertical-stretch: 1;
 
                     VerticalLayout {
+                        alignment: start;
                         spacing: 12px;
                         padding-right: 6px;
 
@@ -3252,19 +3286,22 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         }
 
                         for g_item in AppData.reporte_guarderias_obras : Rectangle {
-                        border-radius: 8px;
-                        background: #ffffff;
-                        border-width: 1px;
-                        border-color: g_item.supera_18 ? #facc15 : #e2e8f0;
+                            height: 140px;
+                            border-radius: 8px;
+                            background: #ffffff;
+                            border-width: 1px;
+                            border-color: g_item.supera_18 ? #facc15 : #e2e8f0;
 
-                        VerticalLayout {
-                            padding: 12px;
-                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: start;
+                                padding: 12px;
+                                spacing: 10px;
 
-                            // Encabezado de la Obra y Alerta si supera el 18%
-                            HorizontalLayout {
-                                alignment: space-between;
-                                spacing: 12px;
+                                // Encabezado de la Obra y Alerta si supera el 18%
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    cross-axis-alignment: center;
+                                    spacing: 12px;
 
                                 VerticalLayout {
                                     spacing: 3px;
