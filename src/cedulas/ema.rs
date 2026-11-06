@@ -3,16 +3,29 @@ use crate::cedulas::business::{clean_actividad, clean_domicilio, clean_entidad, 
 use crate::cedulas::employees::{is_curp_candidate, DataEmployee, Employee};
 
 /// Determina si el texto extraído de un PDF corresponde al formato oficial IMSS
-/// de Propuesta de Cédula de Determinación de Cuotas (EMA / EMI-01).
+/// de Propuesta de Cédula de Determinación de Cuotas (EMA / EMI-01 o EBA / EBI-01).
 pub fn is_ema_document(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("propuesta de cédula de determinación de cuotas")
         || lower.contains("propuesta de cedula de determinacion de cuotas")
         || lower.contains("propuesta de cédula de determinacion")
+        || lower.contains("propuesta de cedula de determinacion")
         || lower.contains("emi - 01")
         || lower.contains("emi-01")
+        || lower.contains("ebi - 01")
+        || lower.contains("ebi-01")
+        || lower.contains("emisión bimestral anticipada")
+        || lower.contains("emision bimestral anticipada")
+        || lower.contains("emisión mensual anticipada")
+        || lower.contains("emision mensual anticipada")
         || (lower.contains("propuesta") && lower.contains("imss") && lower.contains("cuotas"))
-        || (lower.contains("subdel") && lower.contains("cotizantes") && lower.contains("enfermedades y maternidad"))
+        || (lower.contains("subdel") && lower.contains("cotizantes") && (
+            lower.contains("enfermedades y maternidad")
+            || lower.contains("retiro, cesantía")
+            || lower.contains("retiro, cesantia")
+            || lower.contains("retiro")
+            || lower.contains("rcv")
+        ))
 }
 
 /// Extrae el Registro Patronal de un documento EMA (11 caracteres alfanuméricos)
@@ -92,8 +105,9 @@ pub fn extract_ema_rfc(raw_text: &str) -> Option<String> {
     None
 }
 
-/// Extrae el periodo (mes normalizado y año) de un documento EMA.
-/// Ejemplo: PERIODO ... \n 01 - 2025 -> (Some("ENERO"), Some("2025"))
+/// Extrae el periodo (mes normalizado y año) de un documento EMA o EBA.
+/// Ejemplo EMA: PERIODO ... \n 01 - 2025 -> (Some("ENERO"), Some("2025"))
+/// Ejemplo EBA: BIMESTRE 01 / 2025 -> (Some("FEBRERO"), Some("2025"))
 pub fn extract_ema_period(raw_text: &str) -> (Option<String>, Option<String>) {
     let header_text = if let Some(pos) = raw_text.to_uppercase().find("DETALLE DE TRABAJADORES") {
         &raw_text[..pos]
@@ -102,18 +116,29 @@ pub fn extract_ema_period(raw_text: &str) -> (Option<String>, Option<String>) {
         &raw_text[..cutoff]
     };
 
+    let is_bimestral = {
+        let lower = header_text.to_lowercase();
+        lower.contains("bimestral") || lower.contains("bimestre") || lower.contains("ebi") || lower.contains("retiro, cesantía") || lower.contains("retiro, cesantia")
+    };
+
     let lines: Vec<&str> = header_text.lines().collect();
 
-    // 1. Buscar sección PERIODO y revisar las líneas subsiguientes
-    if let Ok(re) = fancy_regex::Regex::new(r"(?<![\d\-])\b(0[1-9]|1[0-2])\s*-\s*(20\d{2})\b") {
+    // 1. Buscar sección PERIODO o BIMESTRE y revisar las líneas subsiguientes
+    if let Ok(re) = fancy_regex::Regex::new(r"(?<![\d\-])\b(0[1-9]|1[0-2])\s*[-/]\s*(20\d{2})\b") {
         for (i, line) in lines.iter().enumerate() {
-            if line.to_uppercase().contains("PERIODO") {
+            let u = line.to_uppercase();
+            if u.contains("PERIODO") || u.contains("BIMESTRE") {
                 for sub_line in lines.iter().skip(i).take(4) {
                     if let Ok(Some(caps)) = re.captures(sub_line) {
                         let mes_num = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
                         let anio = caps.get(2).map(|m| m.as_str().trim().to_string());
                         if (1..=12).contains(&mes_num) {
-                            return (Some(month_num_to_name(mes_num).to_string()), anio);
+                            let mes_name = if is_bimestral && mes_num <= 6 {
+                                month_num_to_name(mes_num * 2).to_string()
+                            } else {
+                                month_num_to_name(mes_num).to_string()
+                            };
+                            return (Some(mes_name), anio);
                         }
                     }
                 }
@@ -125,7 +150,12 @@ pub fn extract_ema_period(raw_text: &str) -> (Option<String>, Option<String>) {
             let mes_num = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()).unwrap_or(0);
             let anio = caps.get(2).map(|m| m.as_str().trim().to_string());
             if (1..=12).contains(&mes_num) {
-                return (Some(month_num_to_name(mes_num).to_string()), anio);
+                let mes_name = if is_bimestral && mes_num <= 6 {
+                    month_num_to_name(mes_num * 2).to_string()
+                } else {
+                    month_num_to_name(mes_num).to_string()
+                };
+                return (Some(mes_name), anio);
             }
         }
     }
@@ -167,58 +197,118 @@ fn parse_ema_float(s: &str) -> Option<f64> {
     s.trim().replace(',', "").parse::<f64>().ok()
 }
 
-/// Parsea una línea de movimiento numérico de un trabajador en la EMA.
-/// En la EMA, una línea de movimiento contiene al final exactamente 14 números:
-/// [días] [sdi] [cf] [exc_pat] [exc_obr] [pd_pat] [pd_obr] [gmp_pat] [gmp_obr] [rt] [iv_pat] [iv_obr] [gps] [suma]
-/// Y antes de esos 14 números pueden venir:
-/// - [origen]
-/// - [origen] [clave] [fecha]
-/// - [clave] [fecha]
+/// Parsea una línea de movimiento numérico de un trabajador en la EMA o EBA.
+/// Soporta:
+/// - EMA Oficial: 14 números ([días] [sdi] [cf] [exc_pat] [exc_obr] [pd_pat] [pd_obr] [gmp_pat] [gmp_obr] [rt] [iv_pat] [iv_obr] [gps] [suma])
+/// - EBA RCV + INFONAVIT: 8 o 7 números ([días] [sdi] [retiro_pat] [cv_pat] [cv_obr] [info_pat] [info_obr] [suma])
+/// - EBA RCV: 6 números ([días] [sdi] [retiro_pat] [cv_pat] [cv_obr] [suma])
+/// - Resumen Compacto: 5 números ([días] [sdi] [patronal] [obrera] [suma])
 fn parse_ema_movement_line(line: &str, mes: &str, anio: &str) -> Option<DataEmployee> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    if tokens.len() < 14 {
+    if tokens.len() < 5 {
         return None;
     }
 
-    // Tomar los últimos 14 tokens y verificar si son números
-    let num_start_idx = tokens.len() - 14;
+    let n_candidates = [14, 8, 7, 6, 5];
+    let mut n_nums_opt = None;
+    for &n in &n_candidates {
+        if tokens.len() >= n && tokens[tokens.len() - n..].iter().all(|t| parse_ema_float(t).is_some()) {
+            n_nums_opt = Some(n);
+            break;
+        }
+    }
+
+    let n_nums = n_nums_opt?;
+    let num_start_idx = tokens.len() - n_nums;
     let num_tokens = &tokens[num_start_idx..];
-
-    let dias = parse_ema_float(num_tokens[0])?;
-    let sdi = parse_ema_float(num_tokens[1])?;
-    let cf = parse_ema_float(num_tokens[2])?;
-    let exc_pat = parse_ema_float(num_tokens[3])?;
-    let exc_obr = parse_ema_float(num_tokens[4])?;
-    let pd_pat = parse_ema_float(num_tokens[5])?;
-    let pd_obr = parse_ema_float(num_tokens[6])?;
-    let gmp_pat = parse_ema_float(num_tokens[7])?;
-    let gmp_obr = parse_ema_float(num_tokens[8])?;
-    let rt = parse_ema_float(num_tokens[9])?;
-    let iv_pat = parse_ema_float(num_tokens[10])?;
-    let iv_obr = parse_ema_float(num_tokens[11])?;
-    let gps = parse_ema_float(num_tokens[12])?;
-    let suma = parse_ema_float(num_tokens[13])?;
-
-    // Prefijos de la línea antes de los 14 números
     let prefix_tokens = &tokens[..num_start_idx];
+
     let mut clave: Option<String> = None;
     let mut fecha: Option<NaiveDate> = None;
 
-    if prefix_tokens.len() == 2 {
-        // [clave, fecha]
+    if prefix_tokens.len() == 1 {
+        let t0 = prefix_tokens[0].trim().to_uppercase();
+        if t0.chars().all(|c| c.is_alphabetic()) {
+            clave = Some(t0);
+        }
+    } else if prefix_tokens.len() == 2 {
         clave = Some(prefix_tokens[0].trim().to_uppercase());
         fecha = parse_ema_date(prefix_tokens[1]);
     } else if prefix_tokens.len() >= 3 {
-        // [origen, clave, fecha]
         clave = Some(prefix_tokens[1].trim().to_uppercase());
         fecha = parse_ema_date(prefix_tokens[2]);
     }
 
-    let patronal = cf + exc_pat + pd_pat + gmp_pat + rt + iv_pat + gps;
-    let obrera = exc_obr + pd_obr + gmp_obr + iv_obr;
+    let (dias, sdi, cf, exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr, gps, patronal, obrera, subtotal) = match n_nums {
+        14 => {
+            let d = parse_ema_float(num_tokens[0])?;
+            let s = parse_ema_float(num_tokens[1])?;
+            let c = parse_ema_float(num_tokens[2])?;
+            let ep = parse_ema_float(num_tokens[3])?;
+            let eo = parse_ema_float(num_tokens[4])?;
+            let pp = parse_ema_float(num_tokens[5])?;
+            let po = parse_ema_float(num_tokens[6])?;
+            let gp = parse_ema_float(num_tokens[7])?;
+            let go = parse_ema_float(num_tokens[8])?;
+            let r = parse_ema_float(num_tokens[9])?;
+            let ip = parse_ema_float(num_tokens[10])?;
+            let io = parse_ema_float(num_tokens[11])?;
+            let g = parse_ema_float(num_tokens[12])?;
+            let sub = parse_ema_float(num_tokens[13])?;
+            let pat = c + ep + pp + gp + r + ip + g;
+            let obr = eo + po + go + io;
+            (d, s, c, ep, eo, pp, po, gp, go, r, ip, io, g, pat, obr, sub)
+        }
+        8 => {
+            let d = parse_ema_float(num_tokens[0])?;
+            let s = parse_ema_float(num_tokens[1])?;
+            let ret_pat = parse_ema_float(num_tokens[2])?;
+            let cv_pat = parse_ema_float(num_tokens[3])?;
+            let cv_obr = parse_ema_float(num_tokens[4])?;
+            let inf_pat = parse_ema_float(num_tokens[5])?;
+            let inf_obr = parse_ema_float(num_tokens[6])?;
+            let sub = parse_ema_float(num_tokens[7])?;
+            let pat = ret_pat + cv_pat + inf_pat;
+            let obr = cv_obr + inf_obr;
+            (d, s, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, pat, obr, sub)
+        }
+        7 => {
+            let d = parse_ema_float(num_tokens[0])?;
+            let s = parse_ema_float(num_tokens[1])?;
+            let ret_pat = parse_ema_float(num_tokens[2])?;
+            let cv_pat = parse_ema_float(num_tokens[3])?;
+            let cv_obr = parse_ema_float(num_tokens[4])?;
+            let inf = parse_ema_float(num_tokens[5])?;
+            let sub = parse_ema_float(num_tokens[6])?;
+            let pat = ret_pat + cv_pat + inf;
+            let obr = cv_obr;
+            (d, s, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, pat, obr, sub)
+        }
+        6 => {
+            let d = parse_ema_float(num_tokens[0])?;
+            let s = parse_ema_float(num_tokens[1])?;
+            let ret_pat = parse_ema_float(num_tokens[2])?;
+            let cv_pat = parse_ema_float(num_tokens[3])?;
+            let cv_obr = parse_ema_float(num_tokens[4])?;
+            let sub = parse_ema_float(num_tokens[5])?;
+            let pat = ret_pat + cv_pat;
+            let obr = cv_obr;
+            (d, s, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, pat, obr, sub)
+        }
+        5 => {
+            let d = parse_ema_float(num_tokens[0])?;
+            let s = parse_ema_float(num_tokens[1])?;
+            let pat = parse_ema_float(num_tokens[2])?;
+            let obr = parse_ema_float(num_tokens[3])?;
+            let sub = parse_ema_float(num_tokens[4])?;
+            (d, s, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, pat, obr, sub)
+        }
+        _ => return None,
+    };
 
     Some(DataEmployee {
         mes_periodo: Some(mes.to_string()),
+        mes_periodo_int: crate::cedulas::business::mes_to_periodo_int(mes),
         anio_periodo: Some(anio.to_string()),
         clave,
         fecha,
@@ -240,7 +330,7 @@ fn parse_ema_movement_line(line: &str, mes: &str, anio: &str) -> Option<DataEmpl
         gps: Some(gps),
         patronal: Some(patronal),
         obrera: Some(obrera),
-        subtotal: Some(suma),
+        subtotal: Some(subtotal),
     })
 }
 
@@ -421,8 +511,20 @@ pub fn parse_ema_employees(raw_text: &str, mes: &str, anio: &str) -> Vec<Employe
                 }
 
                 if nss_acc.len() == 11 {
-                    // Si ya había un trabajador en progreso, guardarlo
-                    if let Some(emp) = current_emp.take() {
+                    // Si ya había un trabajador en progreso, guardarlo garantizando al menos un detalle de liquidación
+                    if let Some(mut emp) = current_emp.take() {
+                        if emp.data_employee.is_empty() {
+                            let de = DataEmployee {
+                                mes_periodo: Some(mes.to_string()),
+                                mes_periodo_int: crate::cedulas::business::mes_to_periodo_int(mes),
+                                anio_periodo: Some(anio.to_string()),
+                                dias: Some(0.0),
+                                sdi: Some(0.0),
+                                subtotal: Some(0.0),
+                                ..Default::default()
+                            };
+                            emp.data_employee.push(de);
+                        }
                         employees.push(emp);
                     }
 
@@ -443,13 +545,16 @@ pub fn parse_ema_employees(raw_text: &str, mes: &str, anio: &str) -> Vec<Employe
                         Some("XAXX010101000".to_string())
                     };
 
-                    let mut new_emp = Employee::new();
-                    new_emp.no_seguro_social = Some(nss_acc);
-                    new_emp.nombre = Some(clean_nombre);
-                    new_emp.curp = Some(curp);
-                    new_emp.rfc = final_rfc;
-                    new_emp.mes_periodo = Some(mes.to_string());
-                    new_emp.anio_periodo = Some(anio.to_string());
+                    let new_emp = Employee {
+                        no_seguro_social: Some(nss_acc),
+                        nombre: Some(clean_nombre),
+                        curp: Some(curp),
+                        rfc: final_rfc,
+                        mes_periodo: Some(mes.to_string()),
+                        mes_periodo_int: crate::cedulas::business::mes_to_periodo_int(mes),
+                        anio_periodo: Some(anio.to_string()),
+                        ..Default::default()
+                    };
 
                     current_emp = Some(new_emp);
                     continue;
@@ -467,7 +572,19 @@ pub fn parse_ema_employees(raw_text: &str, mes: &str, anio: &str) -> Vec<Employe
         }
     }
 
-    if let Some(emp) = current_emp.take() {
+    if let Some(mut emp) = current_emp.take() {
+        if emp.data_employee.is_empty() {
+            let de = DataEmployee {
+                mes_periodo: Some(mes.to_string()),
+                mes_periodo_int: crate::cedulas::business::mes_to_periodo_int(mes),
+                anio_periodo: Some(anio.to_string()),
+                dias: Some(0.0),
+                sdi: Some(0.0),
+                subtotal: Some(0.0),
+                ..Default::default()
+            };
+            emp.data_employee.push(de);
+        }
         employees.push(emp);
     }
 

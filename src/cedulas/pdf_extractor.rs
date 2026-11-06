@@ -281,7 +281,7 @@ pub fn extract_with_layout(pdf_path: &Path) -> Result<String, String> {
     match extract_with_mupdf_native(pdf_path) {
         Ok(text) => Ok(text),
         Err(native_err) => {
-            log::warn!(
+            log::debug!(
                 "MuPDF nativo retornó error ({}), intentando con CLI de respaldo...",
                 native_err
             );

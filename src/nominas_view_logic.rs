@@ -1576,8 +1576,10 @@ mod tests {
     }
 
     fn estado_con(filas: Vec<NominaReporteRowDb>) -> NominasSessionState {
-        let mut st = NominasSessionState::default();
-        st.dias_por_empleado = build_dias_por_empleado(&filas);
+        let mut st = NominasSessionState {
+            dias_por_empleado: build_dias_por_empleado(&filas),
+            ..Default::default()
+        };
         let mut p: Vec<String> = filas.iter().map(|r| r.periodo_str.clone()).collect();
         p.sort();
         p.dedup();
@@ -1755,8 +1757,10 @@ st.all_rows = filas;
 
     #[test]
     fn test_vacio_no_panea() {
-        let mut st = NominasSessionState::default();
-        st.page_size = 100;
+        let mut st = NominasSessionState {
+            page_size: 100,
+            ..Default::default()
+        };
         apply_nominas_filtering(&mut st);
         assert!(st.filtered_rows.is_empty());
         assert!(build_dias_por_empleado(&[]).is_empty());

@@ -1,10 +1,85 @@
 use postgres::Client;
 
+/// Extrae y formatea el detalle completo de un error de PostgreSQL (`PgDatabaseError`:
+/// código SQLSTATE, mensaje real, detalle, sugerencia, tabla, columna, restricción y ubicación),
+/// evitando que se oculte detrás de un `"db error"` genérico.
+pub fn format_pg_error(err: &postgres::Error) -> String {
+    if let Some(db_err) = err.as_db_error() {
+        let mut parts = Vec::new();
+        parts.push(format!(
+            "[{}] {}",
+            db_err.code().code(),
+            db_err.message()
+        ));
+        if let Some(detail) = db_err.detail() {
+            if !detail.trim().is_empty() {
+                parts.push(format!("Detalle: {}", detail.trim()));
+            }
+        }
+        if let Some(hint) = db_err.hint() {
+            if !hint.trim().is_empty() {
+                parts.push(format!("Sugerencia: {}", hint.trim()));
+            }
+        }
+        if let Some(table) = db_err.table() {
+            parts.push(format!("Tabla: {}", table));
+        }
+        if let Some(column) = db_err.column() {
+            parts.push(format!("Columna: {}", column));
+        }
+        if let Some(constraint) = db_err.constraint() {
+            parts.push(format!("Restricción: {}", constraint));
+        }
+        if let Some(where_) = db_err.where_() {
+            if !where_.trim().is_empty() {
+                parts.push(format!("Contexto SQL: {}", where_.trim()));
+            }
+        }
+        parts.join(" | ")
+    } else {
+        format!("{}", err)
+    }
+}
+
+/// Extrae y formatea el detalle de un error genérico que puede contener un `postgres::Error`.
+pub fn format_boxed_pg_error(err: &(dyn std::error::Error + 'static)) -> String {
+    if let Some(pg_err) = err.downcast_ref::<postgres::Error>() {
+        format_pg_error(pg_err)
+    } else {
+        format!("{}", err)
+    }
+}
+
+fn exec_schema_step(
+    client: &mut Client,
+    step_name: &str,
+    sql: &str,
+) -> Result<(), postgres::Error> {
+    if let Err(e) = client.batch_execute(sql) {
+        let detailed = format_pg_error(&e);
+        log::error!(
+            "Error en ensure_schema [{}]: {}",
+            step_name,
+            detailed
+        );
+        crate::app_logger::log_db_error(
+            &format!("ensure_schema::{}", step_name),
+            &["public.liquidaciones", "public.reportes_liquidaciones", "revision_history"],
+            step_name,
+            &detailed,
+        );
+        return Err(e);
+    }
+    Ok(())
+}
+
 pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     log::info!("Verificando y asegurando esquema de base de datos PostgreSQL...");
 
     // 1. Extensions & Schema (safe for concurrent execution)
-    client.batch_execute(
+    exec_schema_step(
+        client,
+        "1_extensions_and_schema",
         r#"
         DO $$ BEGIN
             CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -23,7 +98,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     )?;
 
     // 2. Base tables if they don't exist
-    client.batch_execute(
+    exec_schema_step(
+        client,
+        "2_base_tables",
         r#"
         CREATE TABLE IF NOT EXISTS public.imss_inhabiles (
             id uuid PRIMARY KEY DEFAULT uuidv7(),
@@ -318,6 +395,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             id_registro_patronal uuid NOT NULL REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
             id_empleado uuid NOT NULL REFERENCES public.empleados(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
             mes_periodo char(15),
+            mes_periodo_int smallint,
             anio_periodo smallint,
             nombre_archivo varchar(350),
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP
@@ -405,8 +483,10 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             id uuid PRIMARY KEY DEFAULT uuidv7(),
             id_liquidacion uuid REFERENCES public.liquidaciones(id) ON UPDATE CASCADE ON DELETE CASCADE,
             id_registro_patronal uuid NOT NULL REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE,
             id_empleado uuid NOT NULL REFERENCES public.empleados(id) ON UPDATE CASCADE ON DELETE CASCADE,
             mes_periodo char(15),
+            mes_periodo_int smallint,
             anio_periodo smallint,
             nombre_archivo varchar(350),
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP
@@ -436,6 +516,10 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             patronal double precision,
             obrera double precision,
             subtotal double precision,
+            id_registro_obra uuid REFERENCES public.registros_obras(id) ON UPDATE CASCADE ON DELETE SET NULL,
+            dias_registro_obra smallint,
+            tiene_inconsistencia boolean NOT NULL DEFAULT false,
+            observacion_validacion text,
             created_at timestamptz DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -449,11 +533,17 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         "#,
     )?;
 
-    // 3. Ensure custom columns and fixes
-    client.batch_execute(
+    // 2b. Actualizar log_revision_history de forma tolerante a fallos, relajar NOT NULL en
+    //     revision_history y agregar inmediatamente las columnas críticas (mes_periodo_int e id_revision)
+    //     ANTES de cualquier UPDATE/DELETE de migración para que los triggers de auditoría jamás aborten
+    //     la transacción ni dejen tablas sin columnas.
+    exec_schema_step(
+        client,
+        "2b_critical_columns_and_history_safety",
         r#"
         -- Update log_revision_history trigger function to dynamically match column names using pg_attribute
-        -- for maximum performance (avoids information_schema view joins on every row)
+        -- and wrap history insertion in an EXCEPTION block so audit history mismatches can never abort
+        -- a business transaction or schema migration.
         CREATE OR REPLACE FUNCTION public.log_revision_history()
         RETURNS TRIGGER AS $$
         DECLARE
@@ -461,31 +551,35 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
             select_cols TEXT;
             statement TEXT;
         BEGIN
-            SELECT 
-                string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum),
-                string_agg(format('($1).%I', a.attname), ', ' ORDER BY a.attnum)
-            INTO cols, select_cols
-            FROM pg_attribute a
-            JOIN pg_class c ON c.oid = a.attrelid
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            JOIN pg_class ch ON ch.relname = c.relname
-            JOIN pg_namespace nh ON nh.oid = ch.relnamespace AND nh.nspname = 'revision_history'
-            JOIN pg_attribute h ON h.attrelid = ch.oid AND h.attname = a.attname AND h.attnum > 0 AND NOT h.attisdropped
-            WHERE n.nspname = 'public' AND c.relname = TG_TABLE_NAME AND a.attnum > 0 AND NOT a.attisdropped;
+            BEGIN
+                SELECT 
+                    string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum),
+                    string_agg(format('($1).%I', a.attname), ', ' ORDER BY a.attnum)
+                INTO cols, select_cols
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_class ch ON ch.relname = c.relname
+                JOIN pg_namespace nh ON nh.oid = ch.relnamespace AND nh.nspname = 'revision_history'
+                JOIN pg_attribute h ON h.attrelid = ch.oid AND h.attname = a.attname AND h.attnum > 0 AND NOT h.attisdropped
+                WHERE n.nspname = 'public' AND c.relname = TG_TABLE_NAME AND a.attnum > 0 AND NOT a.attisdropped;
 
-            IF cols IS NOT NULL AND select_cols IS NOT NULL THEN
-                statement := format(
-                    'INSERT INTO revision_history.%I (%s, modified_at, event_name) SELECT %s, NOW(), $2',
-                    TG_TABLE_NAME,
-                    cols,
-                    select_cols
-                );
-                IF (TG_OP = 'DELETE') THEN
-                    EXECUTE statement USING OLD, TG_OP;
-                ELSE
-                    EXECUTE statement USING NEW, TG_OP;
+                IF cols IS NOT NULL AND select_cols IS NOT NULL THEN
+                    statement := format(
+                        'INSERT INTO revision_history.%I (%s, modified_at, event_name) SELECT %s, NOW(), $2',
+                        TG_TABLE_NAME,
+                        cols,
+                        select_cols
+                    );
+                    IF (TG_OP = 'DELETE') THEN
+                        EXECUTE statement USING OLD, TG_OP;
+                    ELSE
+                        EXECUTE statement USING NEW, TG_OP;
+                    END IF;
                 END IF;
-            END IF;
+            EXCEPTION WHEN OTHERS THEN
+                NULL;
+            END;
 
             IF (TG_OP = 'DELETE') THEN
                 RETURN OLD;
@@ -495,6 +589,68 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         END;
         $$ LANGUAGE plpgsql;
 
+        -- Quitar temporalmente el trigger de tope de días antes de ejecutar migraciones sobre reportes_detalles_liquidaciones
+        DROP TRIGGER IF EXISTS trg_check_reportes_detalles_liquidaciones_tope ON public.reportes_detalles_liquidaciones;
+
+        -- Agregar inmediatamente las columnas críticas en public y revision_history
+        ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+        ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS mes_periodo_int smallint;
+        ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+        ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS id_revision uuid;
+        ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS mes_periodo_int smallint;
+
+        ALTER TABLE IF EXISTS revision_history.liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+        ALTER TABLE IF EXISTS revision_history.liquidaciones ADD COLUMN IF NOT EXISTS mes_periodo_int smallint;
+        ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+        ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones ADD COLUMN IF NOT EXISTS id_revision uuid;
+        ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones ADD COLUMN IF NOT EXISTS mes_periodo_int smallint;
+
+        COMMENT ON COLUMN public.liquidaciones.mes_periodo_int IS 'Mes al que corresponde el periodo que se está liquidando en formato numerico';
+        COMMENT ON COLUMN public.reportes_liquidaciones.mes_periodo_int IS 'Mes al que corresponde el periodo que se está liquidando en formato numerico';
+        COMMENT ON COLUMN public.reportes_liquidaciones.id_revision IS 'Id de la revision a la que pertenece el registro de la cedula de cuota';
+
+        -- Relajar NOT NULL en TODAS las columnas de revision_history y sincronizar columnas con public
+        DO $$
+        DECLARE
+            r RECORD;
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'revision_history') THEN
+                FOR r IN
+                    SELECT ch.relname AS tbl, h.attname AS col
+                    FROM pg_attribute h
+                    JOIN pg_class ch ON ch.oid = h.attrelid AND ch.relkind = 'r'
+                    JOIN pg_namespace nh ON nh.oid = ch.relnamespace AND nh.nspname = 'revision_history'
+                    WHERE h.attnum > 0 AND NOT h.attisdropped AND h.attnotnull
+                      AND h.attname NOT IN ('modified_at', 'event_name')
+                LOOP
+                    EXECUTE format('ALTER TABLE revision_history.%I ALTER COLUMN %I DROP NOT NULL', r.tbl, r.col);
+                END LOOP;
+
+                FOR r IN
+                    SELECT c.relname AS tbl, a.attname AS col, format_type(a.atttypid, a.atttypmod) AS typ
+                    FROM pg_attribute a
+                    JOIN pg_class c ON c.oid = a.attrelid AND c.relkind = 'r'
+                    JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+                    JOIN pg_class ch ON ch.relname = c.relname AND ch.relkind = 'r'
+                    JOIN pg_namespace nh ON nh.oid = ch.relnamespace AND nh.nspname = 'revision_history'
+                    WHERE a.attnum > 0 AND NOT a.attisdropped
+                      AND NOT EXISTS (
+                          SELECT 1 FROM pg_attribute h
+                          WHERE h.attrelid = ch.oid AND h.attname = a.attname AND h.attnum > 0 AND NOT h.attisdropped
+                      )
+                LOOP
+                    EXECUTE format('ALTER TABLE revision_history.%I ADD COLUMN IF NOT EXISTS %I %s', r.tbl, r.col, r.typ);
+                END LOOP;
+            END IF;
+        END $$;
+        "#,
+    )?;
+
+    // 3a. Estructura DDL para catálogos, columnas de cédulas y nóminas
+    exec_schema_step(
+        client,
+        "3a_catalog_and_column_ddl",
+        r#"
         -- Ensure revision_history.clasificaciones_clientes has matching column name
         DO $$
         BEGIN
@@ -576,6 +732,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE TRIGGER trg_rel_del_sub_history
         AFTER INSERT OR UPDATE OR DELETE ON public.rel_delegacion_subdelegacion
         FOR EACH ROW EXECUTE FUNCTION public.log_revision_history();
+
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS clave_ubicacion varchar(50);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS pensionado varchar(10);
         ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS esta_activo boolean DEFAULT true;
@@ -587,28 +744,296 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         ALTER TABLE public.reportes_liquidaciones DROP COLUMN IF EXISTS dias;
         ALTER TABLE IF EXISTS revision_history.liquidaciones DROP COLUMN IF EXISTS dias;
         ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones DROP COLUMN IF EXISTS dias;
+
+        ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+        ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS mes_periodo_int smallint;
+        ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+        ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS id_revision uuid;
+        ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS mes_periodo_int smallint;
+
+        COMMENT ON COLUMN public.liquidaciones.mes_periodo_int IS 'Mes al que corresponde el periodo que se está liquidando en formato numerico';
+        COMMENT ON COLUMN public.reportes_liquidaciones.mes_periodo_int IS 'Mes al que corresponde el periodo que se está liquidando en formato numerico';
+        COMMENT ON COLUMN public.reportes_liquidaciones.id_revision IS 'Id de la revision a la que pertenece el registro de la cedula de cuota';
+        "#,
+    )?;
+
+    // 3b. Migración DML de datos y depuración de registros huérfanos.
+    //     Se ejecuta y CONFIRMA en su propia transacción para que todos los eventos de triggers
+    //     y comprobaciones diferidas se resuelvan antes de aplicar restricciones DDL en 3c.
+    exec_schema_step(
+        client,
+        "3b_cedulas_data_migration_dml",
+        r#"
         DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_registro_obra IS NULL;
 
-        -- Migración: Cédulas de Cuotas y Reportes Liquidaciones pasan de id_revision a id_registro_patronal
         DO $$
-        DECLARE
-            r RECORD;
         BEGIN
-            -- 1. Agregar columna id_registro_patronal si no existe
-            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'liquidaciones') THEN
-                ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
-            END IF;
-            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'reportes_liquidaciones') THEN
-                ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
-            END IF;
-
-            -- 2. Migrar datos si aún existe id_revision en public.liquidaciones
+            -- Migrar datos si aún existe id_revision en public.liquidaciones
             IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'liquidaciones' AND column_name = 'id_revision') THEN
+                EXECUTE $bf1$
+                    INSERT INTO public.registros_obras (
+                        id, id_revision, id_registro_patronal, numero, tipo_obra, fecha_inicio, fecha_fin, creado_usuario
+                    )
+                    SELECT 
+                        uuidv7(),
+                        l.id_revision,
+                        rev.id_registro_patronal,
+                        LEFT(TRIM(e.clave_ubicacion), 15),
+                        'REGISTRO DE OBRA CÉDULA',
+                        COALESCE(
+                            TO_DATE(l.anio_periodo::text || '-' || 
+                                CASE UPPER(TRIM(l.mes_periodo))
+                                    WHEN 'ENERO' THEN '01'
+                                    WHEN 'FEBRERO' THEN '02'
+                                    WHEN 'MARZO' THEN '03'
+                                    WHEN 'ABRIL' THEN '04'
+                                    WHEN 'MAYO' THEN '05'
+                                    WHEN 'JUNIO' THEN '06'
+                                    WHEN 'JULIO' THEN '07'
+                                    WHEN 'AGOSTO' THEN '08'
+                                    WHEN 'SEPTIEMBRE' THEN '09'
+                                    WHEN 'OCTUBRE' THEN '10'
+                                    WHEN 'NOVIEMBRE' THEN '11'
+                                    WHEN 'DICIEMBRE' THEN '12'
+                                    ELSE '01'
+                                END || '-01', 'YYYY-MM-DD'),
+                            CURRENT_DATE
+                        ),
+                        COALESCE(
+                            TO_DATE(l.anio_periodo::text || '-' || 
+                                CASE UPPER(TRIM(l.mes_periodo))
+                                    WHEN 'ENERO' THEN '01'
+                                    WHEN 'FEBRERO' THEN '02'
+                                    WHEN 'MARZO' THEN '03'
+                                    WHEN 'ABRIL' THEN '04'
+                                    WHEN 'MAYO' THEN '05'
+                                    WHEN 'JUNIO' THEN '06'
+                                    WHEN 'JULIO' THEN '07'
+                                    WHEN 'AGOSTO' THEN '08'
+                                    WHEN 'SEPTIEMBRE' THEN '09'
+                                    WHEN 'OCTUBRE' THEN '10'
+                                    WHEN 'NOVIEMBRE' THEN '11'
+                                    WHEN 'DICIEMBRE' THEN '12'
+                                    ELSE '01'
+                                END || '-01', 'YYYY-MM-DD') + INTERVAL '1 month' - INTERVAL '1 day',
+                            CURRENT_DATE
+                        ),
+                        false
+                    FROM public.liquidaciones l
+                    JOIN public.revisiones rev ON rev.id = l.id_revision
+                    JOIN public.empleados e ON e.id = l.id_empleado
+                    WHERE e.clave_ubicacion IS NOT NULL 
+                      AND TRIM(e.clave_ubicacion) <> '' 
+                      AND TRIM(e.clave_ubicacion) <> '—'
+                      AND TRIM(e.clave_ubicacion) <> '-'
+                      AND (
+                          TRIM(e.clave_ubicacion) ~* '^C-?[0-9]{7,8}$'
+                          OR TRIM(e.clave_ubicacion) ~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$'
+                          OR TRIM(e.clave_ubicacion) ~* '^[0-9]{8,10}$'
+                      )
+                    ON CONFLICT (id_revision, numero) DO NOTHING;
+                $bf1$;
+
+                EXECUTE $bf2$
+                    INSERT INTO public.vinculaciones_obras_liquidaciones (id, id_registro_obra, id_liquidacion, dias_registro_obra)
+                    SELECT uuidv7(), ro.id, l.id, 30
+                    FROM public.liquidaciones l
+                    JOIN public.empleados e ON e.id = l.id_empleado
+                    JOIN public.registros_obras ro ON ro.id_revision = l.id_revision AND ro.numero = LEFT(TRIM(e.clave_ubicacion), 15)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol 
+                        WHERE vol.id_liquidacion = l.id
+                    );
+                $bf2$;
+
                 UPDATE public.liquidaciones l
                 SET id_registro_patronal = rev.id_registro_patronal
                 FROM public.revisiones rev
                 WHERE l.id_revision = rev.id AND l.id_registro_patronal IS NULL;
+            END IF;
 
+            -- Migrar y asegurar columnas mes_periodo_int (liquidaciones y reportes_liquidaciones) e id_revision (reportes_liquidaciones)
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'liquidaciones') THEN
+                UPDATE public.liquidaciones
+                SET mes_periodo_int = CASE UPPER(TRIM(COALESCE(mes_periodo, '')))
+                    WHEN 'ENERO' THEN 1
+                    WHEN 'FEBRERO' THEN 2
+                    WHEN 'MARZO' THEN 3
+                    WHEN 'ABRIL' THEN 4
+                    WHEN 'MAYO' THEN 5
+                    WHEN 'JUNIO' THEN 6
+                    WHEN 'JULIO' THEN 7
+                    WHEN 'AGOSTO' THEN 8
+                    WHEN 'SEPTIEMBRE' THEN 9
+                    WHEN 'OCTUBRE' THEN 10
+                    WHEN 'NOVIEMBRE' THEN 11
+                    WHEN 'DICIEMBRE' THEN 12
+                    WHEN '1' THEN 1 WHEN '01' THEN 1
+                    WHEN '2' THEN 2 WHEN '02' THEN 2
+                    WHEN '3' THEN 3 WHEN '03' THEN 3
+                    WHEN '4' THEN 4 WHEN '04' THEN 4
+                    WHEN '5' THEN 5 WHEN '05' THEN 5
+                    WHEN '6' THEN 6 WHEN '06' THEN 6
+                    WHEN '7' THEN 7 WHEN '07' THEN 7
+                    WHEN '8' THEN 8 WHEN '08' THEN 8
+                    WHEN '9' THEN 9 WHEN '09' THEN 9
+                    WHEN '10' THEN 10
+                    WHEN '11' THEN 11
+                    WHEN '12' THEN 12
+                    ELSE 1
+                END
+                WHERE mes_periodo_int IS NULL;
+            END IF;
+
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'reportes_liquidaciones') THEN
+                UPDATE public.reportes_liquidaciones rl
+                SET id_registro_patronal = rev.id_registro_patronal
+                FROM public.revisiones rev
+                WHERE rl.id_revision = rev.id AND rl.id_registro_patronal IS NULL;
+
+                UPDATE public.reportes_liquidaciones rl
+                SET id_registro_patronal = l.id_registro_patronal
+                FROM public.liquidaciones l
+                WHERE rl.id_liquidacion = l.id AND rl.id_registro_patronal IS NULL;
+
+                UPDATE public.reportes_liquidaciones rl
+                SET id_revision = sub.id_revision
+                FROM (
+                    SELECT DISTINCT ON (rvol.id_reporte_liquidacion)
+                        rvol.id_reporte_liquidacion,
+                        ro.id_revision
+                    FROM public.reportes_vinculaciones_obras_liquidaciones rvol
+                    JOIN public.registros_obras ro ON ro.id = rvol.id_registro_obra
+                    WHERE ro.id_revision IS NOT NULL
+                ) sub
+                WHERE rl.id = sub.id_reporte_liquidacion AND rl.id_revision IS NULL;
+
+                UPDATE public.reportes_liquidaciones rl
+                SET id_revision = (
+                    SELECT rev.id
+                    FROM public.revisiones rev
+                    WHERE rev.id_registro_patronal = rl.id_registro_patronal
+                    ORDER BY rev.created_at DESC NULLS LAST, rev.id DESC
+                    LIMIT 1
+                )
+                WHERE rl.id_revision IS NULL;
+
+                UPDATE public.reportes_liquidaciones
+                SET mes_periodo_int = CASE UPPER(TRIM(COALESCE(mes_periodo, '')))
+                    WHEN 'ENERO' THEN 1
+                    WHEN 'FEBRERO' THEN 2
+                    WHEN 'MARZO' THEN 3
+                    WHEN 'ABRIL' THEN 4
+                    WHEN 'MAYO' THEN 5
+                    WHEN 'JUNIO' THEN 6
+                    WHEN 'JULIO' THEN 7
+                    WHEN 'AGOSTO' THEN 8
+                    WHEN 'SEPTIEMBRE' THEN 9
+                    WHEN 'OCTUBRE' THEN 10
+                    WHEN 'NOVIEMBRE' THEN 11
+                    WHEN 'DICIEMBRE' THEN 12
+                    WHEN '1' THEN 1 WHEN '01' THEN 1
+                    WHEN '2' THEN 2 WHEN '02' THEN 2
+                    WHEN '3' THEN 3 WHEN '03' THEN 3
+                    WHEN '4' THEN 4 WHEN '04' THEN 4
+                    WHEN '5' THEN 5 WHEN '05' THEN 5
+                    WHEN '6' THEN 6 WHEN '06' THEN 6
+                    WHEN '7' THEN 7 WHEN '07' THEN 7
+                    WHEN '8' THEN 8 WHEN '08' THEN 8
+                    WHEN '9' THEN 9 WHEN '09' THEN 9
+                    WHEN '10' THEN 10
+                    WHEN '11' THEN 11
+                    WHEN '12' THEN 12
+                    ELSE 1
+                END
+                WHERE mes_periodo_int IS NULL;
+            END IF;
+
+            -- Limpiar huérfanos antes de imponer NOT NULL y Foreign Keys
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'liquidaciones' AND column_name = 'id_registro_patronal') THEN
+                DELETE FROM public.detalles_liquidaciones dl
+                WHERE EXISTS (
+                    SELECT 1 FROM public.liquidaciones l
+                    WHERE l.id = dl.id_liquidacion
+                      AND (l.id_registro_patronal IS NULL OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = l.id_registro_patronal))
+                );
+                DELETE FROM public.vinculaciones_obras_liquidaciones vol
+                WHERE EXISTS (
+                    SELECT 1 FROM public.liquidaciones l
+                    WHERE l.id = vol.id_liquidacion
+                      AND (l.id_registro_patronal IS NULL OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = l.id_registro_patronal))
+                );
+                DELETE FROM public.reportes_detalles_liquidaciones rdl
+                WHERE EXISTS (
+                    SELECT 1 FROM public.reportes_liquidaciones rl
+                    JOIN public.liquidaciones l ON l.id = rl.id_liquidacion
+                    WHERE rl.id = rdl.id_reporte_liquidacion
+                      AND (l.id_registro_patronal IS NULL OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = l.id_registro_patronal))
+                );
+                DELETE FROM public.reportes_vinculaciones_obras_liquidaciones rvol
+                WHERE EXISTS (
+                    SELECT 1 FROM public.reportes_liquidaciones rl
+                    JOIN public.liquidaciones l ON l.id = rl.id_liquidacion
+                    WHERE rl.id = rvol.id_reporte_liquidacion
+                      AND (l.id_registro_patronal IS NULL OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = l.id_registro_patronal))
+                );
+                DELETE FROM public.reportes_liquidaciones rl
+                WHERE EXISTS (
+                    SELECT 1 FROM public.liquidaciones l
+                    WHERE l.id = rl.id_liquidacion
+                      AND (l.id_registro_patronal IS NULL OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = l.id_registro_patronal))
+                );
+                DELETE FROM public.liquidaciones l
+                WHERE l.id_registro_patronal IS NULL
+                   OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = l.id_registro_patronal);
+            END IF;
+
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'reportes_liquidaciones' AND column_name = 'id_registro_patronal') THEN
+                DELETE FROM public.reportes_detalles_liquidaciones rdl
+                WHERE EXISTS (
+                    SELECT 1 FROM public.reportes_liquidaciones rl
+                    WHERE rl.id = rdl.id_reporte_liquidacion
+                      AND (
+                          rl.id_registro_patronal IS NULL
+                          OR rl.id_revision IS NULL
+                          OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = rl.id_registro_patronal)
+                          OR NOT EXISTS (SELECT 1 FROM public.revisiones rev WHERE rev.id = rl.id_revision)
+                      )
+                );
+                DELETE FROM public.reportes_vinculaciones_obras_liquidaciones rvol
+                WHERE EXISTS (
+                    SELECT 1 FROM public.reportes_liquidaciones rl
+                    WHERE rl.id = rvol.id_reporte_liquidacion
+                      AND (
+                          rl.id_registro_patronal IS NULL
+                          OR rl.id_revision IS NULL
+                          OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = rl.id_registro_patronal)
+                          OR NOT EXISTS (SELECT 1 FROM public.revisiones rev WHERE rev.id = rl.id_revision)
+                      )
+                );
+                DELETE FROM public.reportes_liquidaciones rl
+                WHERE rl.id_registro_patronal IS NULL
+                   OR rl.id_revision IS NULL
+                   OR NOT EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id = rl.id_registro_patronal)
+                   OR NOT EXISTS (SELECT 1 FROM public.revisiones rev WHERE rev.id = rl.id_revision);
+            END IF;
+        END $$;
+        "#,
+    )?;
+
+    // 3c. Aplicación segura de restricciones DDL (NOT NULL y Foreign Keys).
+    //     Se ejecuta en una transacción limpia sin operaciones DML previas sobre reportes_liquidaciones
+    //     y comprueba explícitamente is_nullable = 'YES' para no generar bloqueos ni errores 55006.
+    exec_schema_step(
+        client,
+        "3c_cedulas_constraints_ddl",
+        r#"
+        -- Desvincular id_revision de liquidaciones si aún existe
+        DO $$
+        DECLARE
+            r RECORD;
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'liquidaciones' AND column_name = 'id_revision') THEN
                 FOR r IN (
                     SELECT conname 
                     FROM pg_constraint 
@@ -625,63 +1050,116 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
 
                 ALTER TABLE public.liquidaciones DROP COLUMN IF EXISTS id_revision CASCADE;
             END IF;
+        END $$;
 
-            -- Migrar datos si aún existe id_revision en public.reportes_liquidaciones
-            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'reportes_liquidaciones' AND column_name = 'id_revision') THEN
-                UPDATE public.reportes_liquidaciones rl
-                SET id_registro_patronal = rev.id_registro_patronal
-                FROM public.revisiones rev
-                WHERE rl.id_revision = rev.id AND rl.id_registro_patronal IS NULL;
+        -- Enforce NOT NULL y Foreign Keys condicionando a is_nullable = 'YES'
+        DO $$
+        BEGIN
+            -- 1. liquidaciones.id_registro_patronal
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'liquidaciones'
+                  AND column_name = 'id_registro_patronal'
+                  AND is_nullable = 'YES'
+            ) THEN
+                ALTER TABLE public.liquidaciones ALTER COLUMN id_registro_patronal SET NOT NULL;
+            END IF;
 
-                UPDATE public.reportes_liquidaciones rl
-                SET id_registro_patronal = l.id_registro_patronal
-                FROM public.liquidaciones l
-                WHERE rl.id_liquidacion = l.id AND rl.id_registro_patronal IS NULL;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_liquidaciones_registro_patronal') THEN
+                ALTER TABLE public.liquidaciones ADD CONSTRAINT fk_liquidaciones_registro_patronal
+                    FOREIGN KEY (id_registro_patronal) REFERENCES public.registros_patronales(id)
+                    ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+            END IF;
 
-                FOR r IN (
-                    SELECT conname 
-                    FROM pg_constraint 
-                    WHERE conrelid = 'public.reportes_liquidaciones'::regclass 
-                      AND contype = 'f' 
-                      AND conname ILIKE '%revision%'
-                ) LOOP
-                    EXECUTE 'ALTER TABLE public.reportes_liquidaciones DROP CONSTRAINT IF EXISTS ' || quote_ident(r.conname);
+            -- 2. reportes_liquidaciones.id_registro_patronal
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'reportes_liquidaciones'
+                  AND column_name = 'id_registro_patronal'
+                  AND is_nullable = 'YES'
+            ) THEN
+                ALTER TABLE public.reportes_liquidaciones ALTER COLUMN id_registro_patronal SET NOT NULL;
+            END IF;
+
+            -- 3. reportes_liquidaciones.id_revision
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'reportes_liquidaciones'
+                  AND column_name = 'id_revision'
+                  AND is_nullable = 'YES'
+            ) THEN
+                ALTER TABLE public.reportes_liquidaciones ALTER COLUMN id_revision SET NOT NULL;
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_reportes_liquidaciones_registro_patronal') THEN
+                ALTER TABLE public.reportes_liquidaciones ADD CONSTRAINT fk_reportes_liquidaciones_registro_patronal
+                    FOREIGN KEY (id_registro_patronal) REFERENCES public.registros_patronales(id)
+                    ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_reportes_liquidaciones_revision') THEN
+                ALTER TABLE public.reportes_liquidaciones ADD CONSTRAINT fk_reportes_liquidaciones_revision
+                    FOREIGN KEY (id_revision) REFERENCES public.revisiones(id)
+                    ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+            END IF;
+        END $$;
+        "#,
+    )?;
+
+    // 3d. Alineación de revision_history, índices de rendimiento y reglas de validación
+    exec_schema_step(
+        client,
+        "3d_history_indices_and_rules",
+        r#"
+        -- Alineación de revision_history con public:
+        --   1. Agrega a revision_history las columnas que existen en public y faltan en el historial.
+        --   2. Quita NOT NULL a todas las columnas de las tablas de revision_history.
+        DO $$
+        DECLARE
+            r RECORD;
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'revision_history') THEN
+                FOR r IN
+                    SELECT c.relname AS tbl, a.attname AS col, format_type(a.atttypid, a.atttypmod) AS typ
+                    FROM pg_attribute a
+                    JOIN pg_class c ON c.oid = a.attrelid AND c.relkind = 'r'
+                    JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+                    JOIN pg_class ch ON ch.relname = c.relname AND ch.relkind = 'r'
+                    JOIN pg_namespace nh ON nh.oid = ch.relnamespace AND nh.nspname = 'revision_history'
+                    WHERE a.attnum > 0 AND NOT a.attisdropped
+                      AND NOT EXISTS (
+                          SELECT 1 FROM pg_attribute h
+                          WHERE h.attrelid = ch.oid AND h.attname = a.attname AND h.attnum > 0 AND NOT h.attisdropped
+                      )
+                LOOP
+                    EXECUTE format('ALTER TABLE revision_history.%I ADD COLUMN IF NOT EXISTS %I %s', r.tbl, r.col, r.typ);
                 END LOOP;
 
-                DROP INDEX IF EXISTS public.idx_reportes_liquidaciones_id_revision;
-                DROP INDEX IF EXISTS public.idx_reportes_liquidaciones_rev_periodo;
-                DROP INDEX IF EXISTS public.idx_reportes_liquidaciones_rev_emp;
-
-                ALTER TABLE public.reportes_liquidaciones DROP COLUMN IF EXISTS id_revision CASCADE;
-            END IF;
-
-            -- 3. Asegurar NOT NULL y Foreign Keys
-            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'liquidaciones' AND column_name = 'id_registro_patronal') THEN
-                DELETE FROM public.liquidaciones WHERE id_registro_patronal IS NULL;
-                ALTER TABLE public.liquidaciones ALTER COLUMN id_registro_patronal SET NOT NULL;
-                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_liquidaciones_registro_patronal') THEN
-                    ALTER TABLE public.liquidaciones ADD CONSTRAINT fk_liquidaciones_registro_patronal
-                        FOREIGN KEY (id_registro_patronal) REFERENCES public.registros_patronales(id)
-                        ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
-                END IF;
-            END IF;
-
-            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'reportes_liquidaciones' AND column_name = 'id_registro_patronal') THEN
-                DELETE FROM public.reportes_liquidaciones WHERE id_registro_patronal IS NULL;
-                ALTER TABLE public.reportes_liquidaciones ALTER COLUMN id_registro_patronal SET NOT NULL;
-                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_reportes_liquidaciones_registro_patronal') THEN
-                    ALTER TABLE public.reportes_liquidaciones ADD CONSTRAINT fk_reportes_liquidaciones_registro_patronal
-                        FOREIGN KEY (id_registro_patronal) REFERENCES public.registros_patronales(id)
-                        ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
-                END IF;
+                FOR r IN
+                    SELECT ch.relname AS tbl, h.attname AS col
+                    FROM pg_attribute h
+                    JOIN pg_class ch ON ch.oid = h.attrelid AND ch.relkind = 'r'
+                    JOIN pg_namespace nh ON nh.oid = ch.relnamespace AND nh.nspname = 'revision_history'
+                    WHERE h.attnum > 0 AND NOT h.attisdropped AND h.attnotnull
+                      AND h.attname NOT IN ('modified_at', 'event_name')
+                LOOP
+                    EXECUTE format('ALTER TABLE revision_history.%I ALTER COLUMN %I DROP NOT NULL', r.tbl, r.col);
+                END LOOP;
             END IF;
         END $$;
 
         -- Column additions to allow row-level obra and days per detail in reportes_detalles_liquidaciones
         ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_obra uuid REFERENCES public.registros_obras(id) ON UPDATE CASCADE ON DELETE SET NULL;
         ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS dias_registro_obra smallint;
+        ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS tiene_inconsistencia boolean NOT NULL DEFAULT false;
+        ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS observacion_validacion text;
         ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS id_registro_obra uuid;
         ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS dias_registro_obra smallint;
+        ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS tiene_inconsistencia boolean NOT NULL DEFAULT false;
+        ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS observacion_validacion text;
 
         -- Reparación histórica (deshabilitada para preservar ediciones del usuario en Reporte Liquidaciones)
         -- UPDATE public.reportes_detalles_liquidaciones rdl SET dias = dl.dias ...
@@ -869,9 +1347,12 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_empleado ON public.reportes_nominas(id_empleado);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_nominas_id_rep ON public.reportes_detalles_nominas(id_reporte_nomina);
         CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_rp ON public.reportes_liquidaciones(id_registro_patronal);
+        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_revision ON public.reportes_liquidaciones(id_revision);
         CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_id_liq ON public.reportes_liquidaciones(id_liquidacion);
         CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_rp_periodo ON public.reportes_liquidaciones(id_registro_patronal, anio_periodo, mes_periodo);
+        CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_rp_rev_periodo_int ON public.reportes_liquidaciones(id_registro_patronal, id_revision, anio_periodo, mes_periodo_int);
         CREATE INDEX IF NOT EXISTS idx_liquidaciones_rp_periodo ON public.liquidaciones(id_registro_patronal, anio_periodo, mes_periodo);
+        CREATE INDEX IF NOT EXISTS idx_liquidaciones_rp_periodo_int ON public.liquidaciones(id_registro_patronal, anio_periodo, mes_periodo_int);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_rep ON public.reportes_detalles_liquidaciones(id_reporte_liquidacion);
         CREATE INDEX IF NOT EXISTS idx_reportes_detalles_liq_id_obra ON public.reportes_detalles_liquidaciones(id_registro_obra);
         CREATE INDEX IF NOT EXISTS idx_reportes_vinc_obras_id_rep ON public.reportes_vinculaciones_obras_liquidaciones(id_reporte_liquidacion);
@@ -921,6 +1402,28 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
 
         -- Limpiar registros de obra inválidos (RFC/CURP guardados por error o no conformes a SIROC/SATIC).
         -- Conservar estrictamente cualquier obra creada o vinculada por el usuario (creado_usuario = true).
+        UPDATE public.reportes_detalles_liquidaciones rdl
+        SET id_registro_obra = NULL, dias_registro_obra = 0
+        FROM public.registros_obras ro
+        WHERE rdl.id_registro_obra = ro.id
+          AND COALESCE(ro.creado_usuario, false) = false
+          AND (TRIM(ro.numero) ~* '^[A-Z]{3,4}[0-9]{6}'
+           OR (TRIM(ro.numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(ro.numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(ro.numero) !~* '^[0-9]{8,10}$'));
+
+        DELETE FROM public.reportes_vinculaciones_obras_liquidaciones rvol
+        USING public.registros_obras ro
+        WHERE rvol.id_registro_obra = ro.id
+          AND COALESCE(ro.creado_usuario, false) = false
+          AND (TRIM(ro.numero) ~* '^[A-Z]{3,4}[0-9]{6}'
+           OR (TRIM(ro.numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(ro.numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(ro.numero) !~* '^[0-9]{8,10}$'));
+
+        DELETE FROM public.vinculaciones_obras_liquidaciones vol
+        USING public.registros_obras ro
+        WHERE vol.id_registro_obra = ro.id
+          AND COALESCE(ro.creado_usuario, false) = false
+          AND (TRIM(ro.numero) ~* '^[A-Z]{3,4}[0-9]{6}'
+           OR (TRIM(ro.numero) !~* '^C-?[0-9]{7,8}$' AND TRIM(ro.numero) !~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$' AND TRIM(ro.numero) !~* '^[0-9]{8,10}$'));
+
         DELETE FROM public.registros_obras
         WHERE COALESCE(creado_usuario, false) = false
           AND (TRIM(numero) ~* '^[A-Z]{3,4}[0-9]{6}'
@@ -1010,92 +1513,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         WHERE curp IS NOT NULL
           AND TRIM(curp) <> ''
           AND LENGTH(TRIM(curp)) <> 18;
-
-        -- Backfill: insertar registros de obra desde clave_ubicacion de empleados si no existen
-        INSERT INTO public.registros_obras (
-            id, id_revision, id_registro_patronal, numero, tipo_obra, fecha_inicio, fecha_fin, creado_usuario
-        )
-        SELECT 
-            uuidv7(),
-            l.id_revision,
-            r.id_registro_patronal,
-            LEFT(TRIM(e.clave_ubicacion), 15),
-            'REGISTRO DE OBRA CÉDULA',
-            COALESCE(
-                TO_DATE(l.anio_periodo::text || '-' || 
-                    CASE UPPER(TRIM(l.mes_periodo))
-                        WHEN 'ENERO' THEN '01'
-                        WHEN 'FEBRERO' THEN '02'
-                        WHEN 'MARZO' THEN '03'
-                        WHEN 'ABRIL' THEN '04'
-                        WHEN 'MAYO' THEN '05'
-                        WHEN 'JUNIO' THEN '06'
-                        WHEN 'JULIO' THEN '07'
-                        WHEN 'AGOSTO' THEN '08'
-                        WHEN 'SEPTIEMBRE' THEN '09'
-                        WHEN 'OCTUBRE' THEN '10'
-                        WHEN 'NOVIEMBRE' THEN '11'
-                        WHEN 'DICIEMBRE' THEN '12'
-                        ELSE '01'
-                    END || '-01', 'YYYY-MM-DD'),
-                CURRENT_DATE
-            ),
-            COALESCE(
-                TO_DATE(l.anio_periodo::text || '-' || 
-                    CASE UPPER(TRIM(l.mes_periodo))
-                        WHEN 'ENERO' THEN '01'
-                        WHEN 'FEBRERO' THEN '02'
-                        WHEN 'MARZO' THEN '03'
-                        WHEN 'ABRIL' THEN '04'
-                        WHEN 'MAYO' THEN '05'
-                        WHEN 'JUNIO' THEN '06'
-                        WHEN 'JULIO' THEN '07'
-                        WHEN 'AGOSTO' THEN '08'
-                        WHEN 'SEPTIEMBRE' THEN '09'
-                        WHEN 'OCTUBRE' THEN '10'
-                        WHEN 'NOVIEMBRE' THEN '11'
-                        WHEN 'DICIEMBRE' THEN '12'
-                        ELSE '01'
-                    END || '-01', 'YYYY-MM-DD') + INTERVAL '1 month' - INTERVAL '1 day',
-                CURRENT_DATE
-            ),
-            false
-        FROM public.liquidaciones l
-        JOIN public.revisiones r ON r.id = l.id_revision
-        JOIN public.empleados e ON e.id = l.id_empleado
-        WHERE e.clave_ubicacion IS NOT NULL 
-          AND TRIM(e.clave_ubicacion) <> '' 
-          AND TRIM(e.clave_ubicacion) <> '—'
-          AND TRIM(e.clave_ubicacion) <> '-'
-          AND (
-              TRIM(e.clave_ubicacion) ~* '^C-?[0-9]{7,8}$'
-              OR TRIM(e.clave_ubicacion) ~* '^[0-9]{2}-?[0-9]{5,6}-?[0-9]{2}$'
-              OR TRIM(e.clave_ubicacion) ~* '^[0-9]{8,10}$'
-          )
-        ON CONFLICT (id_revision, numero) DO NOTHING;
-
-        -- Backfill: asegurar vinculaciones de obras para liquidaciones
-        INSERT INTO public.vinculaciones_obras_liquidaciones (id, id_registro_obra, id_liquidacion, dias_registro_obra)
-        SELECT uuidv7(), ro.id, l.id, 30
-        FROM public.liquidaciones l
-        JOIN public.empleados e ON e.id = l.id_empleado
-        JOIN public.registros_obras ro ON ro.id_revision = l.id_revision AND ro.numero = LEFT(TRIM(e.clave_ubicacion), 15)
-        WHERE NOT EXISTS (
-            SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol 
-            WHERE vol.id_liquidacion = l.id
-        );
-
-        -- Backfill: asegurar vinculaciones en reportes_vinculaciones_obras_liquidaciones
-        INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra)
-        SELECT uuidv7(), ro.id, rl.id, 30
-        FROM public.reportes_liquidaciones rl
-        JOIN public.liquidaciones l ON l.id = rl.id_liquidacion
-        JOIN public.empleados e ON e.id = l.id_empleado
-        JOIN public.registros_obras ro ON ro.id_revision = rl.id_revision AND ro.numero = LEFT(TRIM(e.clave_ubicacion), 15)
-WHERE NOT EXISTS (
-                SELECT 1 FROM public.reportes_vinculaciones_obras_liquidaciones rvol 
-                WHERE rvol.id_reporte_liquidacion = rl.id
-            );
+        -- Backfill completado en bloque dinámico de migración de esquema.
 
         -- Idempotencia de nóminas: índice ÚNICO PARCIAL sobre el UUID del timbre.
         --
@@ -1144,18 +1562,26 @@ WHERE NOT EXISTS (
             END IF;
         END $$;
 
-        -- Restricción de verificación y disparador para validar tope de días de obra y compatibilidad de movimientos
+        -- Eliminación de restricción dura para permitir inserciones permisivas de auditoría
         DO $$
         BEGIN
-            IF NOT EXISTS (
+            IF EXISTS (
                 SELECT 1 FROM pg_constraint WHERE conname = 'chk_reportes_detalles_dias_obra'
             ) THEN
                 ALTER TABLE public.reportes_detalles_liquidaciones
-                ADD CONSTRAINT chk_reportes_detalles_dias_obra
-                CHECK (dias_registro_obra IS NULL OR (dias_registro_obra >= 0 AND dias_registro_obra <= 31));
+                DROP CONSTRAINT chk_reportes_detalles_dias_obra;
             END IF;
         END $$;
 
+        -- Columnas de auditoría e inconsistencias permisivas en reportes_detalles_liquidaciones
+        ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS tiene_inconsistencia boolean NOT NULL DEFAULT false;
+        ALTER TABLE public.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS observacion_validacion text;
+        ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS tiene_inconsistencia boolean NOT NULL DEFAULT false;
+        ALTER TABLE IF EXISTS revision_history.reportes_detalles_liquidaciones ADD COLUMN IF NOT EXISTS observacion_validacion text;
+
+        -- Función y disparador permisivo (NO-BLOQUEANTE):
+        -- En lugar de RAISE EXCEPTION, marca 'tiene_inconsistencia = TRUE' y detalla la observación
+        -- para que el 100% de los datos se guarden y el auditor corrija en la interfaz Slint.
         CREATE OR REPLACE FUNCTION public.check_reportes_detalles_liquidaciones_tope_dias()
         RETURNS TRIGGER AS $$
         DECLARE
@@ -1178,14 +1604,20 @@ WHERE NOT EXISTS (
             v_inter_end DATE;
             v_ov_s DATE;
             v_ov_e DATE;
+            v_obs TEXT := NULL;
         BEGIN
-            -- Validar límites básicos de días
+            -- Reiniciar estado de inconsistencia por defecto
+            NEW.tiene_inconsistencia := FALSE;
+            NEW.observacion_validacion := NULL;
+
+            -- Validar límites básicos de días (sin abortar transacción)
             IF NEW.dias_registro_obra IS NOT NULL THEN
                 IF NEW.dias_registro_obra < 0 THEN
-                    RAISE EXCEPTION 'Los días de obra no pueden ser negativos (%).', NEW.dias_registro_obra;
-                END IF;
-                IF NEW.dias_registro_obra > 31 THEN
-                    RAISE EXCEPTION 'Los días de obra no pueden exceder 31 (%).', NEW.dias_registro_obra;
+                    NEW.tiene_inconsistencia := TRUE;
+                    v_obs := format('Los días de obra no pueden ser negativos (%s).', NEW.dias_registro_obra);
+                ELSIF NEW.dias_registro_obra > 31 THEN
+                    NEW.tiene_inconsistencia := TRUE;
+                    v_obs := format('Los días de obra (%s) exceden el tope mensual de 31 días.', NEW.dias_registro_obra);
                 END IF;
             END IF;
 
@@ -1219,7 +1651,8 @@ WHERE NOT EXISTS (
 
                         IF v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL THEN
                             IF v_obra_start > v_month_end OR v_obra_end < v_month_start OR v_obra_start > v_obra_end THEN
-                                RAISE EXCEPTION 'La obra no tiene vigencia en el periodo %/%.', v_mes, v_anio;
+                                NEW.tiene_inconsistencia := TRUE;
+                                v_obs := COALESCE(v_obs || ' | ', '') || format('La obra no tiene vigencia en el periodo %s/%s.', v_mes, v_anio);
                             END IF;
                         END IF;
 
@@ -1297,29 +1730,31 @@ WHERE NOT EXISTS (
                         END IF;
 
                         IF (v_has_movements OR v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL) AND v_overlap_days = 0 THEN
-                            RAISE EXCEPTION 'No se puede asignar la obra: las fechas de la obra no coinciden con los periodos activos del trabajador en %/%.', v_mes, v_anio;
+                            NEW.tiene_inconsistencia := TRUE;
+                            v_obs := COALESCE(v_obs || ' | ', '') || format('Fechas de obra no coinciden con periodos activos del trabajador en %s/%s (vigencia: 0 días).', v_mes, v_anio);
                         END IF;
 
                         IF (v_has_movements OR v_obra_ini IS NOT NULL OR v_obra_fin IS NOT NULL) AND NEW.dias_registro_obra > v_overlap_days THEN
-                            RAISE EXCEPTION 'Los días de obra (%) exceden los días máximos permitidos para este periodo según sus movimientos y vigencia de obra (%).', NEW.dias_registro_obra, v_overlap_days;
+                            NEW.tiene_inconsistencia := TRUE;
+                            v_obs := COALESCE(v_obs || ' | ', '') || format('Días de obra (%s) exceden los días de vigencia de obra (%s).', NEW.dias_registro_obra, v_overlap_days);
                         END IF;
 
-                        -- Validar suma total de días entre todas las obras del empleado en este mes y que no se superpongan
+                        -- Validar suma total de días entre todas las obras del MISMO renglón de movimiento
                         DECLARE
                             v_other_days INT := 0;
                             r_other RECORD;
-                            v_oth_s DATE;
-                            v_oth_e DATE;
                         BEGIN
                             SELECT COALESCE(SUM(rdl_other.dias_registro_obra), 0) INTO v_other_days
                             FROM public.reportes_detalles_liquidaciones rdl_other
                             WHERE rdl_other.id_reporte_liquidacion = NEW.id_reporte_liquidacion
                               AND rdl_other.id != NEW.id
-                              AND rdl_other.id_registro_obra IS NOT NULL;
+                              AND rdl_other.id_registro_obra IS NOT NULL
+                              AND COALESCE(UPPER(TRIM(rdl_other.clave)), '') = COALESCE(UPPER(TRIM(NEW.clave)), '')
+                              AND rdl_other.fecha IS NOT DISTINCT FROM NEW.fecha;
 
-                            IF (v_other_days + NEW.dias_registro_obra) > NEW.dias THEN
-                                RAISE EXCEPTION 'La suma de días de obra (% + %) no puede superar los días de cédula del empleado (%).',
-                                    v_other_days, NEW.dias_registro_obra, NEW.dias;
+                            IF NEW.dias IS NOT NULL AND (v_other_days + NEW.dias_registro_obra) > NEW.dias THEN
+                                NEW.tiene_inconsistencia := TRUE;
+                                v_obs := COALESCE(v_obs || ' | ', '') || format('La suma de días de obra (%s + %s) supera los días de cédula del empleado (%s).', v_other_days, NEW.dias_registro_obra, NEW.dias);
                             END IF;
 
                             FOR r_other IN
@@ -1330,9 +1765,12 @@ WHERE NOT EXISTS (
                                   AND rdl_other.id != NEW.id
                                   AND rdl_other.id_registro_obra IS NOT NULL
                                   AND rdl_other.dias_registro_obra > 0
+                                  AND COALESCE(UPPER(TRIM(rdl_other.clave)), '') = COALESCE(UPPER(TRIM(NEW.clave)), '')
+                                  AND rdl_other.fecha IS NOT DISTINCT FROM NEW.fecha
                             LOOP
                                 IF r_other.id_registro_obra = NEW.id_registro_obra THEN
-                                    RAISE EXCEPTION 'El trabajador ya se encuentra vinculado a la obra % en este periodo.', r_other.numero;
+                                    NEW.tiene_inconsistencia := TRUE;
+                                    v_obs := COALESCE(v_obs || ' | ', '') || format('El trabajador ya se encuentra vinculado a la obra %s en este periodo.', r_other.numero);
                                 END IF;
                             END LOOP;
                         END;
@@ -1340,6 +1778,7 @@ WHERE NOT EXISTS (
                 END IF;
             END IF;
 
+            NEW.observacion_validacion := v_obs;
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;

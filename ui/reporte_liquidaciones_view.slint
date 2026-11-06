@@ -968,6 +968,328 @@ export component ReporteLiquidacionesView inherits Rectangle {
             }
         }
 
+        // Warning Banner Interactivo de Cédulas Faltantes en Periodos de Obra
+        if AppData.reporte_has_missing_cedulas_warning && AppData.reporte_inconsistencias_detalles.length > 0 : Rectangle {
+            background: warning_touch.has-hover ? #fef3c7 : #fffbeb;
+            border-width: 1.5px;
+            border-color: warning_touch.has-hover ? #d97706 : #f59e0b;
+            border-radius: 8px;
+            animate background { duration: 150ms; }
+            animate border-color { duration: 150ms; }
+
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+
+                // Cabecera interactiva del Warning (Clickeable para expandir/colapsar)
+                Rectangle {
+                    HorizontalLayout {
+                        padding: 12px;
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 12px;
+                        cross-axis-alignment: center;
+
+                        // Icono de Alerta
+                        Rectangle {
+                            width: 34px;
+                            height: 34px;
+                            border-radius: 17px;
+                            background: warning_touch.has-hover ? #fde68a : #fef3c7;
+                            border-width: 1px;
+                            border-color: #fcd34d;
+                            animate background { duration: 150ms; }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                cross-axis-alignment: center;
+                                Text {
+                                    text: "⚠️";
+                                    font-size: 16px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Texto principal y resumen
+                        VerticalLayout {
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                cross-axis-alignment: center;
+
+                                Text {
+                                    text: "Inconsistencia de Cédulas vs Periodos de Obra";
+                                    font-size: 13.5px;
+                                    font-weight: 800;
+                                    color: #92400e;
+                                    vertical-alignment: center;
+                                }
+
+                                // Pill badge con contador
+                                Rectangle {
+                                    height: 20px;
+                                    border-radius: 10px;
+                                    background: #fed7aa;
+                                    border-width: 1px;
+                                    border-color: #fdba74;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        alignment: center;
+                                        cross-axis-alignment: center;
+                                        Text {
+                                            text: AppData.reporte_inconsistencias_detalles.length + " faltante" + (AppData.reporte_inconsistencias_detalles.length > 1 ? "s" : "");
+                                            font-size: 10.5px;
+                                            font-weight: 800;
+                                            color: #9a3412;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: AppData.reporte_missing_cedulas_msg != "" ? AppData.reporte_missing_cedulas_msg : "Faltan cédulas de cuotas por ingresar en los periodos de obra. El reporte estará incompleto.";
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: #b45309;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // Botón / Indicador de Despliegue interactivo
+                        Rectangle {
+                            height: 30px;
+                            border-radius: 6px;
+                            background: warning_touch.has-hover ? #fde68a : #fef3c7;
+                            border-width: 1px;
+                            border-color: warning_touch.has-hover ? #d97706 : #fcd34d;
+                            animate background { duration: 150ms; }
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 6px;
+                                alignment: center;
+                                cross-axis-alignment: center;
+
+                                Text {
+                                    text: AppData.reporte_show_missing_cedulas_details ? "Ocultar detalle ▲" : "Ver periodos faltantes ▼";
+                                    font-size: 11.5px;
+                                    font-weight: 700;
+                                    color: #92400e;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    warning_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            AppData.reporte_show_missing_cedulas_details = !AppData.reporte_show_missing_cedulas_details;
+                        }
+                    }
+                }
+
+                // Panel Desplegable con Diagnóstico Detallado y Lista de Meses
+                if AppData.reporte_show_missing_cedulas_details : VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-bottom: 16px;
+                    padding-top: 4px;
+                    spacing: 12px;
+
+                    // Línea divisoria elegante
+                    Rectangle {
+                        height: 1px;
+                        background: #fcd34d;
+                    }
+
+                    // 1. Tarjeta con Explicación de la Causa / Diagnóstico IMSS/SIROC
+                    Rectangle {
+                        background: #fffbeb;
+                        border-width: 1px;
+                        border-color: #fde68a;
+                        border-radius: 6px;
+
+                        HorizontalLayout {
+                            padding: 12px;
+                            spacing: 10px;
+                            cross-axis-alignment: start;
+
+                            Text {
+                                text: "📋";
+                                font-size: 15px;
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+
+                                Text {
+                                    text: "Diagnóstico Normativo IMSS / SIROC:";
+                                    font-size: 11.5px;
+                                    font-weight: 800;
+                                    color: #78350f;
+                                }
+
+                                Text {
+                                    text: AppData.reporte_missing_cedulas_reason != "" ? AppData.reporte_missing_cedulas_reason : "Se detectaron obras activas en estos periodos, pero no se cargaron las cédulas de cuotas correspondientes al Registro Patronal.";
+                                    font-size: 11.5px;
+                                    color: #92400e;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Título de la Lista de Meses Faltantes
+                    HorizontalLayout {
+                        spacing: 8px;
+                        cross-axis-alignment: center;
+
+                        Text {
+                            text: "📅";
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "Periodos Requeridos Pendientes de Ingresar (" + AppData.reporte_inconsistencias_detalles.length + "):";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #78350f;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // 3. Lista visual scrollable de periodos faltantes con vinculación a ROs del usuario
+                    ScrollView {
+                        height: 250px;
+
+                        VerticalLayout {
+                            spacing: 6px;
+                            padding-right: 8px;
+
+                            for item[i] in AppData.reporte_inconsistencias_detalles : Rectangle {
+                                height: 36px;
+                                background: #ffffff;
+                                border-width: 1px;
+                                border-color: #fed7aa;
+                                border-radius: 6px;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 10px;
+                                    cross-axis-alignment: center;
+
+                                    // Índice numerado
+                                    Rectangle {
+                                        width: 22px;
+                                        height: 22px;
+                                        border-radius: 11px;
+                                        background: #ffedd5;
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            cross-axis-alignment: center;
+                                            Text {
+                                                text: (i + 1);
+                                                font-size: 10px;
+                                                font-weight: 800;
+                                                color: #c2410c;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Periodo faltante
+                                    Text {
+                                        text: item.periodo;
+                                        font-size: 12px;
+                                        font-weight: 800;
+                                        color: #c2410c;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Rectangle {
+                                        width: 1px;
+                                        height: 18px;
+                                        background: #fed7aa;
+                                    }
+
+                                    // Registro(s) de Obra asociados al periodo
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        horizontal-stretch: 1;
+                                        cross-axis-alignment: center;
+
+                                        Text {
+                                            text: "Obra" + (item.obras_count > 1 ? "s: " : ": ");
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #78350f;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Rectangle {
+                                            background: #fef3c7;
+                                            border-radius: 4px;
+                                            border-width: 1px;
+                                            border-color: #fde68a;
+
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                padding-top: 2px;
+                                                padding-bottom: 2px;
+                                                cross-axis-alignment: center;
+
+                                                Text {
+                                                    text: item.obras_vinculadas != "" ? item.obras_vinculadas : "Sin RO específico";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #92400e;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Badge de Estatus Pendiente
+                                    Rectangle {
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: #fef2f2;
+                                        border-width: 1px;
+                                        border-color: #fecaca;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            alignment: center;
+                                            cross-axis-alignment: center;
+                                            Text {
+                                                text: "Pendiente";
+                                                font-size: 10px;
+                                                font-weight: 700;
+                                                color: #dc2626;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 2. Tarjetas KPI
         HorizontalLayout {
             spacing: 12px;
@@ -1439,7 +1761,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                             Text { text: "✏️"; font-size: 12px; vertical-alignment: center; }
                             Text {
-                                text: AppData.reporte_selected_count > 0 ? "Modificar en Lote (" + AppData.reporte_selected_count + ")..." : "Modificar en Lote...";
+                                text: AppData.reporte_selected_count > 0 ? "Modificar por Lote (" + AppData.reporte_selected_count + ")..." : "Modificar por Lote...";
                                 font-size: 12px;
                                 font-weight: 700;
                                 color: #ffffff;
@@ -1484,6 +1806,39 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             mouse-cursor: pointer;
                             clicked => {
                                 AppLogic.reporte_request_confirm_igualar_dias();
+                            }
+                        }
+                    }
+
+                    // Botón Desvincular Obra (Solo si hay seleccionados)
+                    if AppData.reporte_selected_count > 0 : Rectangle {
+                        height: 34px;
+                        border-radius: 5px;
+                        background: btn_batch_desvincular.has-hover ? #fef2f2 : #ffffff;
+                        border-width: 1px;
+                        border-color: #fca5a5;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 10px;
+                            spacing: 5px;
+                            alignment: center;
+                            cross-axis-alignment: center;
+
+                            Text { text: "🔗❌"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Desvincular";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: #dc2626;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_batch_desvincular := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppLogic.reporte_batch_desvincular_obra();
                             }
                         }
                     }
@@ -1595,7 +1950,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
         }
 
         // 5. Tabla Principal con Encabezados Fijos en Scroll Vertical y sincronizados en Horizontal
-        Rectangle {
+        tabla_liquidaciones := Rectangle {
             height: 580px;
             horizontal-stretch: 1;
             min-width: 0px;
@@ -1697,11 +2052,11 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     horizontal-stretch: 1;
                     min-width: 0px;
                     content-width: 3405px;
-                    content-height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + (AppData.reporte_expanded_row_id != "" ? 75px : 0px) + 20px) : 180px;
+                    content-height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + (AppData.reporte_expanded_row_id != "" ? 100px : 0px) + 20px) : 180px;
 
                     Rectangle {
                         width: 3405px;
-                        height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + (AppData.reporte_expanded_row_id != "" ? 75px : 0px) + 20px) : 180px;
+                        height: AppData.reporte_liquidaciones_list.length > 0 ? ((AppData.reporte_liquidaciones_list.length * 40px) + (AppData.reporte_expanded_row_id != "" ? 100px : 0px) + 20px) : 180px;
 
                         VerticalLayout {
                             alignment: start;
@@ -1714,9 +2069,12 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                                 Rectangle {
                                     height: 40px;
-                                    background: item.selected ? #eff6ff : (row_touch.has-hover ? (item.has_incidencias ? #fef3c7 : (item.is_assigned ? item.row_hover_color : #f8fafc)) : (item.has_incidencias ? #fffbeb : (item.is_assigned ? item.row_bg_color : (Math.mod(idx, 2) == 0 ? #ffffff : #fbfcfe))));
+                                    background: item.selected ? #eff6ff : (
+                                        item.tiene_inconsistencia ? (row_touch.has-hover ? #fecaca : #fee2e2) :
+                                        (row_touch.has-hover ? (item.has_incidencias ? #fef3c7 : (item.is_assigned ? item.row_hover_color : #f8fafc)) : (item.has_incidencias ? #fffbeb : (item.is_assigned ? item.row_bg_color : (Math.mod(idx, 2) == 0 ? #ffffff : #fbfcfe))))
+                                    );
                                     border-width: 1px;
-                                    border-color: item.has_incidencias ? #fcd34d : (item.is_assigned ? item.row_hover_color : #f1f5f9);
+                                    border-color: item.tiene_inconsistencia ? #f87171 : (item.has_incidencias ? #fcd34d : (item.is_assigned ? item.row_hover_color : #f1f5f9));
 
                                     row_touch := TouchArea {
                                         clicked => {
@@ -1724,13 +2082,13 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                         }
                                     }
 
-                            // Barra lateral de color distintivo del Registro de Obra o Alerta de Incidencia
-                            if item.has_incidencias || item.is_assigned : Rectangle {
+                            // Barra lateral de color distintivo del Registro de Obra o Alerta de Incidencia / Inconsistencia
+                            if item.tiene_inconsistencia || item.has_incidencias || item.is_assigned : Rectangle {
                                 x: 0px;
                                 y: 0px;
                                 width: 4px;
                                 height: parent.height;
-                                background: item.has_incidencias ? #f59e0b : item.row_accent_color;
+                                background: item.tiene_inconsistencia ? #ef4444 : (item.has_incidencias ? #f59e0b : item.row_accent_color);
                             }
 
                             HorizontalLayout {
@@ -1825,8 +2183,27 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             single-line: true;
                                             font-size: 12px;
                                             font-weight: 600;
-                                            color: #0f172a;
+                                            color: item.tiene_inconsistencia ? #991b1b : #0f172a;
                                             vertical-alignment: center;
+                                        }
+                                        if item.tiene_inconsistencia : Rectangle {
+                                            height: 18px;
+                                            border-radius: 3px;
+                                            background: #fee2e2;
+                                            border-width: 1px;
+                                            border-color: #ef4444;
+                                            HorizontalLayout {
+                                                padding-left: 5px;
+                                                padding-right: 5px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: "⚠️ Discrepancia";
+                                                    font-size: 10px;
+                                                    font-weight: 800;
+                                                    color: #b91c1c;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
                                         }
                                         if item.has_multi_obra : Rectangle {
                                             height: 18px;
@@ -1885,9 +2262,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     width: 210px;
                                     height: 28px;
                                     border-radius: 5px;
-                                    background: item.is_baja ? #f5f5f5 : (item.dias_mismatch ? #fff7ed : (item.is_assigned ? #f0fdf4 : #fef2f2));
+                                    background: item.is_baja ? #f5f5f5 : (item.tiene_inconsistencia ? #fee2e2 : (item.dias_mismatch ? #fff7ed : (item.is_assigned ? #f0fdf4 : #fef2f2)));
                                     border-width: 1px;
-                                    border-color: item.is_baja ? #e0e0e0 : (item.dias_mismatch ? #fdba74 : (item.is_assigned ? #bbf7d0 : #fecaca));
+                                    border-color: item.is_baja ? #e0e0e0 : (item.tiene_inconsistencia ? #f87171 : (item.dias_mismatch ? #fdba74 : (item.is_assigned ? #bbf7d0 : #fecaca)));
                                     y: (parent.height - self.height) / 2;
 
                                     HorizontalLayout {
@@ -1920,15 +2297,15 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             text: item.is_baja ? ("🔒 " + item.obra_label) : item.obra_label;
                                             font-size: 12px;
                                             font-weight: 700;
-                                            color: item.is_baja ? #9e9e9e : (item.dias_mismatch ? #c2410c : (item.is_assigned ? #166534 : #b91c1c));
+                                            color: item.is_baja ? #9e9e9e : (item.tiene_inconsistencia ? #991b1b : (item.dias_mismatch ? #c2410c : (item.is_assigned ? #166534 : #b91c1c)));
                                             vertical-alignment: center;
                                             overflow: elide;
                                             horizontal-stretch: 1;
                                         }
-                                        if item.dias_mismatch && !item.is_baja : Text {
+                                        if (item.tiene_inconsistencia || item.dias_mismatch) && !item.is_baja : Text {
                                             text: "⚠";
                                             font-size: 12px;
-                                            color: #ea580c;
+                                            color: item.tiene_inconsistencia ? #dc2626 : #ea580c;
                                             vertical-alignment: center;
                                         }
                                         if !item.is_baja : Text { text: "▾"; font-size: 11px; color: item.is_assigned ? #16a34a : #dc2626; vertical-alignment: center; }
@@ -1974,16 +2351,16 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     width: 65px;
                                     height: 26px;
                                     border-radius: 4px;
-                                    background: item.is_baja ? #f5f5f5 : (item.dias_mismatch ? #fff7ed : (item.is_assigned ? #eff6ff : #fff1f2));
+                                    background: item.is_baja ? #f5f5f5 : (item.tiene_inconsistencia ? #fee2e2 : (item.dias_mismatch ? #fff7ed : (item.is_assigned ? #eff6ff : #fff1f2)));
                                     border-width: 1px;
-                                    border-color: item.is_baja ? #e0e0e0 : (item.dias_mismatch ? #ea580c : (item.is_assigned ? #93c5fd : #fecdd3));
+                                    border-color: item.is_baja ? #e0e0e0 : (item.tiene_inconsistencia ? #ef4444 : (item.dias_mismatch ? #ea580c : (item.is_assigned ? #93c5fd : #fecdd3)));
                                     y: (parent.height - self.height) / 2;
 
                                     Text {
                                         text: item.is_baja ? "🔒" : (item.is_assigned ? item.dias_obra : "-");
                                         font-size: 12.5px;
                                         font-weight: 800;
-                                        color: item.is_baja ? #9e9e9e : (item.dias_mismatch ? #c2410c : (item.is_assigned ? #1d4ed8 : #e11d48));
+                                        color: item.is_baja ? #9e9e9e : (item.tiene_inconsistencia ? #b91c1c : (item.dias_mismatch ? #c2410c : (item.is_assigned ? #1d4ed8 : #e11d48)));
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -2268,10 +2645,10 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         }
 
                         if item.is_expanded : Rectangle {
-                                height: 75px;
-                                background: #f8fafc;
+                                height: (item.tiene_inconsistencia && item.observacion_validacion != "") ? 100px : 75px;
+                                background: item.tiene_inconsistencia ? #fef2f2 : #f8fafc;
                                 border-width: 1px;
-                                border-color: #cbd5e1;
+                                border-color: item.tiene_inconsistencia ? #fca5a5 : #cbd5e1;
                                 clip: true;
 
                                 HorizontalLayout {
@@ -2287,9 +2664,9 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                         width: 36px;
                                         height: 36px;
                                         border-radius: 18px;
-                                        background: #e0f2fe;
+                                        background: item.tiene_inconsistencia ? #fee2e2 : #e0f2fe;
                                         Text {
-                                            text: "📋";
+                                            text: item.tiene_inconsistencia ? "⚠️" : "📋";
                                             font-size: 18px;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -2302,16 +2679,34 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                         HorizontalLayout {
                                             spacing: 8px;
                                             Text {
-                                                text: "Historial de Movimientos y Salarios en el Periodo:";
+                                                text: item.tiene_inconsistencia ? "Inconsistencia de Negocio Detectada:" : "Historial de Movimientos y Salarios en el Periodo:";
                                                 font-size: 12px;
                                                 font-weight: 800;
-                                                color: #1e3a8a;
+                                                color: item.tiene_inconsistencia ? #991b1b : #1e3a8a;
                                             }
                                             Text {
                                                 text: item.nombre_trabajador + " — NSS: " + item.nss + (item.has_multi_obra ? (" [" + item.multi_obra_badge + "]") : "");
                                                 font-size: 12px;
                                                 font-weight: 700;
                                                 color: #475569;
+                                            }
+                                        }
+                                        if item.tiene_inconsistencia && item.observacion_validacion != "" : Rectangle {
+                                            background: #fee2e2;
+                                            border-radius: 3px;
+                                            border-width: 1px;
+                                            border-color: #fca5a5;
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                padding-top: 2px;
+                                                padding-bottom: 2px;
+                                                Text {
+                                                    text: "🚨 " + item.observacion_validacion;
+                                                    font-size: 11.5px;
+                                                    font-weight: 700;
+                                                    color: #b91c1c;
+                                                }
                                             }
                                         }
                                         Text {
@@ -2818,16 +3213,19 @@ export component ReporteLiquidacionesView inherits Rectangle {
     } // Fin del HorizontalLayout contenedor de Tabla y Right Side Drawer
 
         // 7. Análisis de Guarderías (Tope 18% por Registro de Obra del Usuario)
-        Rectangle {
+        contenedor_analisis_guarderias := Rectangle {
+            height: tabla_liquidaciones.height * 1.15;
             border-radius: 8px;
             background: #ffffff;
             border-width: 1px;
             border-color: #cbd5e1;
+            clip: true;
 
             VerticalLayout {
                 padding: 14px;
                 spacing: 12px;
 
+                // Cabecera Fija del Análisis
                 HorizontalLayout {
                     alignment: space-between;
                     cross-axis-alignment: center;
@@ -2854,45 +3252,56 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
-                if AppData.reporte_guarderias_obras.length == 0 : Rectangle {
-                    height: 52px;
-                    border-radius: 6px;
-                    background: #f8fafc;
-                    border-width: 1px;
-                    border-color: #e2e8f0;
+                Rectangle { height: 1px; background: #e2e8f0; }
 
-                    HorizontalLayout {
-                        alignment: center;
-                        cross-axis-alignment: center;
-                        spacing: 8px;
-                        Text { text: "ℹ️"; font-size: 13px; vertical-alignment: center; }
-                        Text {
-                            text: "No se encontraron registros de obras creados por el usuario con vinculaciones para calcular el análisis del 18% y guarderías.";
-                            font-size: 12px;
-                            font-weight: 600;
-                            color: #64748b;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
+                // ScrollView vertical exclusivo para el contenido del análisis
+                ScrollView {
+                    vertical-stretch: 1;
 
-                if AppData.reporte_guarderias_obras.length > 0 : VerticalLayout {
-                    spacing: 12px;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 12px;
+                        padding-right: 6px;
 
-                    for g_item in AppData.reporte_guarderias_obras : Rectangle {
-                        border-radius: 8px;
-                        background: #ffffff;
-                        border-width: 1px;
-                        border-color: g_item.supera_18 ? #facc15 : #e2e8f0;
+                        if AppData.reporte_guarderias_obras.length == 0 : Rectangle {
+                            height: 52px;
+                            border-radius: 6px;
+                            background: #f8fafc;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
 
-                        VerticalLayout {
-                            padding: 12px;
-                            spacing: 10px;
-
-                            // Encabezado de la Obra y Alerta si supera el 18%
                             HorizontalLayout {
-                                alignment: space-between;
-                                spacing: 12px;
+                                alignment: center;
+                                cross-axis-alignment: center;
+                                spacing: 8px;
+                                Text { text: "ℹ️"; font-size: 13px; vertical-alignment: center; }
+                                Text {
+                                    text: "No se encontraron registros de obras creados por el usuario con vinculaciones para calcular el análisis del 18% y guarderías.";
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: #64748b;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        for g_item in AppData.reporte_guarderias_obras : Rectangle {
+                            height: 140px;
+                            border-radius: 8px;
+                            background: #ffffff;
+                            border-width: 1px;
+                            border-color: g_item.supera_18 ? #facc15 : #e2e8f0;
+
+                            VerticalLayout {
+                                alignment: start;
+                                padding: 12px;
+                                spacing: 10px;
+
+                                // Encabezado de la Obra y Alerta si supera el 18%
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    cross-axis-alignment: center;
+                                    spacing: 12px;
 
                                 VerticalLayout {
                                     spacing: 3px;
@@ -3073,6 +3482,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                 }
             }
         }
+    }
     }
     }
 

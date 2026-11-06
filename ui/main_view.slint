@@ -356,4 +356,159 @@ export component MainWindow inherits Window {
 
     // MODAL DE ACTUALIZACIÓN DE SOFTWARE
     if AppData.show_update_modal : UpdateModal {}
+
+    // MODAL GLOBAL DE ERROR DEL SISTEMA Y ROLLBACK ATÓMICO (PostgreSQL + rustfs)
+    if AppData.show_system_error_modal : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #0f172a99;
+        z: 9999;
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+
+        Rectangle {
+            width: Math.min(parent.width - 48px, 600px);
+            height: sys_err_layout.preferred-height + 44px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #ffffff;
+            border-radius: 14px;
+            border-width: 1.5px;
+            border-color: #fca5a5;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: #00000066;
+            drop-shadow-offset-y: 8px;
+
+            sys_err_layout := VerticalLayout {
+                padding: 22px;
+                spacing: 16px;
+
+                // Encabezado de Alerta
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 20px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+
+                        Text {
+                            text: "⚠️";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 3px;
+                        alignment: center;
+
+                        Text {
+                            text: AppData.system_error_modal_title != "" ? AppData.system_error_modal_title : "Error al Guardar la Información";
+                            font-size: 16px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+
+                        Text {
+                            text: "Se revirtieron automáticamente los cambios en PostgreSQL y rustfs para proteger la integridad de los datos.";
+                            font-size: 11.5px;
+                            font-weight: 600;
+                            color: #64748b;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: #f1f5f9;
+                }
+
+                // Cuerpo del mensaje descriptivo requerido
+                Text {
+                    text: "No se pudo guardar la información debido a un error del sistema:";
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: #1e293b;
+                    wrap: word-wrap;
+                }
+
+                // Recuadro con el detalle técnico extraído de PostgreSQL / rustfs
+                Rectangle {
+                    background: #fef2f2;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #fecaca;
+                    height: Math.min(200px, Math.max(56px, err_detail_txt.preferred-height + 24px));
+
+                    Flickable {
+                        width: 100%;
+                        height: 100%;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            alignment: start;
+
+                            err_detail_txt := Text {
+                                text: AppData.system_error_modal_detail;
+                                font-size: 12px;
+                                font-family: "monospace";
+                                font-weight: 600;
+                                color: #7f1d1d;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: "Si el error persiste, por favor contacte al administrador de la aplicación para corregirlo.";
+                    font-size: 12.5px;
+                    font-weight: 600;
+                    color: #475569;
+                    wrap: word-wrap;
+                }
+
+                // Botón de confirmación ("Entendido" / "Cerrar")
+                HorizontalLayout {
+                    alignment: end;
+                    padding-top: 4px;
+
+                    Rectangle {
+                        width: 140px;
+                        height: 38px;
+                        border-radius: 8px;
+                        background: btn_sys_err_ok.has-hover ? #b91c1c : #dc2626;
+
+                        Text {
+                            text: "Entendido";
+                            font-size: 13px;
+                            font-weight: 800;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        btn_sys_err_ok := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppData.show_system_error_modal = false;
+                                AppLogic.close_system_error_modal();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

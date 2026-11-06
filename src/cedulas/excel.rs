@@ -1257,63 +1257,76 @@ mod tests {
         biz1.registro_patronal = Some("A36-11111-10-1".to_string());
 
         // Emp 1: Juan Perez in Enero (2 DataEmployee records - must be deduplicated to 1 worker)
-        let mut emp1 = Employee::default();
-        emp1.no_seguro_social = Some("12345678901".to_string());
-        emp1.nombre = Some("JUAN PEREZ".to_string());
-        emp1.anio_periodo = Some("2025".to_string());
-        emp1.mes_periodo = Some("01".to_string());
-        emp1.registro_obras = vec![RegistroObra::new("OBRA-NORTE", "31")];
+        let de1_1 = DataEmployee {
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("01".to_string()),
+            dias: Some(15.0),
+            patronal: Some(800.0),
+            obrera: Some(200.0),
+            subtotal: Some(1000.0),
+            ..Default::default()
+        };
 
-        let mut de1_1 = DataEmployee::default();
-        de1_1.anio_periodo = Some("2025".to_string());
-        de1_1.mes_periodo = Some("01".to_string());
-        de1_1.dias = Some(15.0);
-        de1_1.patronal = Some(800.0);
-        de1_1.obrera = Some(200.0);
-        de1_1.subtotal = Some(1000.0);
+        let de1_2 = DataEmployee {
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("01".to_string()),
+            dias: Some(16.0),
+            patronal: Some(900.0),
+            obrera: Some(200.0),
+            subtotal: Some(1100.0),
+            ..Default::default()
+        };
 
-        let mut de1_2 = DataEmployee::default();
-        de1_2.anio_periodo = Some("2025".to_string());
-        de1_2.mes_periodo = Some("01".to_string());
-        de1_2.dias = Some(16.0);
-        de1_2.patronal = Some(900.0);
-        de1_2.obrera = Some(200.0);
-        de1_2.subtotal = Some(1100.0);
-
-        emp1.data_employee = vec![de1_1, de1_2];
+        let emp1 = Employee {
+            no_seguro_social: Some("12345678901".to_string()),
+            nombre: Some("JUAN PEREZ".to_string()),
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("01".to_string()),
+            registro_obras: vec![RegistroObra::new("OBRA-NORTE", "31")],
+            data_employee: vec![de1_1, de1_2],
+            ..Default::default()
+        };
 
         // Emp 2: Maria Lopez in Enero (Sin obra)
-        let mut emp2 = Employee::default();
-        emp2.no_seguro_social = Some("98765432109".to_string());
-        emp2.nombre = Some("MARIA LOPEZ".to_string());
-        emp2.anio_periodo = Some("2025".to_string());
-        emp2.mes_periodo = Some("01".to_string());
+        let de2 = DataEmployee {
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("01".to_string()),
+            dias: Some(31.0),
+            patronal: Some(2000.0),
+            obrera: Some(500.0),
+            subtotal: Some(2500.0),
+            ..Default::default()
+        };
 
-        let mut de2 = DataEmployee::default();
-        de2.anio_periodo = Some("2025".to_string());
-        de2.mes_periodo = Some("01".to_string());
-        de2.dias = Some(31.0);
-        de2.patronal = Some(2000.0);
-        de2.obrera = Some(500.0);
-        de2.subtotal = Some(2500.0);
-        emp2.data_employee = vec![de2];
+        let emp2 = Employee {
+            no_seguro_social: Some("98765432109".to_string()),
+            nombre: Some("MARIA LOPEZ".to_string()),
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("01".to_string()),
+            data_employee: vec![de2],
+            ..Default::default()
+        };
 
         // Emp 3: Juan Perez in Febrero (OBRA-SUR)
-        let mut emp3 = Employee::default();
-        emp3.no_seguro_social = Some("12345678901".to_string());
-        emp3.nombre = Some("JUAN PEREZ".to_string());
-        emp3.anio_periodo = Some("2025".to_string());
-        emp3.mes_periodo = Some("02".to_string());
-        emp3.registro_obras = vec![RegistroObra::new("OBRA-SUR", "28")];
+        let de3 = DataEmployee {
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("02".to_string()),
+            dias: Some(28.0),
+            patronal: Some(1600.0),
+            obrera: Some(400.0),
+            subtotal: Some(2000.0),
+            ..Default::default()
+        };
 
-        let mut de3 = DataEmployee::default();
-        de3.anio_periodo = Some("2025".to_string());
-        de3.mes_periodo = Some("02".to_string());
-        de3.dias = Some(28.0);
-        de3.patronal = Some(1600.0);
-        de3.obrera = Some(400.0);
-        de3.subtotal = Some(2000.0);
-        emp3.data_employee = vec![de3];
+        let emp3 = Employee {
+            no_seguro_social: Some("12345678901".to_string()),
+            nombre: Some("JUAN PEREZ".to_string()),
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("02".to_string()),
+            registro_obras: vec![RegistroObra::new("OBRA-SUR", "28")],
+            data_employee: vec![de3],
+            ..Default::default()
+        };
 
         biz1.employees = vec![emp1, emp2, emp3];
 
@@ -1322,24 +1335,28 @@ mod tests {
         biz2.razon_social = Some("INGENIERIA BETA SA DE CV".to_string());
         biz2.registro_patronal = Some("B50-22222-10-2".to_string());
 
-        let mut emp4 = Employee::default();
-        emp4.no_seguro_social = Some("55555555555".to_string());
-        emp4.nombre = Some("CARLOS GOMEZ".to_string());
-        emp4.anio_periodo = Some("2025".to_string());
-        emp4.mes_periodo = Some("01".to_string());
-        emp4.registro_obras = vec![
-            RegistroObra::new("OBRA-NORTE", "15"),
-            RegistroObra::new("OBRA-CENTRO", "16"),
-        ];
+        let de4 = DataEmployee {
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("01".to_string()),
+            dias: Some(31.0),
+            patronal: Some(2400.0),
+            obrera: Some(600.0),
+            subtotal: Some(3000.0),
+            ..Default::default()
+        };
 
-        let mut de4 = DataEmployee::default();
-        de4.anio_periodo = Some("2025".to_string());
-        de4.mes_periodo = Some("01".to_string());
-        de4.dias = Some(31.0);
-        de4.patronal = Some(2400.0);
-        de4.obrera = Some(600.0);
-        de4.subtotal = Some(3000.0);
-        emp4.data_employee = vec![de4];
+        let emp4 = Employee {
+            no_seguro_social: Some("55555555555".to_string()),
+            nombre: Some("CARLOS GOMEZ".to_string()),
+            anio_periodo: Some("2025".to_string()),
+            mes_periodo: Some("01".to_string()),
+            registro_obras: vec![
+                RegistroObra::new("OBRA-NORTE", "15"),
+                RegistroObra::new("OBRA-CENTRO", "16"),
+            ],
+            data_employee: vec![de4],
+            ..Default::default()
+        };
 
         biz2.employees = vec![emp4];
 
@@ -1387,17 +1404,20 @@ mod tests {
         biz.razon_social = Some("EMPRESA PRUEBA SA DE CV".to_string());
         biz.registro_patronal = Some("A1234567890".to_string());
 
-        let mut emp = Employee::default();
-        emp.no_seguro_social = Some("11111111111".to_string());
-        emp.anio_periodo = Some("2026".to_string());
-        emp.mes_periodo = Some("01".to_string());
-
-        let mut de = DataEmployee::default();
-        de.anio_periodo = Some("2026".to_string());
-        de.mes_periodo = Some("01".to_string());
-        de.dias = Some(30.0);
-        de.subtotal = Some(5000.0);
-        emp.data_employee = vec![de];
+        let de = DataEmployee {
+            anio_periodo: Some("2026".to_string()),
+            mes_periodo: Some("01".to_string()),
+            dias: Some(30.0),
+            subtotal: Some(5000.0),
+            ..Default::default()
+        };
+        let emp = Employee {
+            no_seguro_social: Some("11111111111".to_string()),
+            anio_periodo: Some("2026".to_string()),
+            mes_periodo: Some("01".to_string()),
+            data_employee: vec![de],
+            ..Default::default()
+        };
         biz.employees = vec![emp];
 
         let sheets = vec![("empresa_A12".to_string(), biz)];
