@@ -3583,34 +3583,61 @@ pub fn export_reporte_liquidaciones_to_excel(
 
     let mut workbook = Workbook::new();
 
+    let meta = header_meta.cloned().unwrap_or_else(|| {
+        ReporteFinalHeaderMeta {
+            delegacion: "COAHUILA".to_string(),
+            subdelegacion: "SALTILLO".to_string(),
+            cliente_nombre: cliente_nombre.to_string(),
+            rp_registro: rp_registro.to_string(),
+            rfc: "GON2110075C9".to_string(),
+            periodo_obra: "15/04/2026 AL 30/06/2026".to_string(),
+            representante_legal: "ARTURO CARRILLO DOMINGUEZ".to_string(),
+            revision_folio: revision_folio.to_string(),
+        }
+    });
+
+    let delegacion = if meta.delegacion.trim().is_empty() { "COAHUILA" } else { meta.delegacion.trim() };
+    let subdelegacion = if meta.subdelegacion.trim().is_empty() { "SALTILLO" } else { meta.subdelegacion.trim() };
+    let emp_nombre = if meta.cliente_nombre.trim().is_empty() { cliente_nombre } else { meta.cliente_nombre.trim() };
+    let rp_reg = if meta.rp_registro.trim().is_empty() { rp_registro } else { meta.rp_registro.trim() };
+    let rfc_val = if meta.rfc.trim().is_empty() { "GON2110075C9" } else { meta.rfc.trim() };
+    let per_obra = if meta.periodo_obra.trim().is_empty() { "15/04/2026 AL 30/06/2026" } else { meta.periodo_obra.trim() };
+    let rep_legal = if meta.representante_legal.trim().is_empty() { "ARTURO CARRILLO DOMINGUEZ" } else { meta.representante_legal.trim() };
+    let fol_rev = if meta.revision_folio.trim().is_empty() { revision_folio } else { meta.revision_folio.trim() };
+
+    // Configuración oficial de encabezados y pies de página para impresión en Excel:
+    // Superior izquierdo: Razón Social
+    // Superior derecho: Folio de la Revisión
+    // Inferior izquierdo: Representante de la empresa
+    // Inferior derecho: Número de páginas (Página &P de &N)
+    let clean_rz = if emp_nombre.chars().count() > 80 {
+        emp_nombre.chars().take(80).collect::<String>()
+    } else {
+        emp_nombre.to_string()
+    };
+    let clean_fol = if fol_rev.chars().count() > 40 {
+        fol_rev.chars().take(40).collect::<String>()
+    } else {
+        fol_rev.to_string()
+    };
+    let clean_rep = if rep_legal.chars().count() > 80 {
+        rep_legal.chars().take(80).collect::<String>()
+    } else {
+        rep_legal.to_string()
+    };
+
+    let print_header_str = format!("&L{}&R{}", clean_rz, clean_fol);
+    let print_footer_str = format!("&L{}&RPágina &P de &N", clean_rep);
+
     // =========================================================================
     // SHEET 0: Reporte Final (Estilos oficiales aplicados a datos exportados)
     // =========================================================================
     {
         let ws_final = workbook.add_worksheet();
         ws_final.set_name("Reporte Final").map_err(|e| e.to_string())?;
-
-        let meta = header_meta.cloned().unwrap_or_else(|| {
-            ReporteFinalHeaderMeta {
-                delegacion: "COAHUILA".to_string(),
-                subdelegacion: "SALTILLO".to_string(),
-                cliente_nombre: cliente_nombre.to_string(),
-                rp_registro: rp_registro.to_string(),
-                rfc: "GON2110075C9".to_string(),
-                periodo_obra: "15/04/2026 AL 30/06/2026".to_string(),
-                representante_legal: "ARTURO CARRILLO DOMINGUEZ".to_string(),
-                revision_folio: revision_folio.to_string(),
-            }
-        });
-
-        let delegacion = if meta.delegacion.trim().is_empty() { "COAHUILA" } else { meta.delegacion.trim() };
-        let subdelegacion = if meta.subdelegacion.trim().is_empty() { "SALTILLO" } else { meta.subdelegacion.trim() };
-        let emp_nombre = if meta.cliente_nombre.trim().is_empty() { cliente_nombre } else { meta.cliente_nombre.trim() };
-        let rp_reg = if meta.rp_registro.trim().is_empty() { rp_registro } else { meta.rp_registro.trim() };
-        let rfc_val = if meta.rfc.trim().is_empty() { "GON2110075C9" } else { meta.rfc.trim() };
-        let per_obra = if meta.periodo_obra.trim().is_empty() { "15/04/2026 AL 30/06/2026" } else { meta.periodo_obra.trim() };
-        let rep_legal = if meta.representante_legal.trim().is_empty() { "ARTURO CARRILLO DOMINGUEZ" } else { meta.representante_legal.trim() };
-        let fol_rev = if meta.revision_folio.trim().is_empty() { revision_folio } else { meta.revision_folio.trim() };
+        ws_final.set_header(&print_header_str);
+        ws_final.set_footer(&print_footer_str);
+        ws_final.set_header_footer_align_with_page(true);
 
         // Anchos de columna exactos para los 19 campos
         let col_widths: [u16; 19] = [
@@ -4022,6 +4049,9 @@ pub fn export_reporte_liquidaciones_to_excel(
     // =========================================================================
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("Prorrateo por Obra").map_err(|e| e.to_string())?;
+    worksheet.set_header(&print_header_str);
+    worksheet.set_footer(&print_footer_str);
+    worksheet.set_header_footer_align_with_page(true);
 
     // Formatos generales
     let title_format = Format::new()
@@ -4603,6 +4633,9 @@ pub fn export_reporte_liquidaciones_to_excel(
     {
         let ws_emp_obra = workbook.add_worksheet();
         ws_emp_obra.set_name("Totales por Empleado y Obra").map_err(|e| e.to_string())?;
+        ws_emp_obra.set_header(&print_header_str);
+        ws_emp_obra.set_footer(&print_footer_str);
+        ws_emp_obra.set_header_footer_align_with_page(true);
 
         // Encabezado del Reporte
         ws_emp_obra.write_string_with_format(
@@ -4880,6 +4913,9 @@ pub fn export_reporte_liquidaciones_to_excel(
     {
         let ws_emp = workbook.add_worksheet();
         ws_emp.set_name("Totales por Empleado").map_err(|e| e.to_string())?;
+        ws_emp.set_header(&print_header_str);
+        ws_emp.set_footer(&print_footer_str);
+        ws_emp.set_header_footer_align_with_page(true);
 
         // Encabezado del Reporte
         ws_emp.write_string_with_format(
@@ -5161,6 +5197,9 @@ pub fn export_reporte_liquidaciones_to_excel(
     if !guarderias_kpis.is_empty() {
         let ws_guard = workbook.add_worksheet();
         ws_guard.set_name("Análisis de Guarderías (18%)").map_err(|e| e.to_string())?;
+        ws_guard.set_header(&print_header_str);
+        ws_guard.set_footer(&print_footer_str);
+        ws_guard.set_header_footer_align_with_page(true);
 
         ws_guard.write_string_with_format(
             0,

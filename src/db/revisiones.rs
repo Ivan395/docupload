@@ -502,26 +502,14 @@ pub fn delete_revision(client: &mut Client, id: &str) -> Result<(), String> {
         .transaction()
         .map_err(|e| format!("Error iniciando transacción: {}", e))?;
 
-    // 1. Eliminar CFDIs vinculados a nóminas de esta revisión
-    let delete_cfdis_query = r#"
-        DELETE FROM public.cfdis
-        WHERE id IN (
-            SELECT id_cfdi
-            FROM public.nominas
-            WHERE id_revision = $1
-        );
-    "#;
-    tx.execute(delete_cfdis_query, &[&rev_uuid])
-        .map_err(|e| {
-            crate::app_logger::log_db_simple_error("public.cfdis", "DELETE", &e.to_string());
-            format!("Error eliminando comprobantes fiscales de la revisión: {}", e)
-        })?;
-    crate::app_logger::log_db_write(
-        "public.cfdis",
-        "DELETE",
-        &format!("id_revision={}", rev_uuid),
-        delete_cfdis_query,
-    );
+    // 1. Desvincular nóminas maestras de esta revisión (las nóminas y sus CFDIs pertenecen al registro patronal y persisten)
+    tx.execute(
+        "UPDATE public.nominas SET id_revision = NULL WHERE id_revision = $1",
+        &[&rev_uuid],
+    ).map_err(|e| {
+        crate::app_logger::log_db_simple_error("public.nominas", "UPDATE", &e.to_string());
+        format!("Error al desvincular nóminas de la revisión: {}", e)
+    })?;
 
     // 2. Eliminar la revisión en sí (por ON DELETE CASCADE se eliminan liquidaciones, registros_obras, nominas, etc.)
     tx.execute("DELETE FROM public.revisiones WHERE id = $1", &[&rev_uuid])

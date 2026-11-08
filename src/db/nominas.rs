@@ -124,7 +124,7 @@ fn save_single_nomina_tx(
     tx: &mut Transaction,
     emp: &Employee,
     id_cliente: Uuid,
-    _id_registro_patronal: Uuid,
+    id_registro_patronal: Uuid,
     id_revision: Uuid,
     tipo_concepto_cache: &HashMap<String, Uuid>,
     conceptos_cache: &Mutex<HashMap<(Uuid, String), Uuid>>,
@@ -478,7 +478,7 @@ fn save_single_nomina_tx(
     tx.execute(
         r#"
         INSERT INTO public.nominas (
-            id, id_cfdi, id_revision, id_empleado, version_nomina, tipo_nomina, fecha_pago,
+            id, id_cfdi, id_registro_patronal, id_revision, id_empleado, version_nomina, tipo_nomina, fecha_pago,
             fecha_inicial_pago, fecha_final_pago, num_dias_pagados, total_sueldos, total_gravado,
             total_exento, total_otras_deducciones, total_impuestos_retenidos,
             salario_base_cotizacion_aportacion, salario_diario_integrado, salario_diario_calculado,
@@ -487,12 +487,13 @@ fn save_single_nomina_tx(
             timbre_fecha, nombre_archivo
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-            $21, $22, $23, $24, $25, $26
+            $21, $22, $23, $24, $25, $26, $27
         )
         "#,
         &[
             &id_nomina,
             &id_cfdi,
+            &id_registro_patronal,
             &id_revision,
             &id_empleado,
             &truncate_str(emp.nomina.version_nomina.as_deref(), 5),
@@ -526,7 +527,7 @@ fn save_single_nomina_tx(
     tx.execute(
         r#"
         INSERT INTO public.reportes_nominas (
-            id, id_nomina, id_revision, id_empleado, version_nomina, tipo_nomina, fecha_pago,
+            id, id_nomina, id_registro_patronal, id_revision, id_empleado, version_nomina, tipo_nomina, fecha_pago,
             fecha_inicial_pago, fecha_final_pago, num_dias_pagados, total_sueldos, total_gravado,
             total_exento, total_otras_deducciones, total_impuestos_retenidos,
             salario_base_cotizacion_aportacion, salario_diario_integrado, salario_diario_calculado,
@@ -535,12 +536,13 @@ fn save_single_nomina_tx(
             timbre_fecha, nombre_archivo
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-            $21, $22, $23, $24, $25, $26
+            $21, $22, $23, $24, $25, $26, $27
         )
         "#,
         &[
             &id_rep_nomina,
             &id_nomina,
+            &id_registro_patronal,
             &id_revision,
             &id_empleado,
             &truncate_str(emp.nomina.version_nomina.as_deref(), 5),

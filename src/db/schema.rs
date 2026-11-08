@@ -351,7 +351,8 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE TABLE IF NOT EXISTS public.nominas (
             id uuid PRIMARY KEY DEFAULT uuidv7(),
             id_cfdi uuid NOT NULL REFERENCES public.cfdis(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-            id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+            id_registro_patronal uuid NOT NULL REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+            id_revision uuid,
             id_empleado uuid NOT NULL REFERENCES public.empleados(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
             version_nomina char(5),
             tipo_nomina char(3),
@@ -440,7 +441,8 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE TABLE IF NOT EXISTS public.reportes_nominas (
             id uuid PRIMARY KEY DEFAULT uuidv7(),
             id_nomina uuid REFERENCES public.nominas(id) ON UPDATE CASCADE ON DELETE CASCADE,
-            id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+            id_registro_patronal uuid REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+            id_revision uuid REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
             id_empleado uuid NOT NULL REFERENCES public.empleados(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
             version_nomina char(5),
             tipo_nomina char(3),
@@ -609,6 +611,26 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         COMMENT ON COLUMN public.reportes_liquidaciones.mes_periodo_int IS 'Mes al que corresponde el periodo que se está liquidando en formato numerico';
         COMMENT ON COLUMN public.reportes_liquidaciones.id_revision IS 'Id de la revision a la que pertenece el registro de la cedula de cuota';
 
+        -- Vincular nominas directamente al registro patronal y desacoplar obligatoriedad de revision
+        ALTER TABLE public.nominas ADD COLUMN IF NOT EXISTS id_registro_patronal uuid REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+        ALTER TABLE public.nominas ALTER COLUMN id_revision DROP NOT NULL;
+        ALTER TABLE public.nominas DROP CONSTRAINT IF EXISTS fk_nominas_id_revision;
+        ALTER TABLE IF EXISTS revision_history.nominas ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+        ALTER TABLE public.reportes_nominas ADD COLUMN IF NOT EXISTS id_registro_patronal uuid REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+        ALTER TABLE public.reportes_nominas ALTER COLUMN id_revision DROP NOT NULL;
+        ALTER TABLE IF EXISTS revision_history.reportes_nominas ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+
+        -- Población retroactiva de id_registro_patronal si existen nóminas previas con id_revision
+        UPDATE public.nominas n
+        SET id_registro_patronal = r.id_registro_patronal
+        FROM public.revisiones r
+        WHERE n.id_registro_patronal IS NULL AND n.id_revision = r.id;
+
+        UPDATE public.reportes_nominas rn
+        SET id_registro_patronal = r.id_registro_patronal
+        FROM public.revisiones r
+        WHERE rn.id_registro_patronal IS NULL AND rn.id_revision = r.id;
+
         -- Relajar NOT NULL en TODAS las columnas de revision_history y sincronizar columnas con public
         DO $$
         DECLARE
@@ -754,6 +776,26 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         COMMENT ON COLUMN public.liquidaciones.mes_periodo_int IS 'Mes al que corresponde el periodo que se está liquidando en formato numerico';
         COMMENT ON COLUMN public.reportes_liquidaciones.mes_periodo_int IS 'Mes al que corresponde el periodo que se está liquidando en formato numerico';
         COMMENT ON COLUMN public.reportes_liquidaciones.id_revision IS 'Id de la revision a la que pertenece el registro de la cedula de cuota';
+
+        -- Vincular nominas directamente al registro patronal y desacoplar obligatoriedad de revision
+        ALTER TABLE public.nominas ADD COLUMN IF NOT EXISTS id_registro_patronal uuid REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+        ALTER TABLE public.nominas ALTER COLUMN id_revision DROP NOT NULL;
+        ALTER TABLE public.nominas DROP CONSTRAINT IF EXISTS fk_nominas_id_revision;
+        ALTER TABLE IF EXISTS revision_history.nominas ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+        ALTER TABLE public.reportes_nominas ADD COLUMN IF NOT EXISTS id_registro_patronal uuid REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+        ALTER TABLE public.reportes_nominas ALTER COLUMN id_revision DROP NOT NULL;
+        ALTER TABLE IF EXISTS revision_history.reportes_nominas ADD COLUMN IF NOT EXISTS id_registro_patronal uuid;
+
+        -- Población retroactiva de id_registro_patronal si existen nóminas previas con id_revision
+        UPDATE public.nominas n
+        SET id_registro_patronal = r.id_registro_patronal
+        FROM public.revisiones r
+        WHERE n.id_registro_patronal IS NULL AND n.id_revision = r.id;
+
+        UPDATE public.reportes_nominas rn
+        SET id_registro_patronal = r.id_registro_patronal
+        FROM public.revisiones r
+        WHERE rn.id_registro_patronal IS NULL AND rn.id_revision = r.id;
         "#,
     )?;
 
@@ -1333,10 +1375,13 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_lista_conceptos_cfdis_id_concepto_cfdi ON public.lista_conceptos_cfdis(id_concepto_cfdi);
         CREATE INDEX IF NOT EXISTS idx_contratos_id_cfdi ON public.contratos(id_cfdi);
         CREATE INDEX IF NOT EXISTS idx_nominas_id_cfdi ON public.nominas(id_cfdi);
+        CREATE INDEX IF NOT EXISTS idx_nominas_id_registro_patronal ON public.nominas(id_registro_patronal);
+        CREATE INDEX IF NOT EXISTS idx_nominas_emp_rp ON public.nominas(id_empleado, id_registro_patronal);
         CREATE INDEX IF NOT EXISTS idx_nominas_id_revision ON public.nominas(id_revision);
         CREATE INDEX IF NOT EXISTS idx_nominas_id_empleado ON public.nominas(id_empleado);
         CREATE INDEX IF NOT EXISTS idx_detalles_nominas_id_nomina ON public.detalles_nominas(id_nomina);
         CREATE INDEX IF NOT EXISTS idx_detalles_nominas_id_concepto ON public.detalles_nominas(id_concepto);
+        CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_rp ON public.reportes_nominas(id_registro_patronal);
         CREATE INDEX IF NOT EXISTS idx_liquidaciones_id_rp ON public.liquidaciones(id_registro_patronal);
         CREATE INDEX IF NOT EXISTS idx_liquidaciones_id_empleado ON public.liquidaciones(id_empleado);
         CREATE INDEX IF NOT EXISTS idx_detalles_liquidaciones_id_liquidacion ON public.detalles_liquidaciones(id_liquidacion);

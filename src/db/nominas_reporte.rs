@@ -223,7 +223,13 @@ pub fn fetch_nominas_reporte(
             JOIN public.empleados e ON e.id = rn.id_empleado
             JOIN public.conceptos c ON c.id = rdn.id_concepto
             JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
-            WHERE ($1::uuid IS NULL OR e.id_cliente = $1)
+            WHERE ($1::uuid IS NULL 
+                   OR rn.id_revision = $1 
+                   OR rn.id_registro_patronal = $1 
+                   OR e.id_cliente = $1
+                   OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rn.id_registro_patronal OR r.id = rn.id_revision))
+                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rn.id_registro_patronal)
+            )
             GROUP BY rdn.id_reporte_nomina
         ),
         ced AS (
@@ -240,7 +246,13 @@ pub fn fetch_nominas_reporte(
             LEFT JOIN public.registros_obras ro
                  ON ro.id = COALESCE(rdl.id_registro_obra, rv.id_registro_obra)
             WHERE ro.id IS NOT NULL
-              AND ($1::uuid IS NULL OR e.id_cliente = $1)
+              AND ($1::uuid IS NULL 
+                   OR rl.id_revision = $1 
+                   OR rl.id_registro_patronal = $1 
+                   OR e.id_cliente = $1
+                   OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rl.id_registro_patronal OR r.id = rl.id_revision))
+                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rl.id_registro_patronal)
+              )
             GROUP BY rl.id_empleado, rl.anio_periodo, UPPER(TRIM(rl.mes_periodo))
         ),
         base AS (
@@ -277,11 +289,17 @@ pub fn fetch_nominas_reporte(
             JOIN public.empleados e ON e.id = rn.id_empleado
             LEFT JOIN public.nominas n ON n.id = rn.id_nomina
             LEFT JOIN public.revisiones r ON r.id = rn.id_revision
-            LEFT JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal
+            LEFT JOIN public.registros_patronales rp ON rp.id = COALESCE(rn.id_registro_patronal, n.id_registro_patronal, r.id_registro_patronal)
             LEFT JOIN public.cfdis cf ON cf.id = n.id_cfdi
             LEFT JOIN public.contratos ct ON ct.id_cfdi = n.id_cfdi
             LEFT JOIN per ON per.id_nomina = rn.id
-            WHERE ($1::uuid IS NULL OR e.id_cliente = $1)
+            WHERE ($1::uuid IS NULL 
+                   OR rn.id_revision = $1 
+                   OR rn.id_registro_patronal = $1 
+                   OR e.id_cliente = $1
+                   OR EXISTS (SELECT 1 FROM public.revisiones rev WHERE rev.id = $1 AND (rev.id_registro_patronal = rn.id_registro_patronal OR rev.id = rn.id_revision))
+                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp2 WHERE rp2.id_cliente = $1 AND rp2.id = rn.id_registro_patronal)
+            )
         )
         SELECT
             b.id_nomina,
@@ -417,7 +435,7 @@ pub fn copy_nominas_a_reportes(
         .execute(
             r#"
             INSERT INTO public.reportes_nominas (
-                id, id_nomina, id_revision, id_empleado, version_nomina,
+                id, id_nomina, id_registro_patronal, id_revision, id_empleado, version_nomina,
                 tipo_nomina, fecha_pago, fecha_inicial_pago,
                 fecha_final_pago, num_dias_pagados, total_sueldos,
                 total_gravado, total_exento, total_otras_deducciones,
@@ -431,7 +449,7 @@ pub fn copy_nominas_a_reportes(
                 nombre_archivo
             )
             SELECT
-                uuidv7(), n.id, n.id_revision, n.id_empleado, n.version_nomina,
+                uuidv7(), n.id, n.id_registro_patronal, n.id_revision, n.id_empleado, n.version_nomina,
                 n.tipo_nomina, n.fecha_pago, n.fecha_inicial_pago,
                 n.fecha_final_pago,
                 CASE
@@ -453,7 +471,7 @@ pub fn copy_nominas_a_reportes(
             WHERE EXISTS (
                 SELECT 1
                 FROM public.registros_obras ro
-                WHERE ro.id_revision = n.id_revision
+                WHERE (ro.id_registro_patronal = n.id_registro_patronal OR ro.id_revision = n.id_revision)
                   AND (ro.fecha_inicio IS NULL OR COALESCE(n.fecha_final_pago, n.fecha_pago, n.fecha_inicial_pago) >= ro.fecha_inicio)
                   AND (ro.fecha_fin IS NULL OR COALESCE(n.fecha_inicial_pago, n.fecha_pago, n.fecha_final_pago) <= ro.fecha_fin)
             )
@@ -470,6 +488,11 @@ pub fn copy_nominas_a_reportes(
                           (ro.fecha_inicio IS NULL OR COALESCE(n.fecha_final_pago, n.fecha_pago, n.fecha_inicial_pago) >= ro.fecha_inicio)
                           AND (ro.fecha_fin IS NULL OR COALESCE(n.fecha_inicial_pago, n.fecha_pago, n.fecha_final_pago) <= ro.fecha_fin)
                       )
+                  )
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM public.registros_obras ro WHERE ro.id_registro_patronal = n.id_registro_patronal OR ro.id_revision = n.id_revision
+            )
                   )
             )
             OR NOT EXISTS (
@@ -509,6 +532,91 @@ pub fn copy_nominas_a_reportes(
     );
 
     Ok((nominas as usize, detalles as usize))
+}
+
+/// Sincroniza las nóminas maestras pertenecientes a un registro patronal, revisión o cliente
+/// hacia las tablas de trabajo (reportes_nominas y reportes_detalles_nominas).
+/// Permite que al abrir otra revisión del mismo registro patronal no se tengan que reingresar
+/// los XMLs y se reutilicen inmediatamente de la base de datos.
+pub fn sync_reportes_nominas_for_target(
+    client: &mut Client,
+    target_id: Uuid,
+) -> Result<usize, String> {
+    let sql_nominas = r#"
+        INSERT INTO public.reportes_nominas (
+            id, id_nomina, id_registro_patronal, id_revision, id_empleado, version_nomina,
+            tipo_nomina, fecha_pago, fecha_inicial_pago,
+            fecha_final_pago, num_dias_pagados, total_sueldos,
+            total_gravado, total_exento, total_otras_deducciones,
+            total_impuestos_retenidos,
+            salario_base_cotizacion_aportacion,
+            salario_diario_integrado, salario_diario_calculado,
+            salario_base_cotizacion_aportacion_calculado,
+            salario_diario_integrado_calculado,
+            timbre_version, timbre_numero_cert_sat,
+            timbre_rfc_proveedor_cert, timbre_uuid, timbre_fecha,
+            nombre_archivo
+        )
+        SELECT
+            uuidv7(), n.id,
+            COALESCE(n.id_registro_patronal, (SELECT rev.id_registro_patronal FROM public.revisiones rev WHERE rev.id = COALESCE(n.id_revision, $1))),
+            COALESCE(n.id_revision, $1),
+            n.id_empleado, n.version_nomina,
+            n.tipo_nomina, n.fecha_pago, n.fecha_inicial_pago,
+            n.fecha_final_pago,
+            CASE
+                WHEN n.fecha_inicial_pago IS NOT NULL AND n.fecha_final_pago IS NOT NULL
+                    THEN (n.fecha_final_pago - n.fecha_inicial_pago) + 1
+                ELSE COALESCE(n.num_dias_pagados, 0)
+            END,
+            n.total_sueldos,
+            n.total_gravado, n.total_exento, n.total_otras_deducciones,
+            n.total_impuestos_retenidos,
+            n.salario_base_cotizacion_aportacion,
+            n.salario_diario_integrado, n.salario_diario_calculado,
+            n.salario_base_cotizacion_aportacion_calculado,
+            n.salario_diario_integrado_calculado,
+            n.timbre_version, n.timbre_numero_cert_sat,
+            n.timbre_rfc_proveedor_cert, n.timbre_uuid, n.timbre_fecha,
+            n.nombre_archivo
+        FROM public.nominas n
+        WHERE (
+            n.id_registro_patronal = $1
+            OR n.id_revision = $1
+            OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = n.id_registro_patronal OR r.id = n.id_revision))
+            OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = n.id_registro_patronal)
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM public.reportes_nominas rn WHERE rn.id_nomina = n.id
+        )
+    "#;
+
+    let inserted_nom = client
+        .execute(sql_nominas, &[&target_id])
+        .map_err(|e| format!("Error sincronizando nóminas a reportes: {}", e))?;
+
+    let sql_detalles = r#"
+        INSERT INTO public.reportes_detalles_nominas (
+            id_reporte_nomina, id_concepto, clave, concepto,
+            importe_gravado, importe_exento, importe
+        )
+        SELECT
+            rn.id, dn.id_concepto, dn.clave, dn.concepto,
+            dn.importe_gravado, dn.importe_exento, dn.importe
+        FROM public.reportes_nominas rn
+        JOIN public.detalles_nominas dn ON dn.id_nomina = rn.id_nomina
+        WHERE NOT EXISTS (
+            SELECT 1 FROM public.reportes_detalles_nominas rdn WHERE rdn.id_reporte_nomina = rn.id
+        )
+    "#;
+
+    let _ = client.execute(sql_detalles, &[]);
+
+    if inserted_nom > 0 {
+        log::info!("Sincronizadas {} nóminas maestras hacia papel de trabajo de nóminas para target {}", inserted_nom, target_id);
+    }
+
+    Ok(inserted_nom as usize)
 }
 
 /// Nombres distintos de conceptos de percepción del reporte,
@@ -885,7 +993,12 @@ pub fn fetch_totales_dias_cedula_por_registro_patronal(
         JOIN public.registros_patronales rp ON rp.id = ro.id_registro_patronal
         LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rv ON rv.id_registro_obra = ro.id
         WHERE COALESCE(ro.creado_usuario, false) = true
-          AND ($1::uuid IS NULL OR rp.id_cliente = $1)
+          AND ($1::uuid IS NULL 
+               OR ro.id_revision = $1 
+               OR ro.id_registro_patronal = $1 
+               OR rp.id_cliente = $1
+               OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = ro.id_registro_patronal OR r.id = ro.id_revision))
+          )
         GROUP BY rp.registro, ro.numero, ro.tipo_obra
         ORDER BY rp.registro ASC, ro.numero ASC
     "#;
@@ -1051,7 +1164,13 @@ pub fn fetch_nominas_faltantes(
             JOIN public.registros_obras ro ON ro.id = rv.id_registro_obra
             LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
             WHERE COALESCE(ro.creado_usuario, false) = true
-              AND ($1::uuid IS NULL OR e.id_cliente = $1)
+              AND ($1::uuid IS NULL 
+                   OR rl.id_revision = $1 
+                   OR rl.id_registro_patronal = $1 
+                   OR e.id_cliente = $1
+                   OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rl.id_registro_patronal OR r.id = rl.id_revision))
+                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rl.id_registro_patronal)
+              )
             GROUP BY rl.id_empleado, e.nombre, e.nss, e.rfc, UPPER(TRIM(rl.mes_periodo)), rl.anio_periodo
         ),
         nom_emp AS (
@@ -1062,6 +1181,12 @@ pub fn fetch_nominas_faltantes(
                 SUM(COALESCE(rn.num_dias_pagados, 0))::float8 AS dias_nomina
             FROM public.reportes_nominas rn
             WHERE (rn.fecha_final_pago IS NOT NULL OR rn.fecha_pago IS NOT NULL OR rn.fecha_inicial_pago IS NOT NULL)
+              AND ($1::uuid IS NULL 
+                   OR rn.id_revision = $1 
+                   OR rn.id_registro_patronal = $1 
+                   OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rn.id_registro_patronal OR r.id = rn.id_revision))
+                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rn.id_registro_patronal)
+              )
             GROUP BY rn.id_empleado, {MES}, EXTRACT(YEAR FROM COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago))
         )
         SELECT
@@ -1161,7 +1286,8 @@ pub fn create_nomina_from_template(
                    COALESCE(rn.salario_base_cotizacion_aportacion, 0)::float8,
                    COALESCE(rn.salario_diario_integrado, 0)::float8,
                    COALESCE(rn.salario_diario_calculado, 0)::float8,
-                   rn.nombre_archivo
+                   rn.nombre_archivo,
+                   rn.id_registro_patronal
             FROM public.reportes_nominas rn
             WHERE rn.id = $1
             LIMIT 1
@@ -1171,7 +1297,7 @@ pub fn create_nomina_from_template(
         .map_err(|e| format!("Error consultando nómina plantilla: {}", e))?
         .ok_or_else(|| "No se encontró la nómina plantilla especificada".to_string())?;
 
-    let id_revision: Uuid = tpl_row.get(0);
+    let id_revision: Option<Uuid> = tpl_row.get(0);
     let version_nomina: Option<String> = tpl_row.get(1);
     let tipo_nomina: Option<String> = tpl_row.get(2);
     let dias_plantilla: f64 = tpl_row.get(3);
@@ -1179,6 +1305,7 @@ pub fn create_nomina_from_template(
     let sdi: f64 = tpl_row.get(5);
     let sdi_calc: f64 = tpl_row.get(6);
     let nombre_archivo: Option<String> = tpl_row.get(7);
+    let id_registro_patronal: Option<Uuid> = tpl_row.get(8);
 
     let mes_num = month_num_from_es(target_mes);
     let f_inicio = NaiveDate::from_ymd_opt(target_anio, mes_num, 1)
@@ -1229,7 +1356,7 @@ pub fn create_nomina_from_template(
         .execute(
             r#"
             INSERT INTO public.reportes_nominas (
-                id, id_revision, id_empleado, version_nomina,
+                id, id_registro_patronal, id_revision, id_empleado, version_nomina,
                 tipo_nomina, fecha_pago, fecha_inicial_pago,
                 fecha_final_pago, num_dias_pagados, total_sueldos,
                 total_gravado, total_exento, total_otras_deducciones,
@@ -1238,10 +1365,11 @@ pub fn create_nomina_from_template(
                 salario_diario_integrado, salario_diario_calculado,
                 nombre_archivo
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, 0.0, 0.0, 0.0, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, 0.0, 0.0, 0.0, $12, $13, $14, $15)
             "#,
             &[
                 &new_id,
+                &id_registro_patronal,
                 &id_revision,
                 &id_empleado,
                 &version_nomina,
@@ -1325,14 +1453,27 @@ pub fn check_cedulas_exists(
     Ok(row.is_some())
 }
 
-/// Verifica si existen nóminas para una revisión dada.
+/// Verifica si existen nóminas para una revisión o registro patronal dado.
 pub fn check_nominas_exists(
     client: &mut Client,
-    revision_id: Uuid,
+    target_id: Uuid,
 ) -> Result<bool, String> {
     let row = client.query_opt(
-        "SELECT 1 FROM public.nominas WHERE id_revision = $1 LIMIT 1",
-        &[&revision_id],
+        r#"
+        SELECT 1 FROM public.nominas n
+        WHERE n.id_registro_patronal = $1
+           OR n.id_revision = $1
+           OR EXISTS (
+               SELECT 1 FROM public.revisiones r
+               WHERE r.id = $1 AND (r.id_registro_patronal = n.id_registro_patronal OR r.id = n.id_revision)
+           )
+           OR EXISTS (
+               SELECT 1 FROM public.registros_patronales rp
+               WHERE rp.id_cliente = $1 AND rp.id = n.id_registro_patronal
+           )
+        LIMIT 1
+        "#,
+        &[&target_id],
     ).map_err(|e| format!("Error verificando nóminas: {}", e))?;
     Ok(row.is_some())
 }
@@ -1503,6 +1644,17 @@ pub fn export_reporte_nominas_to_excel(
     let ws = workbook.add_worksheet();
     ws.set_name("Reporte de Nóminas").map_err(|e| e.to_string())?;
 
+    let clean_rz = if cliente_nombre.chars().count() > 80 {
+        cliente_nombre.chars().take(80).collect::<String>()
+    } else {
+        cliente_nombre.to_string()
+    };
+    let clean_header = format!("&L{}&RReporte de Nóminas", clean_rz);
+    let clean_footer = "&LRepresentante Legal&RPágina &P de &N";
+    ws.set_header(&clean_header);
+    ws.set_footer(clean_footer);
+    ws.set_header_footer_align_with_page(true);
+
     ws.write_string_with_format(0, 0, "Reporte de Nóminas vs Cédula - CONSTRUAUDIT", &title_fmt).map_err(|e| e.to_string())?;
     let sub = format!(
         "Empresa / Cliente: {} | Total Nóminas: {} | Fecha de Generación: {}",
@@ -1654,6 +1806,9 @@ pub fn export_reporte_nominas_to_excel(
     if !totales_por_rp.is_empty() {
         let ws2 = workbook.add_worksheet();
         let _ = ws2.set_name("Resumen por Obra");
+        ws2.set_header(&clean_header);
+        ws2.set_footer(clean_footer);
+        ws2.set_header_footer_align_with_page(true);
 
         let _ = ws2.write_string_with_format(0, 0, "Resumen de Días Cédula por Registro Patronal y Obra", &title_fmt);
         let _ = ws2.write_string_with_format(1, 0, format!("Empresa: {}", if cliente_nombre.is_empty() { "Todos los Clientes" } else { cliente_nombre }), &subtitle_fmt);

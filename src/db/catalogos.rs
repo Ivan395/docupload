@@ -990,8 +990,7 @@ pub fn fetch_empleados_by_cliente(
                 COALESCE(TRIM(e.nss), ''),
                 COALESCE(
                     (SELECT TRIM(rp.registro) FROM public.nominas n 
-                     JOIN public.revisiones rev ON n.id_revision = rev.id 
-                     JOIN public.registros_patronales rp ON rev.id_registro_patronal = rp.id 
+                     JOIN public.registros_patronales rp ON rp.id = COALESCE(n.id_registro_patronal, (SELECT rev.id_registro_patronal FROM public.revisiones rev WHERE rev.id = n.id_revision))
                      WHERE n.id_empleado = e.id LIMIT 1),
                     (SELECT TRIM(rp.registro) FROM public.liquidaciones l 
                      JOIN public.registros_patronales rp ON l.id_registro_patronal = rp.id 
@@ -1174,14 +1173,13 @@ pub fn delete_cliente(client: &mut Client, id: &str) -> Result<(), String> {
         .transaction()
         .map_err(|e| format!("Error iniciando transacción: {}", e))?;
 
-    // 1. Eliminar CFDIs asociados a las nóminas de las revisiones de los registros patronales de este cliente
+    // 1. Eliminar CFDIs asociados a las nóminas de los registros patronales de este cliente
     let delete_cfdis_query = r#"
         DELETE FROM public.cfdis
         WHERE id IN (
             SELECT n.id_cfdi
             FROM public.nominas n
-            JOIN public.revisiones r ON r.id = n.id_revision
-            JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal
+            JOIN public.registros_patronales rp ON rp.id = COALESCE(n.id_registro_patronal, (SELECT r.id_registro_patronal FROM public.revisiones r WHERE r.id = n.id_revision))
             WHERE rp.id_cliente = $1
         );
     "#;
@@ -1235,8 +1233,7 @@ pub fn delete_registro_patronal(client: &mut Client, id: &str) -> Result<(), Str
         WHERE id IN (
             SELECT n.id_cfdi
             FROM public.nominas n
-            JOIN public.revisiones r ON r.id = n.id_revision
-            WHERE r.id_registro_patronal = $1
+            WHERE n.id_registro_patronal = $1 OR n.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1)
         );
     "#;
     tx.execute(delete_cfdis_query, &[&rp_uuid])

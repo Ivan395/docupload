@@ -616,17 +616,45 @@ pub fn sync_and_load_nominas_data(
         .get()
         .map_err(|e| format!("Error de conexión a la base de datos: {}", e))?;
 
-    let count_rows: i64 = client
-        .query_one("SELECT COUNT(*) FROM public.reportes_nominas", &[])
-        .map(|r| r.get(0))
-        .unwrap_or(0);
-    if count_rows == 0 {
-        let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client);
+    let target_uuid: Option<Uuid> = cliente_id.or_else(|| {
+        let app_data = ui.global::<AppData>();
+        let rev_str = app_data.get_selected_revision_id().to_string();
+        if !rev_str.trim().is_empty() {
+            if let Ok(u) = Uuid::parse_str(rev_str.trim()) {
+                return Some(u);
+            }
+        }
+        let rp_str = app_data.get_selected_rp_id().to_string();
+        if !rp_str.trim().is_empty() {
+            if let Ok(u) = Uuid::parse_str(rp_str.trim()) {
+                return Some(u);
+            }
+        }
+        let cid_str = app_data.get_selected_cliente_id().to_string();
+        if !cid_str.trim().is_empty() {
+            if let Ok(u) = Uuid::parse_str(cid_str.trim()) {
+                return Some(u);
+            }
+        }
+        None
+    });
+
+    if let Some(t_id) = target_uuid {
+        let _ = crate::db::nominas_reporte::sync_reportes_nominas_for_target(&mut client, t_id);
+    } else {
+        let count_rows: i64 = client
+            .query_one("SELECT COUNT(*) FROM public.reportes_nominas", &[])
+            .map(|r| r.get(0))
+            .unwrap_or(0);
+        if count_rows == 0 {
+            let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client);
+        }
     }
-    let rows = fetch_nominas_reporte(&mut client, cliente_id)?;
-    let totales_rp = fetch_totales_dias_cedula_por_registro_patronal(&mut client, cliente_id)
+
+    let rows = fetch_nominas_reporte(&mut client, target_uuid)?;
+    let totales_rp = fetch_totales_dias_cedula_por_registro_patronal(&mut client, target_uuid)
         .unwrap_or_default();
-    let faltantes_db = fetch_nominas_faltantes(&mut client, cliente_id)
+    let faltantes_db = fetch_nominas_faltantes(&mut client, target_uuid)
         .unwrap_or_default();
 
     let mut st = session
@@ -1080,7 +1108,7 @@ pub fn wire_nominas_callbacks(
     let pool_copy_modal = db_pool.clone();
     let s_copy_modal = session.clone();
     let ui_weak_copy_modal = main_window.as_weak();
-    app_logic.on_nominas_open_copy_modal(move |id_nom_str, id_emp_str| {
+    app_logic.on_nominas_open_copy_modal(move |id_emp_str, id_nom_str| {
         let Some(win) = ui_weak_copy_modal.upgrade() else { return };
         let Ok(id_emp) = Uuid::parse_str(id_emp_str.as_str()) else { return };
         let Ok(id_nom) = Uuid::parse_str(id_nom_str.as_str()) else { return };
