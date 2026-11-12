@@ -204,6 +204,42 @@ export component CedulaCuotasView inherits Rectangle {
                         }
                     }
 
+                    // Mantenimiento manual: reparación de cédulas desde RustFS (con confirmación)
+                    Rectangle {
+                        height: 34px;
+                        width: 210px;
+                        border-radius: 6px;
+                        background: AppData.reparar_rustfs_en_curso
+                            ? #e2e8f0
+                            : (btn_reparar_rustfs.has-hover ? #fee2e2 : #ffffff);
+                        border-width: 1px;
+                        border-color: AppData.reparar_rustfs_en_curso ? #cbd5e1 : #fca5a5;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            alignment: center;
+
+                            Text {
+                                text: AppData.reparar_rustfs_en_curso ? "⏳ Reparando..." : "🛠 Reparar desde RustFS";
+                                font-size: 12px;
+                                font-weight: 700;
+                                color: AppData.reparar_rustfs_en_curso ? #64748b : #b91c1c;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_reparar_rustfs := TouchArea {
+                            mouse-cursor: AppData.reparar_rustfs_en_curso ? default : pointer;
+                            clicked => {
+                                if (!AppData.reparar_rustfs_en_curso) {
+                                    AppLogic.abrir_reparar_rustfs();
+                                }
+                            }
+                        }
+                    }
+
                     Rectangle {
                         width: 34px;
                         height: 34px;
@@ -2397,6 +2433,246 @@ export component CedulaCuotasView inherits Rectangle {
         }
     }
 
+    // Modal de confirmación: reemplazo de meses ya cargados (muestra impacto en reportes y asignaciones)
+    if AppData.show_cedulas_overwrite_confirm_modal : Rectangle {
+        background: #00000088;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 580px;
+            height: 380px;
+            border-radius: 12px;
+            background: #ffffff;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "⚠️";
+                            font-size: 22px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Meses ya cargados: confirmar reemplazo";
+                            font-size: 15px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+                        Text {
+                            text: "Esta carga reemplazará los meses listados. Se borrarán sus liquidaciones y las filas del Reporte de Liquidaciones de esa revisión, incluidas las asignaciones de obra hechas manualmente:";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                        Rectangle {
+                            height: 130px;
+                            background: #f8fafc;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+                            clip: true;
+                            VerticalLayout {
+                                padding: 8px;
+                                ScrollView {
+                                    content-width: self.width;
+                                    Text {
+                                        text: AppData.cedulas_overwrite_confirm_msg;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        font-family: "monospace";
+                                        color: #334155;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    Rectangle {
+                        height: 36px;
+                        width: 130px;
+                        border-radius: 6px;
+                        background: btn_cancel_overwrite.has-hover ? #cbd5e1 : #e2e8f0;
+                        Text {
+                            text: "Cancelar carga";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #334155;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_cancel_overwrite := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cancelar_sobrescribir_cedulas(); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 36px;
+                        width: 150px;
+                        border-radius: 6px;
+                        background: btn_confirm_overwrite.has-hover ? #991b1b : #b91c1c;
+                        Text {
+                            text: "Reemplazar meses";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_confirm_overwrite := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.confirmar_sobrescribir_cedulas(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal de confirmación: reparación manual de cédulas desde RustFS
+    if AppData.show_reparar_rustfs_modal : Rectangle {
+        background: #00000088;
+        width: 100%;
+        height: 100%;
+
+        TouchArea {
+            // Prevenir clics fuera
+        }
+
+        Rectangle {
+            width: 560px;
+            height: 310px;
+            border-radius: 12px;
+            background: #ffffff;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: #fef2f2;
+                        border-width: 1px;
+                        border-color: #fecaca;
+                        Text {
+                            text: "🛠";
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Reparar cédulas desde RustFS";
+                            font-size: 15px;
+                            font-weight: 800;
+                            color: #991b1b;
+                        }
+                        Text {
+                            text: "Esta herramienta de mantenimiento vuelve a leer TODOS los PDF de cédulas guardados en RustFS, normaliza claves de movimientos, elimina liquidaciones bimestrales y reconstruye las vinculaciones de obra de las tablas maestras. Después sincroniza los reportes de todas las revisiones, lo que puede descartar asignaciones de obra hechas manualmente. Puede tardar varios minutos. Úsala solo si los datos de cédulas están inconsistentes.";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: #475569;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    Rectangle {
+                        height: 36px;
+                        width: 130px;
+                        border-radius: 6px;
+                        background: btn_cancel_reparar.has-hover ? #cbd5e1 : #e2e8f0;
+                        Text {
+                            text: "Cancelar";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #334155;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_cancel_reparar := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.cancelar_reparar_rustfs(); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 36px;
+                        width: 170px;
+                        border-radius: 6px;
+                        background: btn_confirm_reparar.has-hover ? #991b1b : #b91c1c;
+                        Text {
+                            text: "Ejecutar reparación";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_confirm_reparar := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.confirmar_reparar_rustfs(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Modal Informativo: Qué información se actualizó en la base de datos por vista
     if AppData.show_cedulas_success_modal : Rectangle {
         background: #00000077;
@@ -2537,6 +2813,39 @@ export component CedulaCuotasView inherits Rectangle {
                                 spacing: 2px;
                                 Text { text: "Vista Clientes y Registros Patronales:"; font-size: 11px; font-weight: 800; color: #334155; }
                                 Text { text: AppData.cedulas_success_patronal_msg; font-size: 11px; color: #475569; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+
+                // Avisos: trabajadores omitidos o con aviso al cargar la cédula (solo si existen)
+                if AppData.cedulas_success_omitidos_count > 0 : Rectangle {
+                    background: #fffbeb;
+                    border-color: #fde68a;
+                    border-width: 1px;
+                    border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 6px;
+
+                        Text {
+                            text: "⚠️ " + AppData.cedulas_success_omitidos_count + " trabajador(es) omitido(s) o con aviso — revisa el archivo";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #92400e;
+                            wrap: word-wrap;
+                        }
+
+                        ScrollView {
+                            height: 110px;
+
+                            Text {
+                                text: AppData.cedulas_success_omitidos_msg;
+                                font-family: "monospace";
+                                font-size: 11px;
+                                color: #78350f;
+                                wrap: word-wrap;
+                                width: parent.width;
                             }
                         }
                     }

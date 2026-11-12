@@ -25,7 +25,7 @@ use crate::db::reporte_liquidaciones::{
     compute_guarderias_kpis,
     extract_all_employee_movements, build_all_employee_movements_map,
     calculate_max_dias_obra_for_employee_movements, validate_obra_assignment_for_employee_movements,
-    calculate_obra_days_in_month, parse_month_and_year, ReporteFinalHeaderMeta,
+    calculate_obra_days_in_month, missing_header_fields, parse_month_and_year, ReporteFinalHeaderMeta,
 };
 use crate::sua_export;
 
@@ -5148,10 +5148,11 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     filter_obra_id,
                 );
 
-                let mut delegacion = "COAHUILA".to_string();
-                let mut subdelegacion = "SALTILLO".to_string();
-                let mut rfc = "GON2110075C9".to_string();
-                let representante_legal = "ARTURO CARRILLO DOMINGUEZ".to_string();
+                let mut delegacion = String::new();
+                let mut subdelegacion = String::new();
+                let mut rfc = String::new();
+                let mut representante_legal = String::new();
+                let mut razon_social = String::new();
 
                 if let Some(ref pool) = pool_clone {
                     if let Ok(mut client) = pool.get() {
@@ -5159,7 +5160,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             if let Ok(rev_uuid) = Uuid::parse_str(rev_id_str) {
                                 if let Ok(Some(row)) = client.query_opt(
                                     r#"
-                                    SELECT c.rfc, rp.delegacion, rp.subdelegacion
+                                    SELECT c.rfc, rp.delegacion, rp.subdelegacion, c.representante_legal, c.razon_social
                                     FROM public.revisiones r
                                     JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal
                                     JOIN public.clientes c ON c.id = rp.id_cliente
@@ -5176,6 +5177,12 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                     if let Some(sd) = row.get::<_, Option<String>>(2) {
                                         if !sd.trim().is_empty() { subdelegacion = sd.trim().to_string(); }
                                     }
+                                    if let Some(rl) = row.get::<_, Option<String>>(3) {
+                                        if !rl.trim().is_empty() { representante_legal = rl.trim().to_string(); }
+                                    }
+                                    if let Some(rz) = row.get::<_, Option<String>>(4) {
+                                        if !rz.trim().is_empty() { razon_social = rz.trim().to_string(); }
+                                    }
                                 }
                             }
                         }
@@ -5188,7 +5195,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         (Some(fi), Some(ff)) => format!("{} AL {}", fi.format("%d/%m/%Y"), ff.format("%d/%m/%Y")),
                         (Some(fi), None) => format!("DESDE {}", fi.format("%d/%m/%Y")),
                         (None, Some(ff)) => format!("HASTA {}", ff.format("%d/%m/%Y")),
-                        (None, None) => "15/04/2026 AL 30/06/2026".to_string(),
+                        (None, None) => String::new(),
                     }
                 } else {
                     let mut min_fi: Option<chrono::NaiveDate> = None;
@@ -5205,20 +5212,35 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         (Some(fi), Some(ff)) => format!("{} AL {}", fi.format("%d/%m/%Y"), ff.format("%d/%m/%Y")),
                         (Some(fi), None) => format!("DESDE {}", fi.format("%d/%m/%Y")),
                         (None, Some(ff)) => format!("HASTA {}", ff.format("%d/%m/%Y")),
-                        (None, None) => "15/04/2026 AL 30/06/2026".to_string(),
+                        (None, None) => String::new(),
                     }
+                };
+
+                let cliente_nombre = if razon_social.trim().is_empty() {
+                    state.cliente_nombre.clone()
+                } else {
+                    razon_social
                 };
 
                 let header_meta = ReporteFinalHeaderMeta {
                     delegacion,
                     subdelegacion,
-                    cliente_nombre: state.cliente_nombre.clone(),
+                    cliente_nombre,
                     rp_registro: state.rp_registro.clone(),
                     rfc,
                     periodo_obra,
                     representante_legal,
                     revision_folio: state.revision_folio.clone(),
                 };
+
+                let faltantes = missing_header_fields(&header_meta);
+                if !faltantes.is_empty() {
+                    crate::show_toast_message(
+                        &ui,
+                        &format!("No se generó el Excel. Captura primero: {}", faltantes.join(", ")),
+                    );
+                    return;
+                }
 
                 match export_reporte_liquidaciones_to_excel(
                     &state.filtered_rows,
@@ -5229,7 +5251,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     &state.cliente_nombre,
                     &state.rp_registro,
                     &state.revision_folio,
-                    Some(&header_meta),
+                    &header_meta,
                 ) {
                     Ok(_) => {
                         crate::show_toast_message(

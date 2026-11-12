@@ -371,6 +371,11 @@ export component ClientesView inherits Rectangle {
                                 font-size: 13px;
                                 color: #475569;
                             }
+                            if cli.representante_legal != "" : Text {
+                                text: "Rep. Legal: " + cli.representante_legal;
+                                font-size: 13px;
+                                color: #475569;
+                            }
                         }
 
                         // Fila de Datos Fiscales: RFC, Tipo Persona, Régimen Fiscal
@@ -678,6 +683,16 @@ export component ClientesView inherits Rectangle {
                     }
                 }
 
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "Representante Legal (firma entregables IMSS)"; font-size: 10px; font-weight: 700; color: #475569; }
+                    LineEdit {
+                        height: 34px;
+                        text <=> AppData.new_cliente_representante_legal;
+                        placeholder-text: "Nombre completo del representante legal";
+                    }
+                }
+
                 // Dropdown Tipo de Persona
                 VerticalLayout {
                     spacing: 2px;
@@ -754,7 +769,8 @@ export component ClientesView inherits Rectangle {
                                         AppData.new_cliente_razon_social,
                                         AppData.new_cliente_curp,
                                         AppData.new_cliente_tipo_persona_val,
-                                        AppData.new_cliente_regimen_val
+                                        AppData.new_cliente_regimen_val,
+                                        AppData.new_cliente_representante_legal
                                     );
                                 }
                             }
@@ -879,6 +895,16 @@ export component ClientesView inherits Rectangle {
                     }
                 }
 
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "Representante Legal (firma entregables IMSS)"; font-size: 10px; font-weight: 700; color: #475569; }
+                    LineEdit {
+                        height: 34px;
+                        text <=> AppData.edit_cliente_representante_legal;
+                        placeholder-text: "Nombre completo del representante legal";
+                    }
+                }
+
                 // Dropdown Tipo de Persona
                 VerticalLayout {
                     spacing: 2px;
@@ -956,7 +982,8 @@ export component ClientesView inherits Rectangle {
                                         AppData.edit_cliente_rfc,
                                         AppData.edit_cliente_curp,
                                         AppData.edit_cliente_tipo_persona_val,
-                                        AppData.edit_cliente_regimen_val
+                                        AppData.edit_cliente_regimen_val,
+                                        AppData.edit_cliente_representante_legal
                                     );
                                 }
                             }

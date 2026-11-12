@@ -46,6 +46,7 @@ pub struct ClienteItem {
     pub id_clasificacion_cliente: String,
     pub nombre: String,
     pub razon_social: String,
+    pub representante_legal: String,
     pub rfc: String,
     pub curp: String,
     pub tipo_persona: String,
@@ -268,6 +269,7 @@ pub fn fetch_clientes(client: &mut Client) -> Result<Vec<ClienteItem>, String> {
                 COALESCE(c.id_clasificacion_cliente::text, ''),
                 c.nombre,
                 COALESCE(c.razon_social, ''),
+                COALESCE(c.representante_legal, ''),
                 COALESCE(TRIM(c.rfc), ''),
                 COALESCE(TRIM(c.curp), ''),
                 COALESCE(TRIM(tp.tipo), ''),
@@ -298,22 +300,24 @@ pub fn fetch_clientes(client: &mut Client) -> Result<Vec<ClienteItem>, String> {
         let id_cc: String = r.get(1);
         let nombre: String = r.get(2);
         let razon_social: String = r.get(3);
-        let rfc: String = r.get(4);
-        let curp: String = r.get(5);
-        let tipo_persona: String = r.get(6);
-        let id_tp: String = r.get(7);
-        let rf_clave: String = r.get(8);
-        let rf_nombre: String = r.get(9);
-        let id_rf: String = r.get(10);
-        let rp_count: i32 = r.get(11);
-        let emp_count: i32 = r.get(12);
-        let has_data: bool = r.get(13);
+        let representante_legal: String = r.get(4);
+        let rfc: String = r.get(5);
+        let curp: String = r.get(6);
+        let tipo_persona: String = r.get(7);
+        let id_tp: String = r.get(8);
+        let rf_clave: String = r.get(9);
+        let rf_nombre: String = r.get(10);
+        let id_rf: String = r.get(11);
+        let rp_count: i32 = r.get(12);
+        let emp_count: i32 = r.get(13);
+        let has_data: bool = r.get(14);
 
         list.push(ClienteItem {
             id: id.to_string(),
             id_clasificacion_cliente: id_cc,
             nombre,
             razon_social,
+            representante_legal,
             rfc,
             curp,
             tipo_persona,
@@ -355,6 +359,7 @@ pub fn create_cliente(
     nombre: &str,
     rfc: &str,
     razon_social: &str,
+    representante_legal: &str,
     curp: &str,
     id_tipo_persona: &str,
     id_regimen_fiscal: &str,
@@ -427,18 +432,19 @@ pub fn create_cliente(
         }
 
     let r_social = clean_uppercase_opt(razon_social);
+    let r_legal = clean_uppercase_opt(representante_legal);
     let curp_raw = clean_alphanumeric(curp);
     let clean_curp = if curp_raw.is_empty() { None } else { Some(curp_raw) };
 
     let id = Uuid::now_v7();
     let query_insert_cliente = r#"
-            INSERT INTO public.clientes (id, nombre, rfc, razon_social, curp, id_clasificacion_cliente)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO public.clientes (id, nombre, rfc, razon_social, representante_legal, curp, id_clasificacion_cliente)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
     "#;
     client
         .execute(
             query_insert_cliente,
-            &[&id, &clean_nombre, &clean_rfc, &r_social, &clean_curp, &id_clasificacion_cliente],
+            &[&id, &clean_nombre, &clean_rfc, &r_social, &r_legal, &clean_curp, &id_clasificacion_cliente],
         )
         .map_err(|e| {
             crate::app_logger::log_db_simple_error("public.clientes", "INSERT", &e.to_string());
@@ -448,7 +454,7 @@ pub fn create_cliente(
     crate::app_logger::log_db_write(
         "public.clientes",
         "INSERT",
-        &format!("id={}, nombre='{}', rfc='{}', razon_social={:?}", id, clean_nombre, clean_rfc, r_social),
+        &format!("id={}, nombre='{}', rfc='{}', razon_social={:?}, representante_legal={:?}", id, clean_nombre, clean_rfc, r_social, r_legal),
         query_insert_cliente,
     );
 
@@ -457,6 +463,7 @@ pub fn create_cliente(
         id_clasificacion_cliente: id_clasificacion_cliente.map(|u| u.to_string()).unwrap_or_default(),
         nombre: clean_nombre,
         razon_social: r_social.unwrap_or_default(),
+        representante_legal: r_legal.unwrap_or_default(),
         rfc: clean_rfc,
         curp: clean_curp.unwrap_or_default(),
         tipo_persona: "".to_string(),
@@ -476,6 +483,7 @@ pub fn update_cliente(
     id: &str,
     nombre: &str,
     razon_social: &str,
+    representante_legal: &str,
     rfc: &str,
     curp: &str,
     id_tipo_persona: &str,
@@ -549,6 +557,7 @@ pub fn update_cliente(
         }
 
     let r_social = clean_uppercase_opt(razon_social);
+    let r_legal = clean_uppercase_opt(representante_legal);
     let curp_raw = clean_alphanumeric(curp);
     let clean_curp = if curp_raw.is_empty() { None } else { Some(curp_raw) };
 
@@ -556,15 +565,16 @@ pub fn update_cliente(
             UPDATE public.clientes
             SET nombre = $2,
                 razon_social = $3,
-                rfc = $4,
-                curp = $5,
-                id_clasificacion_cliente = COALESCE($6, id_clasificacion_cliente)
+                representante_legal = $4,
+                rfc = $5,
+                curp = $6,
+                id_clasificacion_cliente = COALESCE($7, id_clasificacion_cliente)
             WHERE id = $1
     "#;
     client
         .execute(
             query_update_cliente,
-            &[&client_uuid, &clean_nombre, &r_social, &clean_rfc, &clean_curp, &id_clasificacion_cliente],
+            &[&client_uuid, &clean_nombre, &r_social, &r_legal, &clean_rfc, &clean_curp, &id_clasificacion_cliente],
         )
         .map_err(|e| {
             crate::app_logger::log_db_simple_error("public.clientes", "UPDATE", &e.to_string());
@@ -574,7 +584,7 @@ pub fn update_cliente(
     crate::app_logger::log_db_write(
         "public.clientes",
         "UPDATE",
-        &format!("id={}, nombre='{}', rfc='{}', razon_social={:?}", client_uuid, clean_nombre, clean_rfc, r_social),
+        &format!("id={}, nombre='{}', rfc='{}', razon_social={:?}, representante_legal={:?}", client_uuid, clean_nombre, clean_rfc, r_social, r_legal),
         query_update_cliente,
     );
 

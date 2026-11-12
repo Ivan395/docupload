@@ -55,6 +55,7 @@ export struct ClienteCardData {
     id: string,
     nombre: string,
     razon_social: string,
+    representante_legal: string,
     rfc: string,
     curp: string,
     tipo_persona: string,
@@ -674,6 +675,7 @@ export global AppData {
     in-out property <string> new_cliente_nombre: "";
     in-out property <string> new_cliente_rfc: "";
     in-out property <string> new_cliente_razon_social: "";
+    in-out property <string> new_cliente_representante_legal: "";
     in-out property <string> new_cliente_curp: "";
     in-out property <string> new_cliente_tipo_persona_val: "-- Seleccionar Tipo Persona --";
     in-out property <string> new_cliente_regimen_val: "-- Seleccione primero Tipo Persona --";
@@ -689,6 +691,7 @@ export global AppData {
     in-out property <string> edit_cliente_id: "";
     in-out property <string> edit_cliente_nombre: "";
     in-out property <string> edit_cliente_razon_social: "";
+    in-out property <string> edit_cliente_representante_legal: "";
     in-out property <string> edit_cliente_rfc: "";
     in-out property <string> edit_cliente_curp: "";
     in-out property <string> edit_cliente_tipo_persona_val: "-- Seleccionar Tipo Persona --";
@@ -999,10 +1002,20 @@ export global AppData {
     in-out property <string> cedulas_success_revision_msg: "";
     in-out property <string> cedulas_success_empleados_msg: "";
     in-out property <string> cedulas_success_patronal_msg: "";
+    in-out property <string> cedulas_success_omitidos_msg: "";
+    in-out property <int> cedulas_success_omitidos_count: 0;
 
     // Modal de Alerta: Archivos duplicados que ya contienen su información en la BD
     in-out property <bool> show_cedulas_duplicate_modal: false;
     in-out property <string> cedulas_duplicate_files_msg: "";
+
+    // Modal de confirmación: meses ya cargados que serán reemplazados por la carga
+    in-out property <bool> show_cedulas_overwrite_confirm_modal: false;
+    in-out property <string> cedulas_overwrite_confirm_msg: "";
+
+    // Modal de confirmación: reparación manual de cédulas desde RustFS
+    in-out property <bool> show_reparar_rustfs_modal: false;
+    in-out property <bool> reparar_rustfs_en_curso: false;
 
     // Control de acceso a Cédulas de Cuotas (deshabilitado hasta acceder desde Registros de Obras)
     in-out property <bool> cedulas_access_allowed: false;
@@ -1434,6 +1447,11 @@ export global AppLogic {
     callback open_cedulas_from_obras();
     callback close_cedulas_success_modal();
     callback close_cedulas_duplicate_modal();
+    callback confirmar_sobrescribir_cedulas();
+    callback cancelar_sobrescribir_cedulas();
+    callback abrir_reparar_rustfs();
+    callback confirmar_reparar_rustfs();
+    callback cancelar_reparar_rustfs();
     callback close_system_error_modal();
     callback select_cliente_for_rp(string, string, string, bool);
     callback select_cliente_for_empleados(string, string, string);
@@ -1450,11 +1468,11 @@ export global AppLogic {
     callback open_new_cliente_dialog();
     callback close_new_cliente_dialog();
     callback change_new_tipo_persona(string);
-    callback submit_new_cliente(string, string, string, string, string, string);
+    callback submit_new_cliente(string, string, string, string, string, string, string);
     callback open_edit_cliente_dialog(string);
     callback close_edit_cliente_dialog();
     callback change_tipo_persona(string);
-    callback submit_edit_cliente(string, string, string, string, string, string, string);
+    callback submit_edit_cliente(string, string, string, string, string, string, string, string);
     callback open_delete_cliente_dialog(string, string);
     callback close_delete_cliente_dialog();
     callback confirm_delete_cliente(string);

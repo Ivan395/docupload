@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-use crate::cedulas::business::{mes_to_periodo_int, month_num_to_name, month_to_num, Business};
+use crate::cedulas::business::{month_num_to_name, month_to_num, Business};
 use crate::cedulas::employees::Employee as CedulaEmployee;
 use crate::db::client::DbPool;
 
@@ -20,6 +20,20 @@ pub struct CedulasDbStats {
     pub errores: Vec<String>,
     pub id_registro_patronal: Option<Uuid>,
     pub id_revision: Option<Uuid>,
+}
+
+/// Días de obra válidos según la cédula: 1..=31. Fuera de rango → None (dato ilegible, no se inventa).
+pub fn dias_obra_validos(dias: i32) -> Option<i16> {
+    if (1..=31).contains(&dias) {
+        Some(dias as i16)
+    } else {
+        None
+    }
+}
+
+/// Suma días de obra consolidados por obra, limitando el total a 31 sin imponer mínimo artificial.
+pub fn sumar_dias_obra(acumulado: i16, dias: i16) -> i16 {
+    acumulado.saturating_add(dias).min(31)
 }
 
 fn truncate_str(s: Option<&str>, max_len: usize) -> Option<String> {
@@ -50,6 +64,40 @@ pub fn normalize_anio_periodo(anio_opt: Option<&str>) -> i16 {
         }
     }
     curr_year
+}
+
+/// Resuelve (mes 1..=12, año 1990..=2099) de una cédula SIN valores por defecto.
+/// Devuelve None si el mes o el año no se pueden leer; el llamador debe rechazar la cédula.
+pub fn resolve_periodo_cedula(emp: &CedulaEmployee) -> Option<(i16, i16)> {
+    let first = emp.data_employee.first();
+    let en_rango_mes = |v: i16| (1..=12).contains(&v);
+
+    // Mes: entero ya detectado en el empleado, luego texto, luego entero del primer detalle
+    let mes = if en_rango_mes(emp.mes_periodo_int) {
+        Some(emp.mes_periodo_int)
+    } else {
+        emp.mes_periodo
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| first.and_then(|de| de.mes_periodo.as_deref()))
+            .map(|s| month_to_num(s.trim()))
+            .filter(|n| (1..=12).contains(n))
+            .map(|n| n as i16)
+            .or_else(|| first.map(|de| de.mes_periodo_int).filter(|v| en_rango_mes(*v)))
+    }?;
+
+    // Año: texto del empleado o del primer detalle, solo 1990..=2099
+    let anio = emp
+        .anio_periodo
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| first.and_then(|de| de.anio_periodo.as_deref()))?
+        .trim()
+        .parse::<i16>()
+        .ok()
+        .filter(|y| (1990..=2099).contains(y))?;
+
+    Some((mes, anio))
 }
 
 #[derive(Clone)]
@@ -878,11 +926,62 @@ fn are_details_exact_match(db_rows: &[postgres::Row], incoming: &[crate::cedulas
     true
 }
 
+/// Describe el motivo por el que un trabajador de cédula se omite por no traer renglones de cuotas.
+/// Devuelve `None` si el trabajador sí tiene renglones de cuotas.
+pub fn describe_trabajador_sin_detalles(emp: &CedulaEmployee, archivo: &str) -> Option<String> {
+    if !emp.data_employee.is_empty() {
+        return None;
+    }
+    let nombre = emp.nombre.as_deref().unwrap_or("SIN NOMBRE");
+    let nss = emp.no_seguro_social.as_deref().unwrap_or("N/D");
+    Some(format!(
+        "Trabajador '{}' (NSS {}) sin renglones de cuotas en el archivo '{}': omitido",
+        nombre, nss, archivo
+    ))
+}
+
+/// Busca al empleado existente de un cliente para emparejarlo con la cédula.
+/// Parámetros: $1 id_cliente, $2 NSS, $3 CURP, $4 RFC real (sin genéricos SAT), $5 nombre.
+/// El emparejamiento por nombre solo se acepta si ningún identificador del empleado
+/// existente contradice al de la cédula (evita fusionar homónimos distintos).
+const SQL_BUSCAR_EMPLEADO_CEDULA: &str = r#"
+    SELECT id FROM public.empleados
+    WHERE id_cliente = $1 AND (
+        ($2::text IS NOT NULL AND BTRIM(nss) = $2)
+        OR ($3::text IS NOT NULL AND BTRIM(curp) = $3)
+        OR ($4::text IS NOT NULL AND BTRIM(rfc) = $4)
+        OR ($5::text IS NOT NULL AND nombre = $5
+            -- Nombre solo si ningún identificador del existente contradice al de la cédula
+            AND ($2::text IS NULL OR nss IS NULL OR BTRIM(nss) = '' OR BTRIM(nss) = $2)
+            AND ($3::text IS NULL OR curp IS NULL OR BTRIM(curp) = '' OR BTRIM(curp) = $3)
+            AND ($4::text IS NULL OR rfc IS NULL OR BTRIM(rfc) = '' OR BTRIM(rfc) IN ('XAXX010101000', 'XEXX010101000') OR BTRIM(rfc) = $4))
+    )
+    ORDER BY
+        CASE
+            WHEN $2::text IS NOT NULL AND BTRIM(nss) = $2 THEN 1
+            WHEN $3::text IS NOT NULL AND BTRIM(curp) = $3 THEN 2
+            WHEN $4::text IS NOT NULL AND BTRIM(rfc) = $4 THEN 3
+            ELSE 4
+        END
+    LIMIT 1
+    "#;
+
 pub fn save_single_cedula_employee_tx(
     tx: &mut Transaction,
     emp: &CedulaEmployee,
     ctx: &BusinessContext,
 ) -> Result<(usize, usize, usize, usize, usize), Box<dyn std::error::Error + Send + Sync>> {
+    // Guarda: sin renglones de cuotas no se crea empleado, liquidación ni vinculación
+    if emp.data_employee.is_empty() {
+        log::warn!(
+            "Trabajador sin renglones de cuotas omitido: NSS {} ({}), archivo '{}'",
+            emp.no_seguro_social.as_deref().unwrap_or("N/D"),
+            emp.nombre.as_deref().unwrap_or("SIN NOMBRE"),
+            emp.file_name.as_deref().unwrap_or("N/D")
+        );
+        return Ok((0, 0, 0, 0, 0));
+    }
+
     let mut empleados_count = 0;
     let mut liquidaciones_count = 0;
     let mut detalles_count = 0;
@@ -971,23 +1070,7 @@ pub fn save_single_cedula_employee_tx(
     let mut empleado_id: Option<Uuid> = None;
     if nss_param.is_some() || curp_param.is_some() || rfc_param.is_some() || nom_param.is_some() {
         let row = tx.query_opt(
-            r#"
-            SELECT id FROM public.empleados
-            WHERE id_cliente = $1 AND (
-                ($2::text IS NOT NULL AND nss = $2)
-                OR ($3::text IS NOT NULL AND curp = $3)
-                OR ($4::text IS NOT NULL AND rfc = $4)
-                OR ($5::text IS NOT NULL AND nombre = $5)
-            )
-            ORDER BY
-                CASE
-                    WHEN $2::text IS NOT NULL AND nss = $2 THEN 1
-                    WHEN $3::text IS NOT NULL AND curp = $3 THEN 2
-                    WHEN $4::text IS NOT NULL AND rfc = $4 THEN 3
-                    ELSE 4
-                END
-            LIMIT 1
-            "#,
+            SQL_BUSCAR_EMPLEADO_CEDULA,
             &[&ctx.id_cliente, &nss_param, &curp_param, &rfc_param, &nom_param],
         )?;
         if let Some(r) = row {
@@ -1063,22 +1146,22 @@ pub fn save_single_cedula_employee_tx(
     };
 
     // Liquidación
-    let emp_mes = emp.mes_periodo.as_deref().or_else(|| {
-        emp.data_employee.first().and_then(|de| de.mes_periodo.as_deref())
-    });
-    let emp_anio = emp.anio_periodo.as_deref().or_else(|| {
-        emp.data_employee.first().and_then(|de| de.anio_periodo.as_deref())
-    });
-    let mes_norm = normalize_mes_periodo(emp_mes);
-    let mes_int: i16 = {
-        let parsed = if emp.mes_periodo_int >= 1 && emp.mes_periodo_int <= 12 {
-            emp.mes_periodo_int
-        } else {
-            mes_to_periodo_int(&mes_norm)
-        };
-        if (1..=12).contains(&parsed) { parsed } else { 1 }
+    // Periodo obligatorio: sin mes/año legibles no se asigna a ningún periodo por defecto
+    let (mes_val, anio_val) = match resolve_periodo_cedula(emp) {
+        Some(p) => p,
+        None => {
+            let nss = emp.no_seguro_social.as_deref().unwrap_or("N/D");
+            let archivo = emp.file_name.as_deref().unwrap_or("N/D");
+            return Err(format!(
+                "Periodo (mes/año) no detectado para el trabajador NSS {} en el archivo '{}'",
+                nss, archivo
+            )
+            .into());
+        }
     };
-    let anio_norm = normalize_anio_periodo(emp_anio);
+    let mes_int: i16 = mes_val;
+    let anio_norm: i16 = anio_val;
+    let mes_norm: String = month_num_to_name(mes_val as u32).to_string();
 
     let default_nombre_arch = format!("Cédula SUA {} - {}.pdf", ctx.reg_11, mes_norm);
     let nombre_arch = emp.file_name.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&default_nombre_arch);
@@ -1090,9 +1173,15 @@ pub fn save_single_cedula_employee_tx(
         let clean_num = num_obra.trim();
         if !clean_num.is_empty() {
             match crate::validation::validate_registro_obra(clean_num) {
-                Ok(info) => {
-                    obras_to_process.push((info.clean, (ro.dias_registro_obra as i16).clamp(1, 31)));
-                }
+                Ok(info) => match dias_obra_validos(ro.dias_registro_obra) {
+                    Some(dias) => obras_to_process.push((info.clean, dias)),
+                    None => log::warn!(
+                        "Días de obra fuera de rango ({}) para obra {} del trabajador NSS {}: vinculación descartada",
+                        ro.dias_registro_obra,
+                        clean_num,
+                        emp.no_seguro_social.as_deref().unwrap_or("N/D")
+                    ),
+                },
                 Err(err) => {
                     let existing_db_ro = tx.query_opt(
                         "SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND TRIM(numero) = TRIM($3) LIMIT 1",
@@ -1108,7 +1197,15 @@ pub fn save_single_cedula_employee_tx(
                     })?;
                     if let Some(row) = existing_db_ro {
                         let existing_num: String = row.get(0);
-                        obras_to_process.push((existing_num, (ro.dias_registro_obra as i16).clamp(1, 31)));
+                        match dias_obra_validos(ro.dias_registro_obra) {
+                            Some(dias) => obras_to_process.push((existing_num, dias)),
+                            None => log::warn!(
+                                "Días de obra fuera de rango ({}) para obra {} del trabajador NSS {}: vinculación descartada",
+                                ro.dias_registro_obra,
+                                clean_num,
+                                emp.no_seguro_social.as_deref().unwrap_or("N/D")
+                            ),
+                        }
                     } else {
                         log::debug!("Ignorando registro de obra no válido desde cédula '{}': {}", clean_num, err);
                     }
@@ -1121,7 +1218,7 @@ pub fn save_single_cedula_employee_tx(
     let mut dedup_map: std::collections::BTreeMap<String, i16> = std::collections::BTreeMap::new();
     for (num, dias) in obras_to_process {
         let entry = dedup_map.entry(num).or_insert(0);
-        *entry = (*entry + dias).clamp(1, 31);
+        *entry = sumar_dias_obra(*entry, dias);
     }
     let obras_to_process: Vec<(String, i16)> = dedup_map.into_iter().collect();
 
@@ -1255,8 +1352,10 @@ pub fn save_single_cedula_employee_tx(
         };
 
         // Detalles Liquidación (100% información cruda sin filtrar en tablas maestras)
-        if emp.data_employee.is_empty() {
+        for de in &emp.data_employee {
             let id_det = Uuid::now_v7();
+            let dias_det = de.dias.map(|d| d as i16);
+
             tx.execute(
                 r#"
                 INSERT INTO public.detalles_liquidaciones (
@@ -1270,90 +1369,39 @@ pub fn save_single_cedula_employee_tx(
                 &[
                     &id_det,
                     &target_liq_id,
-                    &Option::<String>::None,
-                    &Option::<NaiveDate>::None,
-                    &Some(30i16),
-                    &Option::<f64>::None,
-                    &Option::<f64>::None,
-                    &Option::<f64>::None,
-                    &Option::<f64>::None,
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
+                    &truncate_str(de.clave.as_deref(), 17),
+                    &de.fecha,
+                    &dias_det,
+                    &de.sdi,
+                    &de.lic,
+                    &de.inc,
+                    &de.aus,
+                    &de.cf,
+                    &de.exc_pat,
+                    &de.exc_obr,
+                    &de.pd_pat,
+                    &de.pd_obr,
+                    &de.gmp_pat,
+                    &de.gmp_obr,
+                    &de.rt,
+                    &de.iv_pat,
+                    &de.iv_obr,
+                    &de.gps,
+                    &de.patronal,
+                    &de.obrera,
+                    &de.subtotal,
                 ],
             ).inspect_err(|e| {
                 let err_str = crate::db::schema::format_pg_error(e);
                 crate::app_logger::log_db_error(
-                    "INSERT public.detalles_liquidaciones (fallback)",
+                    "INSERT public.detalles_liquidaciones",
                     &["public.detalles_liquidaciones"],
                     "INSERT INTO public.detalles_liquidaciones (id, id_liquidacion, ...) VALUES (...)",
                     &err_str,
                 );
             })?;
+
             detalles_count += 1;
-        } else {
-            for de in &emp.data_employee {
-                let id_det = Uuid::now_v7();
-                let dias_det = de.dias.map(|d| d as i16);
-
-                tx.execute(
-                    r#"
-                    INSERT INTO public.detalles_liquidaciones (
-                        id, id_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
-                        exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
-                        gps, patronal, obrera, subtotal
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
-                    )
-                    "#,
-                    &[
-                        &id_det,
-                        &target_liq_id,
-                        &truncate_str(de.clave.as_deref(), 17),
-                        &de.fecha,
-                        &dias_det,
-                        &de.sdi,
-                        &de.lic,
-                        &de.inc,
-                        &de.aus,
-                        &de.cf,
-                        &de.exc_pat,
-                        &de.exc_obr,
-                        &de.pd_pat,
-                        &de.pd_obr,
-                        &de.gmp_pat,
-                        &de.gmp_obr,
-                        &de.rt,
-                        &de.iv_pat,
-                        &de.iv_obr,
-                        &de.gps,
-                        &de.patronal,
-                        &de.obrera,
-                        &de.subtotal,
-                    ],
-                ).inspect_err(|e| {
-                    let err_str = crate::db::schema::format_pg_error(e);
-                    crate::app_logger::log_db_error(
-                        "INSERT public.detalles_liquidaciones",
-                        &["public.detalles_liquidaciones"],
-                        "INSERT INTO public.detalles_liquidaciones (id, id_liquidacion, ...) VALUES (...)",
-                        &err_str,
-                    );
-                })?;
-
-                detalles_count += 1;
-            }
         }
 
         target_liq_id
@@ -1520,6 +1568,17 @@ pub fn save_cedulas_concurrent(
     let errores = Mutex::new(Vec::new());
 
     tasks.par_iter().for_each(|(ctx, emp)| {
+        if let Some(msg) = describe_trabajador_sin_detalles(emp, emp.file_name.as_deref().unwrap_or("N/D")) {
+            errores.lock().unwrap().push(msg);
+            let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(cb) = progress_cb {
+                if done % 10 == 0 || done == total {
+                    cb(done, total);
+                }
+            }
+            return;
+        }
+
         let mut client = match pool.get() {
             Ok(c) => c,
             Err(e) => {
@@ -1620,6 +1679,10 @@ pub fn save_cedulas_to_db(
         let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = (|| {
             let ctx = resolve_business_context(&mut tx, biz)?;
             for emp in &biz.employees {
+                if let Some(msg) = describe_trabajador_sin_detalles(emp, emp.file_name.as_deref().unwrap_or("N/D")) {
+                    stats.errores.push(msg);
+                    continue;
+                }
                 let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx)?;
                 stats.empleados_guardados += e_c;
                 stats.liquidaciones_guardadas += l_c;
@@ -1745,3 +1808,221 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod tests_periodo {
+    use super::*;
+    use crate::cedulas::employees::DataEmployee;
+
+    #[test]
+    fn mes_int_y_anio_directos() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 5,
+            anio_periodo: Some("2026".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), Some((5, 2026)));
+    }
+
+    #[test]
+    fn mes_texto_y_anio_con_espacios() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 0,
+            mes_periodo: Some("marzo".to_string()),
+            anio_periodo: Some(" 2025 ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), Some((3, 2025)));
+    }
+
+    #[test]
+    fn mes_no_reconocido_es_none() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 0,
+            mes_periodo: Some("XYZ".to_string()),
+            anio_periodo: Some("2026".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), None);
+    }
+
+    #[test]
+    fn anio_ausente_es_none() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 4,
+            data_employee: vec![DataEmployee {
+                mes_periodo_int: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), None);
+    }
+
+    #[test]
+    fn anio_fuera_de_rango_es_none() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 2,
+            anio_periodo: Some("1985".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), None);
+    }
+
+    #[test]
+    fn periodo_desde_primer_detalle() {
+        let emp = CedulaEmployee {
+            data_employee: vec![DataEmployee {
+                mes_periodo: Some("JUNIO".to_string()),
+                anio_periodo: Some("2024".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), Some((6, 2024)));
+    }
+}
+
+#[cfg(test)]
+mod tests_sin_detalles {
+    use super::*;
+    use crate::cedulas::employees::{DataEmployee, Employee};
+
+    #[test]
+    fn describe_trabajador_sin_renglones_incluye_nombre_nss_y_omitido() {
+        let emp = Employee {
+            nombre: Some("JUAN PEREZ".to_string()),
+            no_seguro_social: Some("12345678901".to_string()),
+            ..Default::default()
+        };
+        let msg = describe_trabajador_sin_detalles(&emp, "cedula.pdf").expect("debe describirse");
+        assert!(msg.contains("JUAN PEREZ"));
+        assert!(msg.contains("12345678901"));
+        assert!(msg.contains("omitido"));
+    }
+
+    #[test]
+    fn describe_trabajador_con_renglones_devuelve_none() {
+        let emp = Employee {
+            data_employee: vec![DataEmployee::default()],
+            ..Default::default()
+        };
+        assert!(describe_trabajador_sin_detalles(&emp, "cedula.pdf").is_none());
+    }
+
+    #[test]
+    fn describe_trabajador_sin_datos_usa_placeholders() {
+        let emp = Employee::default();
+        let msg = describe_trabajador_sin_detalles(&emp, "cedula.pdf").expect("debe describirse");
+        assert!(msg.contains("SIN NOMBRE"));
+        assert!(msg.contains("N/D"));
+    }
+}
+
+#[cfg(test)]
+mod tests_dias_obra {
+    use super::{dias_obra_validos, sumar_dias_obra};
+
+    #[test]
+    fn dias_fuera_de_rango_se_descartan() {
+        assert_eq!(dias_obra_validos(0), None);
+        assert_eq!(dias_obra_validos(-3), None);
+        assert_eq!(dias_obra_validos(32), None);
+    }
+
+    #[test]
+    fn dias_validos_se_conservan() {
+        assert_eq!(dias_obra_validos(1), Some(1));
+        assert_eq!(dias_obra_validos(31), Some(31));
+        assert_eq!(dias_obra_validos(15), Some(15));
+    }
+
+    #[test]
+    fn suma_limitada_a_31() {
+        assert_eq!(sumar_dias_obra(20, 15), 31);
+        assert_eq!(sumar_dias_obra(10, 5), 15);
+        assert_eq!(sumar_dias_obra(i16::MAX, 5), 31);
+    }
+}
+
+#[cfg(test)]
+mod tests_emparejamiento {
+    use super::*;
+
+    /// Colapsa espacios en blanco para que las comparaciones de texto SQL no dependan del formato.
+    fn normalizar(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn sql_no_acepta_nombre_suelto_con_identificador_distinto() {
+        let sql = normalizar(SQL_BUSCAR_EMPLEADO_CEDULA);
+        // Guardas de no-contradicción dentro de la rama de nombre
+        assert!(sql.contains("OR BTRIM(nss) = $2)"), "falta guarda de NSS");
+        assert!(sql.contains("OR BTRIM(curp) = $3)"), "falta guarda de CURP");
+        assert!(sql.contains("OR BTRIM(rfc) = $4)"), "falta guarda de RFC");
+        // La rama de nombre suelta ya no debe existir
+        assert!(
+            !sql.contains("OR ($5::text IS NOT NULL AND nombre = $5)"),
+            "la rama de nombre suelta sigue presente"
+        );
+    }
+
+    #[test]
+    fn homonimo_con_nss_distinto_no_se_fusiona() {
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("PostgreSQL no disponible en test (skipping): {}", e);
+                return;
+            }
+        };
+        let mut tx = match client.transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("No se pudo abrir transacción (skipping): {}", e);
+                return;
+            }
+        };
+
+        // Cliente de prueba (RFC omitido para no chocar con el UNIQUE de genéricos ya existentes)
+        let id_cliente = Uuid::now_v7();
+        let nombre_cliente = format!("CLIENTE PRUEBA HOMONIMOS {}", Uuid::now_v7());
+        tx.execute(
+            "INSERT INTO public.clientes (id, nombre) VALUES ($1, $2)",
+            &[&id_cliente, &nombre_cliente],
+        )
+        .expect("insert de cliente de prueba");
+
+        let nombre_empleado = "JUAN PEREZ LOPEZ";
+        tx.execute(
+            "INSERT INTO public.empleados (id, id_cliente, nombre, nss) VALUES ($1, $2, $3, $4)",
+            &[&Uuid::now_v7(), &id_cliente, &nombre_empleado, &"12345678901"],
+        )
+        .expect("insert de empleado de prueba");
+
+        let nombre_param: Option<String> = Some(nombre_empleado.to_string());
+
+        // NSS distinto: el homónimo no debe emparejarse
+        let nss_distinto: Option<String> = Some("10987654321".to_string());
+        let filas_distinto = tx
+            .query(
+                SQL_BUSCAR_EMPLEADO_CEDULA,
+                &[&id_cliente, &nss_distinto, &None::<String>, &None::<String>, &nombre_param],
+            )
+            .expect("consulta con NSS distinto");
+        assert_eq!(filas_distinto.len(), 0, "un homónimo con NSS distinto se fusionó");
+
+        // Sin NSS en la cédula: el nombre sigue sirviendo
+        let filas_sin_nss = tx
+            .query(
+                SQL_BUSCAR_EMPLEADO_CEDULA,
+                &[&id_cliente, &None::<String>, &None::<String>, &None::<String>, &nombre_param],
+            )
+            .expect("consulta sin NSS");
+        assert_eq!(filas_sin_nss.len(), 1, "el nombre sin contradicción debe emparejar");
+
+        // Siempre revertir: no se deja ningún dato de prueba
+        let _ = tx.rollback();
+    }
+}

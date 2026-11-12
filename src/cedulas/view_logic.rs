@@ -13,7 +13,9 @@ use crate::cedulas::employees::{DataEmployee, Employee, RegistroObra};
 use crate::cedulas::excel::Excel;
 use crate::cedulas::pdf_extractor::{clean_text, extract_with_layout};
 use crate::cedulas::processor::{canonical_razon, canonical_reg, get_employee_data};
-use crate::db::cedulas::{resolve_business_context_for_revision, save_single_cedula_employee_tx, CedulasDbStats};
+use crate::db::cedulas::{
+    describe_trabajador_sin_detalles, resolve_business_context_for_revision, save_single_cedula_employee_tx, CedulasDbStats,
+};
 use crate::db::client::DbPool;
 
 #[derive(Debug, Clone)]
@@ -949,6 +951,22 @@ pub fn process_and_audit_cedulas(
                 }
             }
 
+            // 4. Validar que cada trabajador tenga mes y año de periodo legibles (sin valores por defecto)
+            let sin_periodo = emps
+                .iter()
+                .filter(|e| crate::db::cedulas::resolve_periodo_cedula(e).is_none())
+                .count();
+            if sin_periodo > 0 {
+                mismatch = true;
+                file_mismatches.push(CedulaMismatchItem {
+                    filename: file_display_name.clone(),
+                    error_type: "Periodo no detectado".to_string(),
+                    expected_val: "Mes y año del periodo".to_string(),
+                    found_val: format!("{} trabajador(es) sin periodo legible", sin_periodo),
+                    details: "No se pudo leer el mes y/o año del periodo de esta cédula. Se rechaza el archivo para no asignar los datos a un periodo incorrecto.".to_string(),
+                });
+            }
+
             if mismatch {
                 continue;
             }
@@ -983,6 +1001,9 @@ pub fn process_and_audit_cedulas(
             }
             if mismatch_report.items.iter().any(|i| i.error_type == "Formato no válido") {
                 summary_parts.push("Archivos con formato no oficial SUA");
+            }
+            if mismatch_report.items.iter().any(|i| i.error_type == "Periodo no detectado") {
+                summary_parts.push("Cédulas sin periodo (mes/año) legible");
             }
             let desc = if !summary_parts.is_empty() {
                 format!("CLIENT_MISMATCH: Se encontraron {}", summary_parts.join(", "))
@@ -1853,6 +1874,16 @@ pub fn save_cedulas_audit_to_db(
             }
 
             for emp in &biz.employees {
+                if let Some(msg) = describe_trabajador_sin_detalles(emp, current_file_label) {
+                    stats.errores.push(msg);
+                    current_emp_idx += 1;
+                    if let Some(cb) = progress_cb {
+                        if current_emp_idx % 15 == 0 || current_emp_idx == total_emps {
+                            cb(biz_idx + 1, total_biz, current_file_label);
+                        }
+                    }
+                    continue;
+                }
                 let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx).map_err(|e| {
                     format!(
                         "Error insertando liquidación de trabajador '{}' (NSS: {}, archivo: '{}'): {}",

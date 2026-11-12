@@ -1137,8 +1137,18 @@ pub fn reconcile_all_liquidaciones_vinculaciones_from_rustfs(
                         || clean_ro.starts_with('C')
                         || clean_ro.starts_with('A'))
                 {
-                    let d = (ro.dias_registro_obra as i16).clamp(1, 31);
-                    *obras_consolidadas.entry(clean_ro).or_insert(0) += d;
+                    match crate::db::cedulas::dias_obra_validos(ro.dias_registro_obra) {
+                        Some(d) => {
+                            let acc = obras_consolidadas.entry(clean_ro).or_insert(0);
+                            *acc = crate::db::cedulas::sumar_dias_obra(*acc, d);
+                        }
+                        None => log::warn!(
+                            "Días de obra fuera de rango ({}) para obra {} del trabajador NSS {}: vinculación descartada",
+                            ro.dias_registro_obra,
+                            clean_ro,
+                            emp.no_seguro_social.as_deref().unwrap_or("N/D")
+                        ),
+                    }
                 }
             }
 
@@ -1154,7 +1164,8 @@ pub fn reconcile_all_liquidaciones_vinculaciones_from_rustfs(
             }
 
             for (num_obra, total_dias) in obras_consolidadas {
-                let clamped_dias = total_dias.clamp(1, 31);
+                // total_dias ya es >= 1: solo se acumulan valores válidos
+                let clamped_dias = total_dias.min(31);
                 let m_num = mes_int as i32;
                 let y_val = anio_norm as i32;
                 let valid_m = if (1..=12).contains(&m_num) { m_num as u32 } else { 1u32 };
@@ -2067,8 +2078,18 @@ mod tests {
                             || clean_ro.starts_with('C')
                             || clean_ro.starts_with('A'))
                     {
-                        let d = (ro.dias_registro_obra as i16).clamp(1, 31);
-                        *pdf_obras.entry(clean_ro).or_insert(0) += d;
+                        match crate::db::cedulas::dias_obra_validos(ro.dias_registro_obra) {
+                            Some(d) => {
+                                let acc = pdf_obras.entry(clean_ro).or_insert(0);
+                                *acc = crate::db::cedulas::sumar_dias_obra(*acc, d);
+                            }
+                            None => log::warn!(
+                                "Días de obra fuera de rango ({}) para obra {} del trabajador NSS {}: vinculación descartada",
+                                ro.dias_registro_obra,
+                                clean_ro,
+                                emp.no_seguro_social.as_deref().unwrap_or("N/D")
+                            ),
+                        }
                     }
                 }
 

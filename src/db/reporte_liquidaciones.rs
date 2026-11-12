@@ -3870,6 +3870,25 @@ pub struct ReporteFinalHeaderMeta {
     pub revision_folio: String,
 }
 
+/// Devuelve la lista de campos obligatorios vacíos del encabezado oficial (vacía = válido).
+pub fn missing_header_fields(meta: &ReporteFinalHeaderMeta) -> Vec<&'static str> {
+    let campos: [(&str, &'static str); 8] = [
+        (meta.cliente_nombre.as_str(), "Razón social del cliente"),
+        (meta.rp_registro.as_str(), "Registro patronal"),
+        (meta.rfc.as_str(), "RFC del cliente"),
+        (meta.representante_legal.as_str(), "Representante legal"),
+        (meta.revision_folio.as_str(), "Folio de la revisión"),
+        (meta.periodo_obra.as_str(), "Periodo de obra/revisión"),
+        (meta.delegacion.as_str(), "Delegación IMSS"),
+        (meta.subdelegacion.as_str(), "Subdelegación IMSS"),
+    ];
+    campos
+        .iter()
+        .filter(|(valor, _)| valor.trim().is_empty())
+        .map(|(_, etiqueta)| *etiqueta)
+        .collect()
+}
+
 fn format_nss_styled(nss: &str) -> String {
     let digits: String = nss.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.len() == 11 {
@@ -3924,33 +3943,29 @@ pub fn export_reporte_liquidaciones_to_excel(
     cliente_nombre: &str,
     rp_registro: &str,
     revision_folio: &str,
-    header_meta: Option<&ReporteFinalHeaderMeta>,
+    header_meta: &ReporteFinalHeaderMeta,
 ) -> Result<(), String> {
     use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook};
 
+    // Ningún dato fijo: el encabezado oficial exige todos los campos capturados
+    let faltantes = missing_header_fields(header_meta);
+    if !faltantes.is_empty() {
+        return Err(format!(
+            "No se puede generar el entregable: faltan datos obligatorios: {}",
+            faltantes.join(", ")
+        ));
+    }
+
     let mut workbook = Workbook::new();
 
-    let meta = header_meta.cloned().unwrap_or_else(|| {
-        ReporteFinalHeaderMeta {
-            delegacion: "COAHUILA".to_string(),
-            subdelegacion: "SALTILLO".to_string(),
-            cliente_nombre: cliente_nombre.to_string(),
-            rp_registro: rp_registro.to_string(),
-            rfc: "GON2110075C9".to_string(),
-            periodo_obra: "15/04/2026 AL 30/06/2026".to_string(),
-            representante_legal: "ARTURO CARRILLO DOMINGUEZ".to_string(),
-            revision_folio: revision_folio.to_string(),
-        }
-    });
-
-    let delegacion = if meta.delegacion.trim().is_empty() { "COAHUILA" } else { meta.delegacion.trim() };
-    let subdelegacion = if meta.subdelegacion.trim().is_empty() { "SALTILLO" } else { meta.subdelegacion.trim() };
-    let emp_nombre = if meta.cliente_nombre.trim().is_empty() { cliente_nombre } else { meta.cliente_nombre.trim() };
-    let rp_reg = if meta.rp_registro.trim().is_empty() { rp_registro } else { meta.rp_registro.trim() };
-    let rfc_val = if meta.rfc.trim().is_empty() { "GON2110075C9" } else { meta.rfc.trim() };
-    let per_obra = if meta.periodo_obra.trim().is_empty() { "15/04/2026 AL 30/06/2026" } else { meta.periodo_obra.trim() };
-    let rep_legal = if meta.representante_legal.trim().is_empty() { "ARTURO CARRILLO DOMINGUEZ" } else { meta.representante_legal.trim() };
-    let fol_rev = if meta.revision_folio.trim().is_empty() { revision_folio } else { meta.revision_folio.trim() };
+    let delegacion = header_meta.delegacion.trim();
+    let subdelegacion = header_meta.subdelegacion.trim();
+    let emp_nombre = header_meta.cliente_nombre.trim();
+    let rp_reg = header_meta.rp_registro.trim();
+    let rfc_val = header_meta.rfc.trim();
+    let per_obra = header_meta.periodo_obra.trim();
+    let rep_legal = header_meta.representante_legal.trim();
+    let fol_rev = header_meta.revision_folio.trim();
 
     // Configuración oficial de encabezados y pies de página para impresión en Excel:
     // Superior izquierdo: Razón Social
@@ -6586,6 +6601,28 @@ mod tests {
     }
 
     #[test]
+    fn missing_header_fields_detecta_vacios() {
+        let vacio = ReporteFinalHeaderMeta::default();
+        assert_eq!(missing_header_fields(&vacio).len(), 8);
+
+        let completo = ReporteFinalHeaderMeta {
+            delegacion: "DELEGACION".to_string(),
+            subdelegacion: "SUBDELEGACION".to_string(),
+            cliente_nombre: "EMPRESA SA DE CV".to_string(),
+            rp_registro: "RP-1".to_string(),
+            rfc: "XAXX010101000".to_string(),
+            periodo_obra: "01/01/2024 AL 31/12/2024".to_string(),
+            representante_legal: "REPRESENTANTE".to_string(),
+            revision_folio: "FOLIO-1".to_string(),
+        };
+        assert!(missing_header_fields(&completo).is_empty());
+
+        let mut rep_blank = completo.clone();
+        rep_blank.representante_legal = "   ".to_string();
+        assert!(missing_header_fields(&rep_blank).contains(&"Representante legal"));
+    }
+
+    #[test]
     fn test_export_reporte_liquidaciones_excel_multi_sheet() {
         let obra_user_1 = Uuid::now_v7();
         let obra_user_2 = Uuid::now_v7();
@@ -6653,7 +6690,16 @@ mod tests {
             "EMPRESA PRUEBA S.A. DE C.V.",
             "Y54-10204-10-8",
             "REVISION 2024-01",
-            None,
+            &ReporteFinalHeaderMeta {
+                delegacion: "DELEGACION DE PRUEBA".to_string(),
+                subdelegacion: "SUBDELEGACION DE PRUEBA".to_string(),
+                cliente_nombre: "EMPRESA DE PRUEBA SA DE CV".to_string(),
+                rp_registro: "Y54-10204-10-8".to_string(),
+                rfc: "XAXX010101000".to_string(),
+                periodo_obra: "01/01/2024 AL 31/12/2024".to_string(),
+                representante_legal: "REPRESENTANTE DE PRUEBA".to_string(),
+                revision_folio: "REVISION 2024-01".to_string(),
+            },
         );
 
         assert!(res.is_ok(), "El reporte en Excel debe generarse correctamente: {:?}", res.err());

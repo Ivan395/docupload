@@ -688,6 +688,8 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         END $$;
 
         -- Column additions to accommodate all fields from cédulas and nóminas
+        ALTER TABLE public.clientes ADD COLUMN IF NOT EXISTS representante_legal varchar(150);
+        COMMENT ON COLUMN public.clientes.representante_legal IS 'Nombre del representante legal que firma los entregables ante el IMSS';
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS id_entidad_federativa uuid REFERENCES public.entidades_federativas(id) ON UPDATE CASCADE ON DELETE CASCADE;
@@ -1870,6 +1872,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
                 END IF;
                 IF NEW.razon_social IS NOT NULL THEN
                     NEW.razon_social := UPPER(NEW.razon_social);
+                END IF;
+                IF NEW.representante_legal IS NOT NULL THEN
+                    NEW.representante_legal := UPPER(BTRIM(NEW.representante_legal));
                 END IF;
             ELSIF TG_TABLE_NAME = 'registros_patronales' THEN
                 IF NEW.registro IS NOT NULL THEN

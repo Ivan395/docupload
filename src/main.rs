@@ -603,6 +603,7 @@ fn load_clientes_ui(ui: &MainWindow, pool: &DbPool) {
                 id: c.id.into(),
                 nombre: c.nombre.into(),
                 razon_social: c.razon_social.into(),
+                representante_legal: c.representante_legal.into(),
                 rfc: c.rfc.into(),
                 curp: c.curp.into(),
                 tipo_persona: c.tipo_persona.into(),
@@ -1483,6 +1484,8 @@ pub struct CedulasViewState {
     pub pending_staged_local_paths: Vec<PathBuf>,
     pub pending_overwrite_months: Vec<(String, String)>,
     pub pending_overwrite_old_files: Vec<String>,
+    /// Cliente, registro patronal y revisión usados al subir a staging (necesarios para revertirlo)
+    pub pending_staging_ctx: Option<(String, String, String)>,
 }
 
 fn update_cedulas_view_file_list_ui(ui: &MainWindow, state: &CedulasViewState) {
@@ -1959,7 +1962,6 @@ fn handle_cedulas_upload_and_inspect(
         //    sin modificar ni borrar datos definitivos hasta que PostgreSQL confirme el COMMIT.
         let batch_id = Uuid::now_v7().simple().to_string();
         let mut overwritten_count = 0;
-        let mut new_count = 0;
         let mut cleaned_months_in_batch: HashSet<(String, String)> = HashSet::new();
         let mut batch_month_file_counters: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
         let mut staged_local_paths: Vec<PathBuf> = Vec::new();
@@ -2040,11 +2042,7 @@ fn handle_cedulas_upload_and_inspect(
                     for old_card in existing_matches {
                         overwrite_old_files.push(old_card.filename.clone());
                     }
-                } else {
-                    new_count += 1;
                 }
-            } else {
-                new_count += 1;
             }
 
             let file_seq = batch_month_file_counters.entry(month_key).or_insert(0);
@@ -2132,7 +2130,49 @@ fn handle_cedulas_upload_and_inspect(
 
         drop(prog_tx);
 
-        // 4. Actualizar la interfaz Slint e iniciar procesamiento y guardado persistente atómico
+        // Impacto del reemplazo: consulta por mes en este hilo de fondo (nunca en el hilo de UI)
+        let overwrite_summary: String = if overwrite_months.is_empty() {
+            String::new()
+        } else {
+            let mut lines: Vec<String> = Vec::new();
+            let mut db_conn = pool_clone.as_ref().and_then(|p| p.get().ok());
+            let rev_uuid_opt = Uuid::parse_str(&revision_id).ok();
+            for (anio, mes) in &overwrite_months {
+                let mes_up = mes.trim().to_uppercase();
+                let etiqueta = format!("{} {}", mes_up, anio);
+                let line = match (db_conn.as_mut(), rev_uuid_opt, anio.trim().parse::<i16>()) {
+                    (Some(client), Some(rev_uuid), Ok(anio_num)) => {
+                        let mes_num = crate::cedulas::business::month_to_num(&mes_up) as i16;
+                        match client.query_one(
+                            "SELECT COUNT(DISTINCT rl.id)::bigint,
+                                    COUNT(rdl.id) FILTER (WHERE rdl.id_registro_obra IS NOT NULL)::bigint
+                             FROM public.reportes_liquidaciones rl
+                             LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
+                             WHERE rl.id_revision = $1 AND rl.anio_periodo = $2
+                               AND (UPPER(TRIM(rl.mes_periodo)) = $3 OR rl.mes_periodo_int = $4)",
+                            &[&rev_uuid, &anio_num, &mes_up, &mes_num],
+                        ) {
+                            Ok(row) => {
+                                let n_filas: i64 = row.get(0);
+                                let n_asig: i64 = row.get(1);
+                                format!("{}: {} filas de reporte, {} asignaciones de obra", etiqueta, n_filas, n_asig)
+                            }
+                            Err(e) => format!("{}: no se pudo consultar ({})", etiqueta, e),
+                        }
+                    }
+                    (None, _, _) | (_, None, _) => {
+                        format!("{}: no se pudo consultar (sin conexión a BD o revisión inválida)", etiqueta)
+                    }
+                    _ => format!("{}: no se pudo consultar (año no válido: {})", etiqueta, anio),
+                };
+                lines.push(line);
+            }
+            lines.push(format!("Archivos nuevos que reemplazan: {}", staged_local_paths.len()));
+            lines.join("\n")
+        };
+        let staging_ctx = (c_nom.clone(), r_reg.clone(), rev_nom.clone());
+
+        // 4. Actualizar la interfaz Slint; si hay meses repetidos, pedir confirmación antes de procesar
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 {
@@ -2143,15 +2183,19 @@ fn handle_cedulas_upload_and_inspect(
                     sess.pending_staged_local_paths = staged_local_paths;
                     sess.pending_overwrite_months = overwrite_months;
                     sess.pending_overwrite_old_files = overwrite_old_files;
+                    sess.pending_staging_ctx = Some(staging_ctx);
                     update_cedulas_view_file_list_ui(&ui, &sess);
                 }
 
                 if overwritten_count > 0 {
-                    show_toast_message(&ui, &format!("Se prepararon {} cédula(s) nueva(s) y {} para actualizar meses existentes.", new_count, overwritten_count));
+                    // Sin confirmación no se procesa nada: el worker se lanza desde el modal
+                    let app_data = ui.global::<AppData>();
+                    app_data.set_cedulas_overwrite_confirm_msg(overwrite_summary.into());
+                    app_data.set_show_cedulas_overwrite_confirm_modal(true);
+                } else {
+                    // Iniciar procesamiento y guardado atómico bidireccional (PostgreSQL + rustfs)
+                    spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
                 }
-
-                // Iniciar procesamiento y guardado atómico bidireccional (PostgreSQL + rustfs)
-                spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
             }
         });
     });
@@ -2738,14 +2782,40 @@ fn spawn_cedulas_view_worker(
                             } else {
                                 "La información de estas cédulas ya se encontraba previamente registrada en la base de datos PostgreSQL. No se duplicaron liquidaciones ni detalles.".to_string()
                             };
-                            let msg_obras = if stats.vinculaciones_guardadas > 0 {
+                            let msg_obras = if stats.registros_obras_guardados > 0 || stats.vinculaciones_guardadas > 0 {
                                 format!(
-                                    "Se vincularon {} liquidaciones a las obras creadas por el usuario en esta revisión. No se crearon registros de obra nuevos.",
-                                    stats.vinculaciones_guardadas
+                                    "Se leyeron de las cédulas {} registro(s) de obra nuevos (quedan como 'detectados en cédula', no visibles en Registros de Obras hasta que los registres) y se crearon {} vinculaciones de liquidaciones con obras.",
+                                    stats.registros_obras_guardados, stats.vinculaciones_guardadas
                                 )
                             } else {
-                                "No se crearon registros de obra en la base de datos. Se conservan exclusivamente las obras creadas por el usuario.".to_string()
+                                "Las cédulas no traían registros de obra nuevos ni vinculaciones nuevas.".to_string()
                             };
+
+                            // Omitidos/avisos de la ingesta: contador y lista truncada para el modal
+                            const MAX_OMITIDOS_UI: usize = 200;
+                            for aviso in &stats.errores {
+                                log::warn!("Cédulas — {}", aviso);
+                            }
+                            let omitidos_count = stats.errores.len();
+                            let omitidos_msg = if omitidos_count == 0 {
+                                String::new()
+                            } else {
+                                let mut lineas: Vec<String> = stats
+                                    .errores
+                                    .iter()
+                                    .take(MAX_OMITIDOS_UI)
+                                    .cloned()
+                                    .collect();
+                                if omitidos_count > MAX_OMITIDOS_UI {
+                                    lineas.push(format!(
+                                        "... y {} más (ver log)",
+                                        omitidos_count - MAX_OMITIDOS_UI
+                                    ));
+                                }
+                                lineas.join("\n")
+                            };
+                            app_data.set_cedulas_success_omitidos_count(omitidos_count as i32);
+                            app_data.set_cedulas_success_omitidos_msg(omitidos_msg.into());
                             let msg_rev = format!(
                                 "Todas las liquidaciones y detalles fueron asociadas a la revisión activa: '{}'. No se crearon revisiones nuevas.",
                                 rev_title
@@ -5588,6 +5658,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_new_cliente_nombre("".into());
                 app_data.set_new_cliente_rfc("".into());
                 app_data.set_new_cliente_razon_social("".into());
+                app_data.set_new_cliente_representante_legal("".into());
                 app_data.set_new_cliente_curp("".into());
                 app_data.set_new_cliente_tipo_persona_val("-- Seleccionar Tipo Persona --".into());
                 app_data.set_new_cliente_regimen_val("-- Seleccione primero Tipo Persona --".into());
@@ -5612,6 +5683,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_new_cliente_nombre("".into());
                 app_data.set_new_cliente_rfc("".into());
                 app_data.set_new_cliente_razon_social("".into());
+                app_data.set_new_cliente_representante_legal("".into());
                 app_data.set_new_cliente_curp("".into());
             }
         });
@@ -5666,7 +5738,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
-        app_logic.on_submit_new_cliente(move |nombre, rfc, razon_social, curp, tp_val, reg_val| {
+        app_logic.on_submit_new_cliente(move |nombre, rfc, razon_social, curp, tp_val, reg_val, representante_legal| {
             if let Some(ui) = ui_weak.upgrade() {
                 let tp_opt = if tp_val.to_uppercase().contains("MORAL") {
                     Some("MORAL")
@@ -5712,6 +5784,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 nombre.as_str(),
                                 rfc.as_str(),
                                 razon_social.as_str(),
+                                representante_legal.as_str(),
                                 curp.as_str(),
                                 &id_tp,
                                 &id_rf,
@@ -5722,6 +5795,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                     app_data.set_new_cliente_nombre("".into());
                                     app_data.set_new_cliente_rfc("".into());
                                     app_data.set_new_cliente_razon_social("".into());
+                                    app_data.set_new_cliente_representante_legal("".into());
                                     app_data.set_new_cliente_curp("".into());
                                     show_toast_message(&ui, &format!("Cliente '{}' registrado exitosamente.", new_cli.nombre));
                                     load_clientes_ui(&ui, pool);
@@ -5763,6 +5837,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_edit_cliente_id(c.id.into());
                                 app_data.set_edit_cliente_nombre(c.nombre.into());
                                 app_data.set_edit_cliente_razon_social(c.razon_social.into());
+                                app_data.set_edit_cliente_representante_legal(c.representante_legal.into());
                                 app_data.set_edit_cliente_rfc(c.rfc.into());
                                 app_data.set_edit_cliente_curp(c.curp.into());
                                 app_data.set_edit_cliente_has_data(c.has_ingested_data);
@@ -5874,7 +5949,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
-        app_logic.on_submit_edit_cliente(move |id, nombre, razon_social, rfc, curp, tp_val, reg_val| {
+        app_logic.on_submit_edit_cliente(move |id, nombre, razon_social, rfc, curp, tp_val, reg_val, representante_legal| {
             if let Some(ui) = ui_weak.upgrade() {
                 let tp_opt = if tp_val.to_uppercase().contains("MORAL") {
                     Some("MORAL")
@@ -5920,6 +5995,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 id.as_str(),
                                 nombre.as_str(),
                                 razon_social.as_str(),
+                                representante_legal.as_str(),
                                 rfc.as_str(),
                                 curp.as_str(),
                                 &id_tp,
@@ -6986,6 +7062,59 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // 54c. Confirmar reemplazo de meses ya cargados: lanza el procesamiento
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = cedulas_session.clone();
+        let pool_clone = db_pool.clone();
+        app_logic.on_confirmar_sobrescribir_cedulas(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_cedulas_overwrite_confirm_modal(false);
+                spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
+            }
+        });
+    }
+
+    // 54d. Cancelar reemplazo: revierte el staging en RustFS y limpia copias locales; no toca la BD
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = cedulas_session.clone();
+        app_logic.on_cancelar_sobrescribir_cedulas(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            ui.global::<AppData>().set_show_cedulas_overwrite_confirm_modal(false);
+            let (batch_opt, ctx_opt) = {
+                let mut sess = session_clone.lock().unwrap();
+                let batch = sess.pending_staging_batch_id.take();
+                for p in std::mem::take(&mut sess.pending_staged_local_paths) {
+                    let _ = std::fs::remove_file(&p);
+                }
+                sess.pending_overwrite_months.clear();
+                sess.pending_overwrite_old_files.clear();
+                (batch, sess.pending_staging_ctx.take())
+            };
+            if let Some(batch_id) = batch_opt {
+                match ctx_opt {
+                    Some((c_nom, r_reg, rev_nom)) => {
+                        std::thread::spawn(move || {
+                            if let Err(e) = crate::rustfs::rollback_staging_files_in_rustfs(
+                                &c_nom,
+                                &r_reg,
+                                &rev_nom,
+                                "Cedulas_de_cuotas",
+                                &batch_id,
+                            ) {
+                                log::warn!("No se pudo revertir el staging de cédulas en RustFS (batch {}): {}", batch_id, e);
+                            }
+                        });
+                    }
+                    None => log::warn!("Staging de cédulas (batch {}) sin contexto de cliente/RP/revisión; no se revirtió en RustFS", batch_id),
+                }
+            }
+            ui.global::<AppLogic>().invoke_recargar_cedulas_view();
+            show_toast_message(&ui, "Carga cancelada: no se modificó ningún mes.");
+        });
+    }
+
     // 54b. Cerrar modal global de error del sistema
     {
         let ui_weak = main_window.as_weak();
@@ -7057,26 +7186,108 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Reconciliación en segundo plano de vinculaciones y limpieza de liquidaciones desde RustFS
-    if let Some(pool_rec) = db_pool.clone() {
-        std::thread::Builder::new()
-            .name("rustfs_reconcile".into())
-            .spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                if let Ok(mut client) = pool_rec.get() {
-                    log::info!("Iniciando limpieza y normalización de claves en liquidaciones...");
-                    match crate::rustfs::clean_and_repair_detalles_liquidaciones_database(&mut client) {
-                        Ok(stats) => log::info!("Limpieza de claves en liquidaciones completada: {:?}", stats),
-                        Err(e) => log::warn!("Limpieza de claves en liquidaciones en segundo plano: {}", e),
-                    }
-                    log::info!("Iniciando reconciliación de vinculaciones de liquidaciones desde RustFS...");
-                    match crate::rustfs::reconcile_all_liquidaciones_vinculaciones_from_rustfs(&mut client) {
-                        Ok(stats) => log::info!("Reconciliación de liquidaciones completada con éxito: {:?}", stats),
-                        Err(e) => log::warn!("Reconciliación de liquidaciones en segundo plano: {}", e),
-                    }
+    // ==========================================
+    // REPARACIÓN MANUAL DE CÉDULAS DESDE RUSTFS (no se ejecuta al arrancar)
+    // ==========================================
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_abrir_reparar_rustfs(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                if !app_data.get_reparar_rustfs_en_curso() {
+                    app_data.set_show_reparar_rustfs_modal(true);
                 }
-            })
-            .ok();
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_cancelar_reparar_rustfs(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_reparar_rustfs_modal(false);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_rep = db_pool.clone();
+        app_logic.on_confirmar_reparar_rustfs(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let app_data = ui.global::<AppData>();
+            app_data.set_show_reparar_rustfs_modal(false);
+            if app_data.get_reparar_rustfs_en_curso() {
+                return;
+            }
+            app_data.set_reparar_rustfs_en_curso(true);
+            show_toast_message(&ui, "Reparación iniciada en segundo plano...");
+
+            let pool_hilo = pool_rep.clone();
+            let ui_hilo = ui_weak.clone();
+            let spawn_result = std::thread::Builder::new()
+                .name("rustfs_reparacion_manual".into())
+                .spawn(move || {
+                    // Fallo del paso 1 (limpieza): no aborta la reconciliación, pero se informa al usuario
+                    let mut aviso_limpieza: Option<String> = None;
+                    let resultado: Result<crate::rustfs::ReconcileStats, String> = match pool_hilo {
+                        None => Err("No hay conexión a la base de datos disponible".to_string()),
+                        Some(pool) => match pool.get() {
+                            Err(e) => Err(format!("No se pudo obtener conexión: {}", e)),
+                            Ok(mut client) => {
+                                log::info!("Reparación manual: limpieza y normalización de claves en liquidaciones...");
+                                if let Err(e) = crate::rustfs::clean_and_repair_detalles_liquidaciones_database(&mut client) {
+                                    log::warn!("Limpieza de claves (reparación manual) falló: {}", e);
+                                    aviso_limpieza = Some(e);
+                                } else {
+                                    log::info!("Limpieza de claves completada");
+                                }
+                                log::info!("Reparación manual: reconciliación de vinculaciones desde RustFS...");
+                                match crate::rustfs::reconcile_all_liquidaciones_vinculaciones_from_rustfs(&mut client) {
+                                    Ok(stats) => {
+                                        log::info!("Reconciliación manual completada: {:?}", stats);
+                                        Ok(stats)
+                                    }
+                                    Err(e) => {
+                                        log::warn!("Reconciliación manual falló: {}", e);
+                                        Err(e)
+                                    }
+                                }
+                            }
+                        },
+                    };
+
+                    let mensaje = match resultado {
+                        Ok(stats) => format!(
+                            "Reparación completada: {} PDF inspeccionados, {} vinculaciones actualizadas, {} vinculaciones inválidas eliminadas, {} revisiones sincronizadas.",
+                            stats.total_files_inspected,
+                            stats.vinculaciones_upserted,
+                            stats.fake_vinculaciones_removed,
+                            stats.revisions_synced
+                        ),
+                        Err(e) => format!("La reparación falló: {}", e),
+                    };
+                    let mensaje = match aviso_limpieza {
+                        Some(e) => format!("{} (Atención: la limpieza de claves falló: {})", mensaje, e),
+                        None => mensaje,
+                    };
+
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_hilo.upgrade() {
+                            ui.global::<AppData>().set_reparar_rustfs_en_curso(false);
+                            show_toast_message(&ui, &mensaje);
+                            ui.global::<AppLogic>().invoke_recargar_cedulas_view();
+                        }
+                    });
+                });
+
+            if spawn_result.is_err() {
+                app_data.set_reparar_rustfs_en_curso(false);
+                show_toast_message(&ui, "Error: no se pudo iniciar el hilo de reparación");
+            }
+        });
     }
 
     // ==========================================
