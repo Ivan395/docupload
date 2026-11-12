@@ -49,6 +49,7 @@ pub mod reporte_view_logic;
 pub mod asignacion_view_logic;
 mod asistente_asignacion;
 mod asignacion_obra_logic;
+mod operacion_ui;
 pub mod sat;
 pub mod sua_export;
 pub mod updater;
@@ -7394,6 +7395,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 55. Callbacks de Reporte Liquidaciones
     wire_reporte_liquidaciones_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
+    // Texto de atajos según el sistema operativo (Ctrl en Windows/Linux, ⌘ en macOS)
+    main_window.global::<AppData>().set_asig_atajos_texto(crate::operacion_ui::texto_atajos().into());
     crate::asignacion_view_logic::wire_asignacion_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
     crate::asistente_asignacion::wire_asistente_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
     crate::asignacion_obra_logic::wire_asignacion_obra_callbacks(&main_window, db_pool.clone(), reporte_session.clone());

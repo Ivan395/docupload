@@ -747,10 +747,11 @@ fn actualizar_deshacer(ui: &MainWindow, ultimo: Option<(Uuid, String)>) {
     }
 }
 
-/// Ejecuta una acción de BD sobre la revisión activa y luego recarga el reporte.
+/// Ejecuta una acción de BD sobre la revisión activa EN SEGUNDO PLANO y luego recarga el reporte.
 ///
-/// Siempre: marca procesando, libera el lock de sesión antes de recargar (la recarga lo toma),
-/// actualiza deshacer y muestra un toast con el mensaje o el error.
+/// La acción recibe una copia del estado de la sesión (no bloquea la interfaz ni el lock de sesión).
+/// Mientras corre se muestra la capa global de avance; al terminar, en el hilo de la interfaz:
+/// recarga el reporte, actualiza deshacer y muestra un toast con el mensaje o el error.
 fn ejecutar_accion<F>(
     ui: &MainWindow,
     pool: &Option<Arc<DbPool>>,
@@ -758,13 +759,16 @@ fn ejecutar_accion<F>(
     descripcion: &str,
     accion: F,
 ) where
-    F: FnOnce(&mut Client, Uuid, &ReporteSessionState) -> Result<String, String>,
+    F: FnOnce(&mut Client, Uuid, &ReporteSessionState) -> Result<String, String> + Send + 'static,
 {
-    let rev_str = session
-        .lock()
-        .ok()
-        .and_then(|st| st.current_revision_id.clone());
-    let Some(rev_str) = rev_str else {
+    let instantanea = match session.lock() {
+        Ok(st) => st.clone(),
+        Err(_) => {
+            show_toast_message(ui, "Estado de la sesión bloqueado; intenta de nuevo.");
+            return;
+        }
+    };
+    let Some(rev_str) = instantanea.current_revision_id.clone() else {
         show_toast_message(ui, "Seleccione una revisión antes de continuar.");
         return;
     };
@@ -775,43 +779,52 @@ fn ejecutar_accion<F>(
             return;
         }
     };
-    let Some(pool_ref) = pool.as_ref() else {
+    let Some(pool_hilo) = pool.clone() else {
         show_toast_message(ui, "Sin conexión a la base de datos.");
         return;
     };
 
-    let app_data = ui.global::<AppData>();
-    app_data.set_asig_procesando(true);
-
-    let (resultado, deshacer) = match pool_ref.get() {
-        Err(e) => (Err(format!("conexión a la base de datos: {e}")), None),
-        Ok(mut client) => {
-            let resultado = match session.lock() {
-                Ok(st) => accion(&mut *client, rev, &*st),
-                Err(_) => Err("estado de la sesión bloqueado".to_string()),
-            };
-            let deshacer = match ultimo_lote_revision(&mut *client, rev) {
-                Ok(d) => d,
-                Err(e) => {
-                    log::error!("Asignación por empleado: consulta de bitácora: {e}");
-                    None
+    let pool_recarga = pool.clone();
+    let session_recarga = session.clone();
+    let descripcion_final = descripcion.to_string();
+    let titulo = format!("Guardando: {descripcion}…");
+    ui.global::<AppData>().set_asig_procesando(true);
+    crate::operacion_ui::ejecutar_con_avance(
+        ui,
+        &titulo,
+        "Aplicando el cambio, registrándolo en la bitácora y recalculando el prorrateo.",
+        move || {
+            match pool_hilo.get() {
+                Err(e) => (Err(format!("conexión a la base de datos: {e}")), None),
+                Ok(mut client) => {
+                    let resultado = accion(&mut *client, rev, &instantanea);
+                    let deshacer = match ultimo_lote_revision(&mut *client, rev) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            log::error!("Asignación por empleado: consulta de bitácora: {e}");
+                            None
+                        }
+                    };
+                    (resultado, deshacer)
                 }
-            };
-            (resultado, deshacer)
-        }
-    };
-
-    app_data.set_asig_procesando(false);
-    // La recarga toma el lock de sesión, por eso se liberó arriba.
-    sync_and_load_reporte_data(ui, pool, session, &rev_str, false);
-    actualizar_deshacer(ui, deshacer);
-
-    match resultado {
-        Ok(mensaje) => show_toast_message(ui, &mensaje),
-        Err(e) => {
-            log::error!("Asignación por empleado ({descripcion}): {e}");
-            show_toast_message(ui, &format!("No se pudo {descripcion}: {e}"));
-        }
+            }
+        },
+        move |ui, (resultado, deshacer): (Result<String, String>, Option<(Uuid, String)>)| {
+            ui.global::<AppData>().set_asig_procesando(false);
+            sync_and_load_reporte_data(ui, &pool_recarga, &session_recarga, &rev_str, false);
+            actualizar_deshacer(ui, deshacer);
+            match resultado {
+                Ok(mensaje) => show_toast_message(ui, &mensaje),
+                Err(e) => {
+                    log::error!("Asignación por empleado ({descripcion_final}): {e}");
+                    show_toast_message(ui, &format!("No se pudo {descripcion_final}: {e}"));
+                }
+            }
+        },
+    );
+    // Si la operación no pudo iniciarse (otra en curso), no dejar la pestaña marcada como procesando.
+    if !ui.global::<AppData>().get_operacion_en_curso() {
+        ui.global::<AppData>().set_asig_procesando(false);
     }
 }
 

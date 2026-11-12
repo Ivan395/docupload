@@ -205,16 +205,38 @@ component AsigObraPicker inherits Rectangle {
     }
 }
 
-export component AsignacionEmpleadosView inherits Rectangle {
-    background: #f8fafc;
+// La vista ES el FocusScope y rodea a todos sus controles: así los atajos (KeyBinding) funcionan aunque
+// el foco esté en el buscador o en cualquier control interno. Slint traduce Control → ⌘ Command en macOS,
+// por lo que los mismos atajos sirven en Windows, Linux y Mac.
+export component AsignacionEmpleadosView inherits FocusScope {
+    init => { root.focus(); }
 
-    init => { atajos.focus(); }
+    KeyBinding {
+        keys: @keys(Control + F);
+        activated => { buscador.focus(); }
+    }
+    KeyBinding {
+        keys: @keys(Control + Z);
+        enabled: AppData.asig_puede_deshacer && !AppData.asig_procesando && !AppData.operacion_en_curso;
+        activated => { AppLogic.asig_deshacer(); }
+    }
+    KeyBinding {
+        keys: @keys(Control + Shift + A);
+        enabled: !AppData.operacion_en_curso;
+        activated => { AppLogic.asig_asistente_abrir(); }
+    }
+    KeyBinding {
+        keys: @keys(Escape);
+        activated => {
+            AppData.asig_empleado_sel_id = "";
+            AppData.asig_empleado_sel_nombre = "";
+            root.focus();
+        }
+    }
 
-    // Fondo: un clic en zona vacía devuelve el foco a los atajos (no consume clics de hijos)
-    fondo_touch := TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => { atajos.focus(); }
+    // Fondo de la vista
+    Rectangle {
+        background: #f8fafc;
     }
 
     VerticalLayout {
@@ -303,6 +325,12 @@ export component AsignacionEmpleadosView inherits Rectangle {
                     spacing: 4px;
 
                     AsigBoton {
+                        texto: "🪄 Asistente de asignación";
+                        variante: 1;
+                        clicked => { AppLogic.asig_asistente_abrir(); }
+                    }
+
+                    AsigBoton {
                         texto: "Deshacer";
                         icono: "↶";
                         habilitado: AppData.asig_puede_deshacer;
@@ -311,7 +339,7 @@ export component AsignacionEmpleadosView inherits Rectangle {
 
                     // Ayuda de atajos (los mismos que maneja el FocusScope "atajos")
                     Text {
-                        text: "Ctrl+F buscar · Ctrl+Z deshacer · Ctrl+M asistente · Esc limpiar";
+                        text: AppData.asig_atajos_texto;
                         font-size: 10px;
                         color: #94a3b8;
                         horizontal-alignment: center;
@@ -731,34 +759,6 @@ export component AsignacionEmpleadosView inherits Rectangle {
             }
         }
 
-    }
-
-    // Atajos de teclado de la pestaña. Solo acepta las combinaciones propias;
-    // el resto se rechaza para no robar teclas a los controles de edición.
-    atajos := FocusScope {
-        width: parent.width;
-        height: parent.height;
-
-        key-pressed(event) => {
-            if (event.modifiers.control && event.text == "f") {
-                buscador.focus();
-                return accept;
-            }
-            if (event.modifiers.control && event.text == "z" && AppData.asig_puede_deshacer && !AppData.asig_procesando) {
-                AppLogic.asig_deshacer();
-                return accept;
-            }
-            if (event.modifiers.control && event.text == "m") {
-                AppLogic.asig_asistente_abrir();
-                return accept;
-            }
-            if (event.text == Key.Escape) {
-                AppData.asig_empleado_sel_id = "";
-                AppData.asig_empleado_sel_nombre = "";
-                return accept;
-            }
-            reject
-        }
     }
 
     // Asistente de asignación masiva (escenario C): último hijo para quedar encima de la vista,

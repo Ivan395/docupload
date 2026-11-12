@@ -959,50 +959,61 @@ pub fn wire_asistente_callbacks(
                 show_toast_message(&ui, "La revisión seleccionada no es válida.");
                 return;
             };
-            let Some(pool_ref) = pool.as_ref() else {
+            let Some(pool_hilo) = pool.clone() else {
                 show_toast_message(&ui, "Sin conexión a la base de datos.");
                 return;
             };
 
-            let app = ui.global::<AppData>();
-            app.set_asig_procesando(true);
-            let (resultado, deshacer) = match pool_ref.get() {
-                Err(e) => (Err(format!("conexión a la base de datos: {e}")), None),
-                Ok(mut client) => {
-                    let resultado = aplicar_grupos(&mut client, rev, &plan);
-                    let deshacer = match ultimo_lote_revision(&mut *client, rev) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            log::error!("Asistente de asignación: consulta de bitácora: {e}");
-                            None
-                        }
-                    };
-                    (resultado, deshacer)
-                }
-            };
-            app.set_asig_procesando(false);
-
-            // La recarga toma el lock de sesión; no debe estar retenido aquí.
-            sync_and_load_reporte_data(&ui, &pool, &session, &rev_str, false);
-            actualizar_deshacer(&ui, deshacer);
-
-            match resultado {
-                Ok((n, k)) => {
-                    app.set_show_asig_asistente(false);
-                    if let Ok(mut e) = estado.lock() {
-                        e.plan = None;
+            let pool_recarga = pool.clone();
+            let session_recarga = session.clone();
+            let estado_fin = estado.clone();
+            ui.global::<AppData>().set_asig_procesando(true);
+            // La aplicación del plan corre en segundo plano con capa de avance; la recarga, al terminar.
+            crate::operacion_ui::ejecutar_con_avance(
+                &ui,
+                "Aplicando el asistente de asignación…",
+                "Asignando obras a los empleado-mes de la vista previa, por lotes, y recalculando el prorrateo.",
+                move || match pool_hilo.get() {
+                    Err(e) => (Err(format!("conexión a la base de datos: {e}")), None),
+                    Ok(mut client) => {
+                        let resultado = aplicar_grupos(&mut client, rev, &plan);
+                        let deshacer = match ultimo_lote_revision(&mut *client, rev) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                log::error!("Asistente de asignación: consulta de bitácora: {e}");
+                                None
+                            }
+                        };
+                        (resultado, deshacer)
                     }
-                    show_toast_message(
-                        &ui,
-                        &format!(
-                            "Asistente: {n} empleado-mes asignados en {k} lote(s). Usa Deshacer para revertir lote por lote."
-                        ),
-                    );
-                }
-                Err(e) => {
-                    log::error!("Asistente de asignación (aplicar): {e}");
-                    show_toast_message(&ui, &format!("No se pudo aplicar el asistente: {e}"));
-                }
+                },
+                move |ui, (resultado, deshacer)| {
+                    let app = ui.global::<AppData>();
+                    app.set_asig_procesando(false);
+                    sync_and_load_reporte_data(ui, &pool_recarga, &session_recarga, &rev_str, false);
+                    actualizar_deshacer(ui, deshacer);
+                    match resultado {
+                        Ok((n, k)) => {
+                            app.set_show_asig_asistente(false);
+                            if let Ok(mut e) = estado_fin.lock() {
+                                e.plan = None;
+                            }
+                            show_toast_message(
+                                ui,
+                                &format!(
+                                    "Asistente: {n} empleado-mes asignados en {k} lote(s). Usa Deshacer para revertir lote por lote."
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            log::error!("Asistente de asignación (aplicar): {e}");
+                            show_toast_message(ui, &format!("No se pudo aplicar el asistente: {e}"));
+                        }
+                    }
+                },
+            );
+            if !ui.global::<AppData>().get_operacion_en_curso() {
+                ui.global::<AppData>().set_asig_procesando(false);
             }
         });
     }

@@ -668,6 +668,12 @@ export global AppData {
     in-out property <bool> asig_puede_deshacer: false;
     in-out property <string> asig_ultimo_cambio: ""; // p. ej. "VINCULAR · 12:41"
     in-out property <bool> asig_procesando: false;
+    // Operación larga en curso (capa global de avance) y textos de atajos según el sistema operativo
+    in-out property <bool> operacion_en_curso: false;
+    in-out property <string> operacion_titulo: "";
+    in-out property <string> operacion_detalle: "";
+    in-out property <string> asig_atajos_texto: "Ctrl+F buscar · Ctrl+Z deshacer · Ctrl+Shift+A asistente · Esc limpiar";
+    in-out property <bool> show_reporte_confirmar_revertir: false;
     // Pestaña "Asignación por Obra"
     in-out property <[AsigObraTarjeta]> asig_obra_tarjetas: [];
     in-out property <string> asig_obra_sel_id: "";
@@ -1763,6 +1769,9 @@ callback recargar_cedulas_view();
     callback reporte_execute_confirm_igualar_dias();
     callback exportar_reporte_liquidaciones_excel();
     callback revertir_reporte_liquidaciones();
+    // Confirmación explícita antes de revertir (la reversión borra las asignaciones del analista)
+    callback reporte_confirmar_revertir();
+    callback reporte_cancelar_revertir();
 
     // Callbacks de ordenamiento multi-criterio
     callback reporte_open_sort_modal();

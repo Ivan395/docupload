@@ -967,6 +967,35 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         }
                     }
 
+                    // Asistente de asignación masiva: acceso visible sin depender del teclado
+                    Rectangle {
+                        height: 38px;
+                        width: 210px;
+                        border-radius: 6px;
+                        background: btn_asistente_cab.has-hover ? #6d28d9 : #7c3aed;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "🪄"; font-size: 13px; vertical-alignment: center; }
+                            Text {
+                                text: "Asistente de asignación";
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_asistente_cab := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AppData.reporte_tab_idx = 1;
+                                AppLogic.asig_asistente_abrir();
+                            }
+                        }
+                    }
+
                     // Revertir Cambios
                     Rectangle {
                         height: 38px;
@@ -6843,6 +6872,92 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         btn_submit_sua := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { AppLogic.reporte_generar_sua(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Confirmación explícita antes de revertir: la reversión reconstruye el reporte desde las cédulas
+    // y descarta las asignaciones de obra y días capturados por el analista en esta revisión.
+    if AppData.show_reporte_confirmar_revertir : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        z: 8000;
+        background: #00000088;
+
+        TouchArea { }
+
+        Rectangle {
+            width: 560px;
+            height: 250px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: #ffffff;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+
+                Text {
+                    text: "⚠️ ¿Revertir todos los cambios del reporte?";
+                    font-size: 16px;
+                    font-weight: 800;
+                    color: #991b1b;
+                }
+                Text {
+                    text: "Se reconstruirá el Reporte de Liquidaciones de esta revisión con los valores originales de las cédulas. Se perderán las asignaciones de obra y los días capturados manualmente. Esta acción no se puede deshacer con el botón Deshacer.";
+                    font-size: 12px;
+                    color: #475569;
+                    wrap: word-wrap;
+                }
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    Rectangle {
+                        width: 120px;
+                        height: 38px;
+                        border-radius: 6px;
+                        background: btn_rev_cancelar.has-hover ? #e2e8f0 : #f1f5f9;
+                        Text {
+                            text: "Cancelar";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #334155;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_rev_cancelar := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_cancelar_revertir(); }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 170px;
+                        height: 38px;
+                        border-radius: 6px;
+                        background: btn_rev_confirmar.has-hover ? #991b1b : #b91c1c;
+                        Text {
+                            text: "Sí, revertir cambios";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_rev_confirmar := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.reporte_confirmar_revertir(); }
                         }
                     }
                 }

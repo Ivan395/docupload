@@ -1,0 +1,83 @@
+import { AppData } from "models.slint";
+
+// Capa global de avance para operaciones largas (revertir, sincronizar, asignaciones, asistente).
+// Bloquea la interacción mientras AppData.operacion_en_curso es true y muestra una barra
+// indeterminada animada para que el usuario sepa que debe esperar.
+export component OperacionEnCursoOverlay inherits Rectangle {
+    background: #0f172a99;
+
+    // Bloquea clics sobre la vista mientras dura la operación
+    TouchArea { }
+
+    tarjeta := Rectangle {
+        width: 440px;
+        height: 190px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 12px;
+        background: #ffffff;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000055;
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+
+                // Indicador giratorio de texto (cambia cada 150 ms)
+                Text {
+                    property <int> paso: Math.mod(Math.floor(animation-tick() / 150ms), 8);
+                    text: paso == 0 ? "⠋" : paso == 1 ? "⠙" : paso == 2 ? "⠹" : paso == 3 ? "⠸"
+                        : paso == 4 ? "⠼" : paso == 5 ? "⠴" : paso == 6 ? "⠦" : "⠧";
+                    font-size: 26px;
+                    color: #1d4ed8;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: AppData.operacion_titulo;
+                    font-size: 16px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            Text {
+                text: AppData.operacion_detalle;
+                font-size: 12px;
+                color: #475569;
+                wrap: word-wrap;
+            }
+
+            // Barra de avance indeterminada: un segmento que recorre la pista continuamente
+            pista := Rectangle {
+                height: 8px;
+                border-radius: 4px;
+                background: #e2e8f0;
+                clip: true;
+
+                Rectangle {
+                    property <float> fase: Math.mod(animation-tick() / 1400ms, 1.0);
+                    width: pista.width * 0.3;
+                    height: parent.height;
+                    x: (pista.width + self.width) * fase - self.width;
+                    border-radius: 4px;
+                    background: #1d4ed8;
+                }
+            }
+
+            Text {
+                text: "Espera a que termine; no cierres la aplicación. La pantalla se actualizará sola.";
+                font-size: 11px;
+                color: #94a3b8;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

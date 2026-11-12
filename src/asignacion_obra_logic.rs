@@ -357,13 +357,17 @@ fn ejecutar_accion_obra<F>(
     descripcion: &str,
     accion: F,
 ) where
-    F: FnOnce(&mut Client, Uuid, &ReporteSessionState) -> Result<String, String>,
+    F: FnOnce(&mut Client, Uuid, &ReporteSessionState) -> Result<String, String> + Send + 'static,
 {
-    let rev_str = session
-        .lock()
-        .ok()
-        .and_then(|st| st.current_revision_id.clone());
-    let Some(rev_str) = rev_str else {
+    // Copia del estado: la acción corre en segundo plano sin retener el lock de sesión.
+    let instantanea = match session.lock() {
+        Ok(st) => st.clone(),
+        Err(_) => {
+            show_toast_message(ui, "Estado de la sesión bloqueado; intenta de nuevo.");
+            return;
+        }
+    };
+    let Some(rev_str) = instantanea.current_revision_id.clone() else {
         show_toast_message(ui, "Seleccione una revisión antes de continuar.");
         return;
     };
@@ -374,48 +378,56 @@ fn ejecutar_accion_obra<F>(
             return;
         }
     };
-    let Some(pool_ref) = pool.as_ref() else {
+    let Some(pool_hilo) = pool.clone() else {
         show_toast_message(ui, "Sin conexión a la base de datos.");
         return;
     };
 
-    let app_data = ui.global::<AppData>();
-    app_data.set_asig_procesando(true);
-
-    let (resultado, deshacer) = match pool_ref.get() {
-        Err(e) => (Err(format!("conexión a la base de datos: {e}")), None),
-        Ok(mut client) => {
-            let resultado = match session.lock() {
-                Ok(st) => accion(&mut *client, rev, &*st),
-                Err(_) => Err("estado de la sesión bloqueado".to_string()),
-            };
-            let deshacer = match ultimo_lote_revision(&mut *client, rev) {
-                Ok(d) => d,
+    let pool_recarga = pool.clone();
+    let session_recarga = session.clone();
+    let descripcion_final = descripcion.to_string();
+    let titulo = format!("Guardando: {descripcion}…");
+    ui.global::<AppData>().set_asig_procesando(true);
+    crate::operacion_ui::ejecutar_con_avance(
+        ui,
+        &titulo,
+        "Aplicando el cambio en la obra, registrándolo en la bitácora y recalculando el prorrateo.",
+        move || match pool_hilo.get() {
+            Err(e) => (Err(format!("conexión a la base de datos: {e}")), None),
+            Ok(mut client) => {
+                let resultado = accion(&mut *client, rev, &instantanea);
+                let deshacer = match ultimo_lote_revision(&mut *client, rev) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        log::error!("Asignación por obra: consulta de bitácora: {e}");
+                        None
+                    }
+                };
+                (resultado, deshacer)
+            }
+        },
+        move |ui, (resultado, deshacer): (Result<String, String>, Option<(Uuid, String)>)| {
+            let app_data = ui.global::<AppData>();
+            app_data.set_asig_procesando(false);
+            if resultado.is_ok() {
+                // Selecciones en thread_local del hilo de la interfaz: este cierre corre en ese hilo.
+                SEL_RENGLONES.with(|s| s.borrow_mut().clear());
+                SEL_CANDIDATOS.with(|s| s.borrow_mut().clear());
+                app_data.set_show_asig_obra_agregar_modal(false);
+            }
+            sync_and_load_reporte_data(ui, &pool_recarga, &session_recarga, &rev_str, false);
+            actualizar_deshacer_obra(ui, deshacer);
+            match resultado {
+                Ok(mensaje) => show_toast_message(ui, &mensaje),
                 Err(e) => {
-                    log::error!("Asignación por obra: consulta de bitácora: {e}");
-                    None
+                    log::error!("Asignación por obra ({descripcion_final}): {e}");
+                    show_toast_message(ui, &format!("No se pudo {descripcion_final}: {e}"));
                 }
-            };
-            (resultado, deshacer)
-        }
-    };
-
-    app_data.set_asig_procesando(false);
-    if resultado.is_ok() {
-        SEL_RENGLONES.with(|s| s.borrow_mut().clear());
-        SEL_CANDIDATOS.with(|s| s.borrow_mut().clear());
-        app_data.set_show_asig_obra_agregar_modal(false);
-    }
-    // La recarga toma el lock de sesión, por eso se liberó arriba.
-    sync_and_load_reporte_data(ui, pool, session, &rev_str, false);
-    actualizar_deshacer_obra(ui, deshacer);
-
-    match resultado {
-        Ok(mensaje) => show_toast_message(ui, &mensaje),
-        Err(e) => {
-            log::error!("Asignación por obra ({descripcion}): {e}");
-            show_toast_message(ui, &format!("No se pudo {descripcion}: {e}"));
-        }
+            }
+        },
+    );
+    if !ui.global::<AppData>().get_operacion_en_curso() {
+        ui.global::<AppData>().set_asig_procesando(false);
     }
 }
 

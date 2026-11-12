@@ -1785,16 +1785,44 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     "Recargar datos del reporte",
                     &format!("target_id={}", target_id),
                 );
-                if !target_id.is_empty() {
-                    let mensaje = match sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id, true) {
-                        Some(filas_nuevas) => format!(
-                            "Sincronizado con las cédulas: {} filas nuevas; las ediciones del analista se conservaron.",
-                            filas_nuevas
-                        ),
-                        None => "No se pudo sincronizar con las cédulas (ver log). Se muestran los datos actuales sin cambios.".to_string(),
-                    };
-                    crate::show_toast_message(&ui, &mensaje);
+                if target_id.is_empty() {
+                    return;
                 }
+                let Ok(target_uuid) = Uuid::parse_str(&target_id) else {
+                    crate::show_toast_message(&ui, "Seleccione una revisión antes de sincronizar.");
+                    return;
+                };
+                let Some(pool) = pool_clone.clone() else {
+                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    return;
+                };
+                let pool_recarga = pool_clone.clone();
+                let session_recarga = session_clone.clone();
+                // La sincronización corre en segundo plano con capa de avance; la recarga de la vista,
+                // al terminar, en el hilo de la interfaz.
+                crate::operacion_ui::ejecutar_con_avance(
+                    &ui,
+                    "Sincronizando con las cédulas…",
+                    "Incorporando cédulas nuevas y recalculando el prorrateo. Las ediciones del analista se conservan.",
+                    move || -> Result<usize, String> {
+                        let mut client = pool.get().map_err(|e| format!("conexión a la base de datos: {e}"))?;
+                        sync_reportes_liquidaciones_for_revision(&mut client, target_uuid)
+                    },
+                    move |ui, resultado| {
+                        sync_and_load_reporte_data(ui, &pool_recarga, &session_recarga, &target_id, false);
+                        let mensaje = match resultado {
+                            Ok(filas_nuevas) => format!(
+                                "Sincronizado con las cédulas: {} filas nuevas; las ediciones del analista se conservaron.",
+                                filas_nuevas
+                            ),
+                            Err(e) => {
+                                log::error!("Error sincronizando reporte liquidaciones: {}", e);
+                                "No se pudo sincronizar con las cédulas (ver log). Se muestran los datos actuales sin cambios.".to_string()
+                            }
+                        };
+                        crate::show_toast_message(ui, &mensaje);
+                    },
+                );
             }
         });
     }
@@ -5326,55 +5354,77 @@ pub fn wire_reporte_liquidaciones_callbacks(
     // 20. Revertir cambios
     {
         let ui_weak = main_window.as_weak();
-        let pool_clone = db_pool.clone();
-        let session_clone = reporte_session.clone();
+        // El botón solo pide confirmación: revertir descarta las asignaciones del analista.
         app_logic.on_revertir_reporte_liquidaciones(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let rev_id = ui.global::<AppData>().get_selected_revision_id().to_string();
                 crate::app_logger::log_ui_event(
                     "Reporte Liquidaciones",
                     "Barra Superior",
-                    "Click Botón Revertir Cambios",
-                    &format!("revision_id={}", rev_id),
+                    "Click Botón Revertir Cambios (solicita confirmación)",
+                    &format!("revision_id={}", ui.global::<AppData>().get_selected_revision_id()),
                 );
-                if !rev_id.is_empty() {
-                    if let Ok(rev_uuid) = Uuid::parse_str(&rev_id) {
-                        if let Some(pool) = &pool_clone {
-                            match pool.get() {
-                                Ok(mut client) => {
-                                    match revertir_reporte_liquidaciones_a_originales(&mut client, rev_uuid) {
-                                        Ok(count) => {
-                                            log::info!("Revertidos {} registros de reporte liquidaciones a sus valores originales.", count);
-                                            sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &rev_id, false);
-                                            crate::show_toast_message(&ui, "Cambios revertidos exitosamente a los valores originales de las cédulas.");
-                                        }
-                                        Err(e) => {
-                                            crate::app_logger::log_ui_error(
-                                                "Reporte Liquidaciones",
-                                                "Barra Superior",
-                                                "Error al Revertir Cambios",
-                                                &e,
-                                            );
-                                            log::error!("Error revirtiendo reporte: {}", e);
-                                            crate::show_toast_message(&ui, &format!("Error al revertir cambios: {}", e));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    crate::app_logger::log_ui_error(
-                                        "Reporte Liquidaciones",
-                                        "Barra Superior",
-                                        "Error Conexión BD Revertir",
-                                        &e.to_string(),
-                                    );
-                                    log::error!("Error de conexión al pool para reversión: {}", e);
-                                    crate::show_toast_message(&ui, "Error de conexión a la base de datos.");
-                                }
-                            }
-                        }
-                    }
-                }
+                ui.global::<AppData>().set_show_reporte_confirmar_revertir(true);
             }
+        });
+    }
+
+    // 20b. Cancelar la reversión
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_reporte_cancelar_revertir(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_reporte_confirmar_revertir(false);
+            }
+        });
+    }
+
+    // 20c. Revertir confirmado: corre en segundo plano con capa de avance
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_confirmar_revertir(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let app_data = ui.global::<AppData>();
+            app_data.set_show_reporte_confirmar_revertir(false);
+            let rev_id = app_data.get_selected_revision_id().to_string();
+            let Ok(rev_uuid) = Uuid::parse_str(&rev_id) else {
+                crate::show_toast_message(&ui, "Seleccione una revisión antes de revertir.");
+                return;
+            };
+            let Some(pool) = pool_clone.clone() else {
+                crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                return;
+            };
+            crate::app_logger::log_ui_event(
+                "Reporte Liquidaciones",
+                "Barra Superior",
+                "Revertir Cambios confirmado",
+                &format!("revision_id={}", rev_id),
+            );
+            let pool_recarga = pool_clone.clone();
+            let session_recarga = session_clone.clone();
+            crate::operacion_ui::ejecutar_con_avance(
+                &ui,
+                "Revirtiendo cambios del reporte…",
+                "Reconstruyendo el Reporte de Liquidaciones con los valores originales de las cédulas y recalculando importes.",
+                move || -> Result<usize, String> {
+                    let mut client = pool.get().map_err(|e| format!("conexión a la base de datos: {e}"))?;
+                    revertir_reporte_liquidaciones_a_originales(&mut client, rev_uuid)
+                },
+                move |ui, resultado| match resultado {
+                    Ok(count) => {
+                        log::info!("Revertidos {} registros de reporte liquidaciones a sus valores originales.", count);
+                        sync_and_load_reporte_data(ui, &pool_recarga, &session_recarga, &rev_id, false);
+                        crate::show_toast_message(ui, "Cambios revertidos a los valores originales de las cédulas.");
+                    }
+                    Err(e) => {
+                        crate::app_logger::log_ui_error("Reporte Liquidaciones", "Barra Superior", "Error al Revertir Cambios", &e);
+                        log::error!("Error revirtiendo reporte: {}", e);
+                        crate::show_toast_message(ui, &format!("Error al revertir cambios: {}", e));
+                    }
+                },
+            );
         });
     }
 
