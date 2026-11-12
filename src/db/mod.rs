@@ -5,6 +5,7 @@ pub mod client;
 pub mod config;
 pub mod depuracion_fase1;
 pub mod diagnostico_integridad;
+pub mod ingesta;
 pub mod nominas;
 pub mod nominas_reporte;
 pub mod reporte_liquidaciones;
@@ -13,9 +14,7 @@ pub mod schema;
 
 pub use calendario::*;
 pub use catalogos::*;
-pub use cedulas::{
-    save_cedulas_concurrent, save_cedulas_to_db, CedulasDbStats,
-};
+pub use cedulas::{save_cedulas_to_db, CedulasDbStats};
 pub use client::{
     create_client, create_pool, diagnose_postgres, get_global_pool, is_fallback_active,
     reload_global_pool, set_global_pool, DbPool, PooledClient, PostgresDiagnosis,
@@ -29,6 +28,9 @@ pub use nominas_reporte::*;
 pub use reporte_liquidaciones::*;
 pub use revisiones::*;
 pub use schema::{ensure_schema, format_boxed_pg_error, format_pg_error};
+
+#[cfg(test)]
+mod pruebas_integracion_ingesta;
 
 #[cfg(test)]
 mod tests {
@@ -301,166 +303,4 @@ mod tests {
         ).unwrap().get(0);
         assert_eq!(bad_count, 0, "jifa981012mclmn nunca debe existir en registros_obras");
     }
-
-#[test]
-    fn test_concurrent_db_insertion() {
-        let pool = match create_pool(4) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("PostgreSQL pool no disponible en test (skipping): {}", e);
-                return;
-            }
-        };
-
-        // Crear registro_patronal y revisión de prueba para las nóminas
-        let (_rp_id, revision_id) = {
-            let mut client = pool.get().expect("Failed to get connection from pool");
-            let mut tx = client.transaction().expect("Failed to start transaction");
-            
-            // Crear cliente de prueba primero (nombre único para evitar conflictos)
-            let cliente_id = Uuid::now_v7();
-            let cliente_nombre = format!("CLIENTE TEST CONCURRENTE {}", Uuid::now_v7());
-            tx.execute(
-                "INSERT INTO public.clientes (id, nombre) VALUES ($1, $2)
-                 RETURNING id",
-                &[&cliente_id, &cliente_nombre],
-            ).expect("Failed to create test cliente");
-            
-            let rp_id = Uuid::now_v7();
-            tx.execute(
-                "INSERT INTO public.registros_patronales (id, id_cliente, registro)
-                 VALUES ($1, $2, 'Y5512345101')
-                 RETURNING id",
-                &[&rp_id, &cliente_id],
-            ).expect("Failed to create test registro_patronal");
-            
-            let rev_id = Uuid::now_v7();
-            tx.execute(
-                "INSERT INTO public.revisiones (id, id_registro_patronal, nombre, folio, fecha_entrega_revision)
-                 VALUES ($1, $2, 'REV TEST CONCURRENTE', 'REV-TEST-CONC', CURRENT_DATE)
-                 RETURNING id",
-                &[&rev_id, &rp_id],
-            ).expect("Failed to create test revision");
-            
-            tx.commit().expect("Failed to commit test data");
-            (rp_id, rev_id)
-        };
-
-        // Generate multiple employee nóminas
-        let mut nominas = Vec::new();
-        for i in 1..=10 {
-            let mut emp = Employee {
-                nombrearchivo: format!("CONCURRENT_NOM_{:02}.xml", i),
-                nombre: Some(format!("TRABAJADOR CONCURRENTE {}", i)),
-                numseguridadsocial: Some(format!("999999999{:02}", i)),
-                rfc_receptor: Some(format!("CONC{:02}0101XYZ", i)),
-                curp_receptor: Some(format!("CONC{:02}0101HDFRRN01", i)),
-                rfc_emisor: Some("XAXX010101000".to_string()),
-                nombre_emisor: Some("EMPRESA CONSTRUCTORA DEL NORTE SA DE CV".to_string()),
-                registro_patronal: Some("Y5512345101".to_string()),
-                uuid: Some(Uuid::now_v7().to_string()),
-                total: Some(5000.0 + (i as f64) * 100.0),
-                fechainiciorellaboral: NaiveDate::from_ymd_opt(2023, 1, 1),
-                salariobasecotapor: Some(400.0),
-                salariodiariointegrado: Some(420.0),
-                salariodiariocalculado: Some(390.0),
-                salariodiariointegradocalculado: Some(415.0),
-                ..Default::default()
-            };
-            emp.nomina.version_nomina = Some("1.2".to_string());
-            emp.nomina.tipo_nomina = Some("O".to_string());
-            emp.nomina.fechapago = NaiveDate::from_ymd_opt(2024, 6, 15);
-            emp.nomina.fechainicialpago = NaiveDate::from_ymd_opt(2024, 6, 1);
-            emp.nomina.fechafinalpago = NaiveDate::from_ymd_opt(2024, 6, 15);
-            emp.nomina.numdiaspagados = Some(15.0);
-            emp.nomina.total_sueldos = Some(5000.0);
-            emp.nomina.total_gravado = Some(5000.0);
-            emp.nomina.total_exento = Some(0.0);
-            emp.nomina.periodicidad_pago = Some("04".to_string());
-
-            emp.detalles_nomina.push(DetalleNominaItem {
-                tipo_concepto_categoria: "PERCEPCIONES".to_string(),
-                tipo_sat: "001".to_string(),
-                clave: "001".to_string(),
-                concepto: "SUELDO BASE".to_string(),
-                importe_gravado: Some(5000.0),
-                importe_exento: Some(0.0),
-                importe: 5000.0,
-            });
-
-            nominas.push(emp);
-        }
-
-        let cb = |_done, _total| {};
-        let nom_stats = save_nominas_concurrent(&pool, &nominas, Some(&cb), revision_id);
-
-        assert!(nom_stats.is_ok(), "save_nominas_concurrent failed: {:?}", nom_stats.err());
-        let s = nom_stats.unwrap();
-        assert_eq!(s.nominas_guardadas, 10);
-        assert_eq!(s.cfdis_guardados, 10);
-        assert_eq!(s.detalles_guardados, 10);
-        assert!(s.errores.is_empty(), "Errors during concurrent nominas insert: {:?}", s.errores);
-
-        // Generate multiple cédula employees
-        let mut biz = Business::new();
-        biz.razon_social = Some("EMPRESA CONSTRUCTORA DEL NORTE SA DE CV".to_string());
-        biz.rfc = Some("XAXX010101000".to_string());
-        let unique_rp = format!("Z99{:07}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() % 10_000_000);
-        biz.registro_patronal = Some(unique_rp);
-        biz.actividad = Some("CONSTRUCCION DE OBRAS DE EDIFICACION".to_string());
-        biz.codigo_postal = Some("03900".to_string());
-        biz.entidad = Some("CIUDAD DE MEXICO".to_string());
-        biz.delegacion = Some("09 CDMX SUR".to_string());
-        biz.subdelegacion = Some("02 BENITO JUAREZ".to_string());
-
-        for i in 1..=10 {
-            let mut c_emp = CedulaEmployee::new();
-            c_emp.nombre = Some(format!("TRABAJADOR CONCURRENTE {}", i));
-            c_emp.no_seguro_social = Some(format!("999999999{:02}", i));
-            c_emp.rfc = Some(format!("CONC{:02}0101XYZ", i));
-            c_emp.curp = Some(format!("CONC{:02}0101HDFRRN01", i));
-            c_emp.clave_ubicacion = Some(format!("OBRA-CONCURRENTE-{:02}", i % 3));
-            c_emp.mes_periodo = Some("JUNIO".to_string());
-            c_emp.anio_periodo = Some("2024".to_string());
-
-            c_emp.data_employee.push(DataEmployee {
-                mes_periodo: Some("JUNIO".to_string()),
-                anio_periodo: Some("2024".to_string()),
-                clave: Some("ALTA".to_string()),
-                fecha: NaiveDate::from_ymd_opt(2024, 6, 1),
-                dias: Some(15.0),
-                sdi: Some(420.0),
-                cf: Some(100.0),
-                rt: Some(70.0),
-                patronal: Some(380.0),
-                obrera: Some(100.0),
-                subtotal: Some(480.0),
-                ..Default::default()
-            });
-
-            c_emp.registro_obras.push(RegistroObra {
-                registro_obra: format!("C123456{}", i % 3),
-                dias_registro_obra: 15,
-            });
-
-            biz.employees.push(c_emp);
-        }
-
-        let ced_stats = save_cedulas_concurrent(&pool, &[biz.clone()], Some(&cb));
-        assert!(ced_stats.is_ok(), "save_cedulas_concurrent failed: {:?}", ced_stats.err());
-        let cs = ced_stats.unwrap();
-        assert_eq!(cs.liquidaciones_guardadas, 10);
-        assert_eq!(cs.detalles_guardados, 10);
-        assert_eq!(cs.vinculaciones_guardadas, 10);
-        assert!(cs.errores.is_empty(), "Errors during concurrent cedulas insert: {:?}", cs.errores);
-
-        // Deduplication: re-ejecutar guardado concurrente con los mismos datos debe insertar 0 duplicados
-        let dup_stats = save_cedulas_concurrent(&pool, &[biz], Some(&cb));
-        assert!(dup_stats.is_ok());
-        let d_cs = dup_stats.unwrap();
-        assert_eq!(d_cs.liquidaciones_guardadas, 0, "No debe duplicar liquidaciones concurrentes");
-        assert_eq!(d_cs.detalles_guardados, 0, "No debe duplicar detalles concurrentes");
-        assert_eq!(d_cs.vinculaciones_guardadas, 0, "No debe duplicar vinculaciones concurrentes");
-    }
 }
-

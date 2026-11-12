@@ -1,14 +1,10 @@
 use chrono::{Datelike, NaiveDate, Utc};
 use postgres::{Client, Transaction};
-use rayon::prelude::*;
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::cedulas::business::{month_num_to_name, month_to_num, Business};
 use crate::cedulas::employees::Employee as CedulaEmployee;
-use crate::db::client::DbPool;
 
 #[derive(Debug, Default, Clone)]
 pub struct CedulasDbStats {
@@ -966,10 +962,43 @@ const SQL_BUSCAR_EMPLEADO_CEDULA: &str = r#"
     LIMIT 1
     "#;
 
+/// Inserta liquidación de forma idempotente frente a la restricción única
+/// (registro patronal, empleado, año, mes). Ante carrera con otra carga devuelve la fila existente.
+/// Parámetros: $1 id, $2 id_registro_patronal, $3 id_empleado, $4 mes_periodo, $5 mes_periodo_int,
+/// $6 anio_periodo, $7 nombre_archivo, $8 id_archivo, $9 origen.
+/// Salida: id de la liquidación y `insertada` (true solo si se creó una fila nueva).
+const SQL_INSERT_LIQUIDACION_UPSERT: &str = r#"
+    INSERT INTO public.liquidaciones (
+        id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo,
+        nombre_archivo, id_archivo, origen
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT ON CONSTRAINT uq_liquidaciones_rp_emp_periodo DO UPDATE SET
+        nombre_archivo = EXCLUDED.nombre_archivo,
+        id_archivo = COALESCE(EXCLUDED.id_archivo, public.liquidaciones.id_archivo),
+        origen = EXCLUDED.origen
+    RETURNING id, (xmax = 0) AS insertada
+    "#;
+
+/// Inserta empleado con NSS de forma idempotente frente al índice único parcial (id_cliente, nss).
+/// Parámetros: $1 id, $2 id_cliente, $3 nombre, $4 rfc, $5 curp, $6 nss, $7 clave_ubicacion, $8 pensionado.
+/// Salida: id del empleado y `insertado` (true solo si se creó una fila nueva).
+const SQL_INSERT_EMPLEADO_UPSERT: &str = r#"
+    INSERT INTO public.empleados (id, id_cliente, nombre, rfc, curp, nss, clave_ubicacion, pensionado)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (id_cliente, nss) WHERE nss IS NOT NULL AND BTRIM(nss) <> '' DO UPDATE SET
+        nombre = COALESCE(NULLIF(BTRIM(public.empleados.nombre), ''), EXCLUDED.nombre)
+    RETURNING id, (xmax = 0) AS insertado
+    "#;
+
+/// Guarda un trabajador de cédula con sus liquidaciones, detalles y vinculaciones a obras.
+/// Regla de conflicto: ante una liquidación existente del mismo RP/empleado/periodo gana la carga
+/// más reciente (sin distinguir SUA de EMA). Las vinculaciones de obra solo se reemplazan cuando la
+/// carga nueva trae obras. `id_archivo` registra el archivo de origen de la liquidación.
 pub fn save_single_cedula_employee_tx(
     tx: &mut Transaction,
     emp: &CedulaEmployee,
     ctx: &BusinessContext,
+    id_archivo: Option<Uuid>,
 ) -> Result<(usize, usize, usize, usize, usize), Box<dyn std::error::Error + Send + Sync>> {
     // Guarda: sin renglones de cuotas no se crea empleado, liquidación ni vinculación
     if emp.data_employee.is_empty() {
@@ -1123,25 +1152,55 @@ pub fn save_single_cedula_employee_tx(
         }
         None => {
             let new_id = Uuid::now_v7();
-            let row = tx.query_one(
-                r#"
-                INSERT INTO public.empleados (id, id_cliente, nombre, rfc, curp, nss, clave_ubicacion, pensionado)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING id
-                "#,
-                &[
-                    &new_id,
-                    &ctx.id_cliente,
-                    &truncate_str(emp_nombre.as_deref(), 100),
-                    &truncate_str(emp_rfc.as_deref(), 13),
-                    &truncate_str(emp_curp.as_deref(), 18),
-                    &truncate_str(emp_nss.as_deref(), 11),
-                    &emp_clave_ubicacion,
-                    &truncate_str(emp_pensionado.as_deref(), 10),
-                ],
-            )?;
-            empleados_count += 1;
-            row.get(0)
+            let p_nombre = truncate_str(emp_nombre.as_deref(), 100);
+            let p_rfc = truncate_str(emp_rfc.as_deref(), 13);
+            let p_curp = truncate_str(emp_curp.as_deref(), 18);
+            let p_nss = truncate_str(emp_nss.as_deref(), 11);
+            let p_pensionado = truncate_str(emp_pensionado.as_deref(), 10);
+
+            let nss_upsert = p_nss.clone().filter(|s| !s.trim().is_empty());
+            if let Some(nss_val) = nss_upsert {
+                // Con NSS: upsert contra el índice único (id_cliente, nss) para evitar duplicados en carreras
+                let row = tx.query_one(
+                    SQL_INSERT_EMPLEADO_UPSERT,
+                    &[
+                        &new_id,
+                        &ctx.id_cliente,
+                        &p_nombre,
+                        &p_rfc,
+                        &p_curp,
+                        &nss_val,
+                        &emp_clave_ubicacion,
+                        &p_pensionado,
+                    ],
+                )?;
+                let insertado: bool = row.get(1);
+                if insertado {
+                    empleados_count += 1;
+                }
+                row.get(0)
+            } else {
+                // Sin NSS no existe restricción de unicidad aplicable: INSERT simple
+                let row = tx.query_one(
+                    r#"
+                    INSERT INTO public.empleados (id, id_cliente, nombre, rfc, curp, nss, clave_ubicacion, pensionado)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    RETURNING id
+                    "#,
+                    &[
+                        &new_id,
+                        &ctx.id_cliente,
+                        &p_nombre,
+                        &p_rfc,
+                        &p_curp,
+                        &p_nss,
+                        &emp_clave_ubicacion,
+                        &p_pensionado,
+                    ],
+                )?;
+                empleados_count += 1;
+                row.get(0)
+            }
         }
     };
 
@@ -1223,6 +1282,8 @@ pub fn save_single_cedula_employee_tx(
     let obras_to_process: Vec<(String, i16)> = dedup_map.into_iter().collect();
 
     let is_authoritative_sua = !obras_to_process.is_empty() || emp.rfc.is_some() || emp.curp.is_some();
+    // Origen de la carga que se registra en la liquidación
+    let origen: &str = if is_authoritative_sua { "SUA" } else { "EMA" };
 
     // Evitar duplicados: consultar todas las liquidaciones existentes para este empleado, registro patronal y período
     let existing_liqs = tx.query(
@@ -1280,38 +1341,46 @@ pub fn save_single_cedula_employee_tx(
         }
     }
 
+    // Regla "gana la carga más reciente": si no hubo coincidencia exacta, los detalles existentes
+    // se reemplazan por los de esta carga, sin distinguir SUA de EMA.
     if matched_liq_id.is_none() && !existing_liqs.is_empty() {
-        let first_ex_id: Uuid = existing_liqs[0].get(0);
-        if is_authoritative_sua {
-            // Reemplazar liquidación previa (ej. EMA sin obras) por los datos de la cédula SUA
-            replace_liq_id = Some(first_ex_id);
-        } else {
-            // Si el registro entrante es EMA (sin RFC/CURP ni obras) y ya existe liquidación en ese mes, reutilizar sin duplicar
-            matched_liq_id = Some(first_ex_id);
-        }
+        replace_liq_id = Some(existing_liqs[0].get(0));
     }
 
-    // Si ya existe la liquidación con detalles idénticos (o EMA redundante), reutilizar su ID;
-    // si es una actualización SUA sobre EMA previa, actualizar detalles en el mismo ID;
-    // de lo contrario, insertar nueva liquidación.
+    // Si ya existe la liquidación con detalles idénticos, reutilizar su ID y registrar la carga actual;
+    // si los detalles difieren, reemplazarlos en el mismo ID;
+    // de lo contrario, insertar nueva liquidación (idempotente frente a carreras).
     let id_liquidacion = if let Some(ex_id) = matched_liq_id {
-        if !obras_to_process.is_empty() {
-            let _ = tx.execute(
-                "UPDATE public.liquidaciones SET nombre_archivo = COALESCE($2, nombre_archivo) WHERE id = $1",
-                &[&ex_id, &truncate_str(Some(nombre_arch), 350)],
-            );
-        }
+        tx.execute(
+            "UPDATE public.liquidaciones SET nombre_archivo = COALESCE($2, nombre_archivo), id_archivo = COALESCE($3, id_archivo), origen = $4 WHERE id = $1",
+            &[&ex_id, &truncate_str(Some(nombre_arch), 350), &id_archivo, &origen],
+        )?;
         ex_id
     } else {
         let target_liq_id = if let Some(rep_id) = replace_liq_id {
             tx.execute(
-                "UPDATE public.liquidaciones SET mes_periodo = $2, mes_periodo_int = $3, nombre_archivo = COALESCE($4, nombre_archivo) WHERE id = $1",
-                &[&rep_id, &mes_norm, &mes_int, &truncate_str(Some(nombre_arch), 350)],
+                r#"
+                UPDATE public.liquidaciones
+                SET mes_periodo = $2, mes_periodo_int = $3,
+                    nombre_archivo = COALESCE($4, nombre_archivo),
+                    id_archivo = COALESCE($5, id_archivo),
+                    origen = $6
+                WHERE id = $1
+                "#,
+                &[
+                    &rep_id,
+                    &mes_norm,
+                    &mes_int,
+                    &truncate_str(Some(nombre_arch), 350),
+                    &id_archivo,
+                    &origen,
+                ],
             )?;
             tx.execute(
                 "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion = $1",
                 &[&rep_id],
             )?;
+            // Las vinculaciones de obra solo se reemplazan si la carga nueva trae obras; si no, se conservan
             if !obras_to_process.is_empty() {
                 tx.execute(
                     "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
@@ -1321,14 +1390,8 @@ pub fn save_single_cedula_employee_tx(
             rep_id
         } else {
             let new_id = Uuid::now_v7();
-            tx.execute(
-                r#"
-                INSERT INTO public.liquidaciones (
-                    id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7
-                )
-                "#,
+            let up_row = tx.query_one(
+                SQL_INSERT_LIQUIDACION_UPSERT,
                 &[
                     &new_id,
                     &ctx.id_registro_patronal,
@@ -1337,18 +1400,30 @@ pub fn save_single_cedula_employee_tx(
                     &mes_int,
                     &anio_norm,
                     &truncate_str(Some(nombre_arch), 350),
+                    &id_archivo,
+                    &origen,
                 ],
             ).inspect_err(|e| {
                 let err_str = crate::db::schema::format_pg_error(e);
                 crate::app_logger::log_db_error(
-                    "INSERT public.liquidaciones",
+                    "UPSERT public.liquidaciones",
                     &["public.liquidaciones"],
-                    "INSERT INTO public.liquidaciones (id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    "INSERT INTO public.liquidaciones (...) VALUES (...) ON CONFLICT ON CONSTRAINT uq_liquidaciones_rp_emp_periodo DO UPDATE ...",
                     &err_str,
                 );
             })?;
-            liquidaciones_count += 1;
-            new_id
+            let target: Uuid = up_row.get(0);
+            let insertada: bool = up_row.get(1);
+            if insertada {
+                liquidaciones_count += 1;
+            } else {
+                // Otra carga concurrente ya creó la liquidación: limpiar sus detalles para no duplicar renglones
+                tx.execute(
+                    "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion = $1",
+                    &[&target],
+                )?;
+            }
+            target
         };
 
         // Detalles Liquidación (100% información cruda sin filtrar en tablas maestras)
@@ -1522,145 +1597,6 @@ pub fn save_single_cedula_employee_tx(
     Ok((empleados_count, liquidaciones_count, detalles_count, registros_obras_count, vinculaciones_count))
 }
 
-pub fn save_cedulas_concurrent(
-    pool: &DbPool,
-    businesses: &[Business],
-    progress_cb: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
-) -> Result<CedulasDbStats, String> {
-    if businesses.is_empty() {
-        return Ok(CedulasDbStats::default());
-    }
-
-    let mut init_client = pool.get().map_err(|e| format!("Error de conexión al pool: {}", e))?;
-
-    // Pre-resolve business contexts
-    let mut biz_contexts: Vec<(BusinessContext, Vec<CedulaEmployee>)> = Vec::new();
-    {
-        let mut tx = init_client
-            .transaction()
-            .map_err(|e| format!("Error iniciando transacción de contexto de cédulas: {}", crate::db::schema::format_pg_error(&e)))?;
-
-        for biz in businesses {
-            let ctx = resolve_business_context(&mut tx, biz)
-                .map_err(|e| format!("Error resolviendo patrón de cédula: {}", crate::db::schema::format_boxed_pg_error(e.as_ref())))?;
-            biz_contexts.push((ctx, biz.employees.clone()));
-        }
-
-        tx.commit()
-            .map_err(|e| format!("Error confirmando contextos de patrones: {}", crate::db::schema::format_pg_error(&e)))?;
-    }
-
-    // Flatten all employees with their business context
-    let mut tasks: Vec<(BusinessContext, CedulaEmployee)> = Vec::new();
-    for (ctx, emps) in biz_contexts {
-        for emp in emps {
-            tasks.push((ctx.clone(), emp));
-        }
-    }
-
-    let total = tasks.len();
-    let done_counter = AtomicUsize::new(0);
-    let liquidaciones_count = AtomicUsize::new(0);
-    let detalles_count = AtomicUsize::new(0);
-    let vinculaciones_count = AtomicUsize::new(0);
-    let empleados_count = AtomicUsize::new(0);
-    let registros_obras_count = AtomicUsize::new(0);
-    let errores = Mutex::new(Vec::new());
-
-    tasks.par_iter().for_each(|(ctx, emp)| {
-        if let Some(msg) = describe_trabajador_sin_detalles(emp, emp.file_name.as_deref().unwrap_or("N/D")) {
-            errores.lock().unwrap().push(msg);
-            let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Some(cb) = progress_cb {
-                if done % 10 == 0 || done == total {
-                    cb(done, total);
-                }
-            }
-            return;
-        }
-
-        let mut client = match pool.get() {
-            Ok(c) => c,
-            Err(e) => {
-                errores.lock().unwrap().push(format!("Error obteniendo conexión del pool para cédula: {}", e));
-                return;
-            }
-        };
-
-        let mut tx = match client.transaction() {
-            Ok(t) => t,
-            Err(e) => {
-                errores.lock().unwrap().push(format!("Error iniciando transacción para trabajador de cédula: {}", crate::db::schema::format_pg_error(&e)));
-                return;
-            }
-        };
-
-        match save_single_cedula_employee_tx(&mut tx, emp, ctx) {
-            Ok((e_c, l_c, d_c, ro_c, v_c)) => {
-                if let Err(e) = tx.commit() {
-                    errores.lock().unwrap().push(format!(
-                        "Error haciendo commit para trabajador {}: {}",
-                        emp.nombre.as_deref().unwrap_or("N/D"),
-                        crate::db::schema::format_pg_error(&e)
-                    ));
-                } else {
-                    empleados_count.fetch_add(e_c, Ordering::Relaxed);
-                    liquidaciones_count.fetch_add(l_c, Ordering::Relaxed);
-                    detalles_count.fetch_add(d_c, Ordering::Relaxed);
-                    registros_obras_count.fetch_add(ro_c, Ordering::Relaxed);
-                    vinculaciones_count.fetch_add(v_c, Ordering::Relaxed);
-                }
-            }
-            Err(e) => {
-                let _ = tx.rollback();
-                errores.lock().unwrap().push(format!(
-                    "Error guardando trabajador de cédula ({}): {}",
-                    emp.nombre.as_deref().unwrap_or("N/D"),
-                    crate::db::schema::format_boxed_pg_error(e.as_ref())
-                ));
-            }
-        }
-
-        let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(cb) = progress_cb {
-            if done % 10 == 0 || done == total {
-                cb(done, total);
-            }
-        }
-    });
-
-    let stats = CedulasDbStats {
-        liquidaciones_guardadas: liquidaciones_count.load(Ordering::Relaxed),
-        detalles_guardados: detalles_count.load(Ordering::Relaxed),
-        vinculaciones_guardadas: vinculaciones_count.load(Ordering::Relaxed),
-        empleados_guardados: empleados_count.load(Ordering::Relaxed),
-        registros_obras_guardados: registros_obras_count.load(Ordering::Relaxed),
-        errores: errores.into_inner().unwrap(),
-        id_registro_patronal: None,
-        id_revision: None,
-    };
-
-    crate::app_logger::log_db_op(
-        "INSERT/UPDATE_CONCURRENT",
-        &[
-            "public.empleados",
-            "public.liquidaciones",
-            "public.detalles_liquidaciones",
-            "public.registros_obras",
-            "public.vinculaciones_obras_liquidaciones",
-        ],
-        "save_cedulas_concurrent",
-        &format!(
-            "empleados={}, liquidaciones={}, detalles={}, obras={}, vinculaciones={}, errores={}",
-            stats.empleados_guardados, stats.liquidaciones_guardadas, stats.detalles_guardados,
-            stats.registros_obras_guardados, stats.vinculaciones_guardadas, stats.errores.len()
-        ),
-        Some(stats.detalles_guardados),
-    );
-
-    Ok(stats)
-}
-
 pub fn save_cedulas_to_db(
     client: &mut Client,
     businesses: &[Business],
@@ -1683,7 +1619,7 @@ pub fn save_cedulas_to_db(
                     stats.errores.push(msg);
                     continue;
                 }
-                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx)?;
+                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx, None)?;
                 stats.empleados_guardados += e_c;
                 stats.liquidaciones_guardadas += l_c;
                 stats.detalles_guardados += d_c;
@@ -2024,5 +1960,37 @@ mod tests_emparejamiento {
 
         // Siempre revertir: no se deja ningún dato de prueba
         let _ = tx.rollback();
+    }
+}
+
+#[cfg(test)]
+mod tests_upsert_sql {
+    use super::*;
+
+    /// Colapsa espacios en blanco para que las comparaciones de texto SQL no dependan del formato.
+    fn normalizar(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn insert_liquidacion_es_idempotente_y_registra_origen() {
+        let sql = normalizar(SQL_INSERT_LIQUIDACION_UPSERT);
+        assert!(
+            sql.contains("ON CONFLICT ON CONSTRAINT uq_liquidaciones_rp_emp_periodo"),
+            "falta ON CONFLICT sobre la restricción única de liquidaciones"
+        );
+        assert!(sql.contains("RETURNING id, (xmax = 0)"), "falta RETURNING id, (xmax = 0)");
+        assert!(sql.contains("id_archivo"), "falta registro de id_archivo");
+        assert!(sql.contains("origen"), "falta registro de origen");
+    }
+
+    #[test]
+    fn insert_empleado_es_idempotente_por_nss() {
+        let sql = normalizar(SQL_INSERT_EMPLEADO_UPSERT);
+        assert!(
+            sql.contains("ON CONFLICT (id_cliente, nss) WHERE nss IS NOT NULL"),
+            "falta ON CONFLICT sobre el índice único parcial de NSS"
+        );
+        assert!(sql.contains("RETURNING id, (xmax = 0)"), "falta RETURNING id, (xmax = 0)");
     }
 }

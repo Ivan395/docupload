@@ -56,6 +56,7 @@ use crate::db::{create_pool, ensure_schema, DbPool, CedulasDbStats};
 use crate::db::catalogos::*;
 use crate::db::revisiones::*;
 use crate::db::nominas_reporte::check_all_data_exists;
+use crate::db::ingesta::{ArchivoLote, ArchivoParaRegistrar, tipo_archivo_desde_empleados};
 use crate::cedulas::view_logic::*;
 use crate::reporte_view_logic::*;
 use crate::nominas_view_logic::*;
@@ -1466,6 +1467,21 @@ fn spawn_cedulas_worker(
     });
 }
 
+/// Archivo nuevo de cédulas subido a staging en este lote, pendiente de registrar/guardar.
+#[derive(Debug, Clone)]
+pub struct ArchivoPendienteCedula {
+    /// final_fname con hash: coincide con el file_name que el parser asigna a los trabajadores
+    pub nombre_archivo: String,
+    pub nombre_original: String,
+    pub sha256: String,
+    pub anio: i16,
+    pub mes: i16,
+    /// Clave definitiva en RustFS (sin prefijo .staging_)
+    pub clave_final: String,
+    /// Clave en RustFS dentro del prefijo .staging_<batch_id>/
+    pub clave_staging: String,
+}
+
 #[derive(Clone, Default)]
 pub struct CedulasViewState {
     pub files: Vec<CedulaFileCardInfo>,
@@ -1484,8 +1500,12 @@ pub struct CedulasViewState {
     pub pending_staged_local_paths: Vec<PathBuf>,
     pub pending_overwrite_months: Vec<(String, String)>,
     pub pending_overwrite_old_files: Vec<String>,
+    /// Tarjetas de archivos previos ocultadas por un posible reemplazo; se restauran si se elige "Fusionar"
+    pub pending_overwrite_old_cards: Vec<CedulaFileCardInfo>,
     /// Cliente, registro patronal y revisión usados al subir a staging (necesarios para revertirlo)
     pub pending_staging_ctx: Option<(String, String, String)>,
+    /// Archivos nuevos en staging de la última subida, pendientes de registrar en BD y guardar
+    pub pending_archivos: Vec<ArchivoPendienteCedula>,
 }
 
 fn update_cedulas_view_file_list_ui(ui: &MainWindow, state: &CedulasViewState) {
@@ -1963,7 +1983,12 @@ fn handle_cedulas_upload_and_inspect(
         let batch_id = Uuid::now_v7().simple().to_string();
         let mut overwritten_count = 0;
         let mut cleaned_months_in_batch: HashSet<(String, String)> = HashSet::new();
-        let mut batch_month_file_counters: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+        // Deduplicación por SHA-256: conexión de solo lectura para consultar la BD antes de subir
+        let id_rp_dedupe: Option<Uuid> = Uuid::parse_str(&rp_id).ok();
+        let mut conn_dedupe = pool_clone.as_ref().and_then(|p| p.get().ok());
+        let mut hashes_lote: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut omitidos: Vec<String> = Vec::new();
+        let mut pendientes: Vec<ArchivoPendienteCedula> = Vec::new();
         let mut staged_local_paths: Vec<PathBuf> = Vec::new();
         let mut overwrite_months: Vec<(String, String)> = Vec::new();
         let mut overwrite_old_files: Vec<String> = Vec::new();
@@ -2023,6 +2048,34 @@ fn handle_cedulas_upload_and_inspect(
                 continue;
             }
 
+            // Identificación por hash: omitir idénticos dentro del lote o ya cargados en la BD
+            let sha = crate::cedulas::almacen::sha256_hex(&data);
+            if let Some(primero) = hashes_lote.get(&sha) {
+                omitidos.push(format!("{}: idéntico a '{}' en esta misma selección", orig_display, primero));
+                continue;
+            }
+            if let (Some(conn), Some(id_rp)) = (conn_dedupe.as_mut(), id_rp_dedupe) {
+                let lote = crate::db::ingesta::ArchivoLote {
+                    nombre_original: orig_display.clone(),
+                    sha256: sha.clone(),
+                    tipo: "SUA".into(),
+                    anio: anio_str.parse::<i16>().unwrap_or(0),
+                    mes: crate::cedulas::business::month_to_num(&mes_str) as i16,
+                    trabajadores: 0,
+                    paginas: None,
+                };
+                match crate::db::ingesta::clasificar_lote(&mut **conn, id_rp, std::slice::from_ref(&lote)) {
+                    Ok(estados) => {
+                        if let Some(crate::db::ingesta::EstadoArchivoLote::IdenticoYaCargado { nombre_previo, .. }) = estados.first() {
+                            omitidos.push(format!("{}: ya estaba cargado como '{}'", orig_display, nombre_previo));
+                            continue;
+                        }
+                    }
+                    Err(e) => log::warn!("No se pudo clasificar {} por hash en BD: {}", orig_display, e),
+                }
+            }
+            hashes_lote.insert(sha.clone(), orig_display.clone());
+
             let month_key = (anio_str.clone(), mes_str.clone());
             if cleaned_months_in_batch.insert(month_key.clone()) {
                 // Primera vez que se toca este mes en el lote actual: verificar si existían archivos previos en RustFS
@@ -2045,14 +2098,7 @@ fn handle_cedulas_upload_and_inspect(
                 }
             }
 
-            let file_seq = batch_month_file_counters.entry(month_key).or_insert(0);
-            *file_seq += 1;
-            let final_fname = if *file_seq == 1 {
-                std_fname.clone()
-            } else {
-                format!("{}__{}.pdf", std_fname.trim_end_matches(".pdf"), file_seq)
-            };
-
+            let final_fname = crate::cedulas::almacen::nombre_estandar_con_hash(&std_fname, &sha);
             let structured_rel_path = format!("{}/{}/{}", anio_str, mes_str, final_fname);
 
             let _ = prog_tx.send(CedulaProgressUpdate {
@@ -2064,7 +2110,7 @@ fn handle_cedulas_upload_and_inspect(
             });
 
             // Guardar primero en staging de RustFS (.staging_<batch_id>/Año/Mes/Archivo.pdf)
-            if let Err(e) = crate::rustfs::upload_staging_file_to_rustfs(
+            let clave_staging = match crate::rustfs::upload_staging_file_to_rustfs(
                 &c_nom,
                 &r_reg,
                 &rev_nom,
@@ -2073,6 +2119,8 @@ fn handle_cedulas_upload_and_inspect(
                 &structured_rel_path,
                 &data,
             ) {
+                Ok(clave) => clave,
+                Err(e) => {
                 log::error!("Error subiendo archivo {} a staging de RustFS: {}", structured_rel_path, e);
                 let _ = crate::rustfs::rollback_staging_files_in_rustfs(
                     &c_nom,
@@ -2100,7 +2148,8 @@ fn handle_cedulas_upload_and_inspect(
                     }
                 });
                 return;
-            }
+                }
+            };
 
             let local_dest = cache_dir.join("cedulas_de_cuotas").join(&structured_rel_path);
             if let Some(parent) = local_dest.parent() {
@@ -2108,6 +2157,23 @@ fn handle_cedulas_upload_and_inspect(
             }
             if std::fs::write(&local_dest, &data).is_ok() {
                 staged_local_paths.push(local_dest.clone());
+                // Clave definitiva con el mismo layout que usa commit_staging_files_in_rustfs
+                let clave_final = format!(
+                    "{}/{}/{}/Cedulas_de_cuotas/{}",
+                    crate::rustfs::sanitize_path_component(&c_nom),
+                    crate::rustfs::sanitize_path_component(&r_reg),
+                    crate::rustfs::sanitize_path_component(&rev_nom),
+                    crate::rustfs::sanitize_relative_path(&structured_rel_path),
+                );
+                pendientes.push(ArchivoPendienteCedula {
+                    nombre_archivo: final_fname.clone(),
+                    nombre_original: orig_display.clone(),
+                    sha256: sha.clone(),
+                    anio: anio_str.parse::<i16>().unwrap_or(0),
+                    mes: crate::cedulas::business::month_to_num(&mes_str) as i16,
+                    clave_final,
+                    clave_staging,
+                });
                 let exp_rfc_opt = if !c_rfc.trim().is_empty() { Some(c_rfc.trim()) } else { None };
                 let exp_rp_opt = if !r_reg.trim().is_empty() && r_reg != "GENERAL" { Some(r_reg.trim()) } else { None };
                 let mut card = crate::cedulas::view_logic::inspect_cedula_file_with_context(
@@ -2122,11 +2188,11 @@ fn handle_cedulas_upload_and_inspect(
 
         // Combinar tarjetas previas (excluyendo las que serán sobreescritas) con las tarjetas en staging
         let old_set: HashSet<String> = overwrite_old_files.iter().cloned().collect();
-        let mut final_cards: Vec<CedulaFileCardInfo> = existing_cards
+        let (old_cards, mut final_cards): (Vec<CedulaFileCardInfo>, Vec<CedulaFileCardInfo>) = existing_cards
             .into_iter()
-            .filter(|c| !old_set.contains(&c.filename))
-            .collect();
+            .partition(|c| old_set.contains(&c.filename));
         final_cards.extend(staged_cards);
+        drop(conn_dedupe);
 
         drop(prog_tx);
 
@@ -2171,6 +2237,8 @@ fn handle_cedulas_upload_and_inspect(
             lines.join("\n")
         };
         let staging_ctx = (c_nom.clone(), r_reg.clone(), rev_nom.clone());
+        let hay_nuevos = !pendientes.is_empty();
+        let omitidos_msg = omitidos.join("\n");
 
         // 4. Actualizar la interfaz Slint; si hay meses repetidos, pedir confirmación antes de procesar
         let _ = slint::invoke_from_event_loop(move || {
@@ -2183,11 +2251,26 @@ fn handle_cedulas_upload_and_inspect(
                     sess.pending_staged_local_paths = staged_local_paths;
                     sess.pending_overwrite_months = overwrite_months;
                     sess.pending_overwrite_old_files = overwrite_old_files;
+                    sess.pending_overwrite_old_cards = old_cards;
                     sess.pending_staging_ctx = Some(staging_ctx);
+                    sess.pending_archivos = pendientes;
                     update_cedulas_view_file_list_ui(&ui, &sess);
                 }
 
-                if overwritten_count > 0 {
+                let app_data = ui.global::<AppData>();
+                if !omitidos_msg.is_empty() {
+                    app_data.set_cedulas_duplicate_files_msg(omitidos_msg.into());
+                    app_data.set_show_cedulas_duplicate_modal(true);
+                }
+
+                if !hay_nuevos {
+                    // Todos los archivos eran idénticos o inválidos: no hay nada que procesar
+                    app_data.set_cedulas_view_is_processing(false);
+                    app_data.set_is_processing(false);
+                    app_data.set_cedulas_view_progress_fraction(0.0);
+                    app_data.set_cedulas_view_progress_text("".into());
+                    app_data.set_progress_percentage(0.0);
+                } else if overwritten_count > 0 {
                     // Sin confirmación no se procesa nada: el worker se lanza desde el modal
                     let app_data = ui.global::<AppData>();
                     app_data.set_cedulas_overwrite_confirm_msg(overwrite_summary.into());
@@ -2218,6 +2301,7 @@ fn spawn_cedulas_view_worker(
         staged_local_paths,
         overwrite_months,
         overwrite_old_files,
+        archivos_pendientes,
     ) = {
         let Some(ui) = ui_weak.upgrade() else { return; };
         let app_data = ui.global::<AppData>();
@@ -2267,6 +2351,10 @@ fn spawn_cedulas_view_worker(
         let st_locals = std::mem::take(&mut session.pending_staged_local_paths);
         let ov_months = std::mem::take(&mut session.pending_overwrite_months);
         let ov_files = std::mem::take(&mut session.pending_overwrite_old_files);
+        // Reemplazo confirmado (o sin meses repetidos): las tarjetas ocultadas ya no se restauran
+        session.pending_overwrite_old_cards.clear();
+        // Los archivos nuevos del lote pasan al worker de guardado (solo ellos se registran en BD)
+        let archivos_pendientes = std::mem::take(&mut session.pending_archivos);
         (
             paths,
             rfc,
@@ -2279,6 +2367,7 @@ fn spawn_cedulas_view_worker(
             st_locals,
             ov_months,
             ov_files,
+            archivos_pendientes,
         )
     };
 
@@ -2477,6 +2566,62 @@ fn spawn_cedulas_view_worker(
                         let ov_files_hook = overwrite_old_files.clone();
                         let cache_dir_hook = cache_dir.clone();
 
+
+                        // Solo se registran en BD los trabajadores de archivos NUEVOS del lote;
+                        // los PDFs ya cargados no se reprocesan (la regla "gana la más reciente" los pisaría)
+                        let nombres_nuevos: HashSet<&str> = archivos_pendientes
+                            .iter()
+                            .map(|a| a.nombre_archivo.as_str())
+                            .collect();
+                        let businesses_nuevos: Vec<crate::cedulas::business::Business> = businesses
+                            .iter()
+                            .filter_map(|b| {
+                                let mut nb = b.clone();
+                                nb.employees.retain(|e| {
+                                    e.file_name.as_deref().map_or(false, |f| nombres_nuevos.contains(f))
+                                });
+                                if nb.employees.is_empty() { None } else { Some(nb) }
+                            })
+                            .collect();
+
+                        let mut archivos_registrar: Vec<ArchivoParaRegistrar> = Vec::new();
+                        for pend in &archivos_pendientes {
+                            let emps: Vec<&crate::cedulas::employees::Employee> = businesses_nuevos
+                                .iter()
+                                .flat_map(|b| b.employees.iter())
+                                .filter(|e| e.file_name.as_deref() == Some(pend.nombre_archivo.as_str()))
+                                .collect();
+                            if emps.is_empty() {
+                                log::info!(
+                                    "Cédulas: '{}' sin trabajadores válidos; no se registra en BD",
+                                    pend.nombre_original
+                                );
+                                continue;
+                            }
+                            archivos_registrar.push(ArchivoParaRegistrar {
+                                nombre_archivo: pend.nombre_archivo.clone(),
+                                lote: ArchivoLote {
+                                    nombre_original: pend.nombre_original.clone(),
+                                    sha256: pend.sha256.clone(),
+                                    tipo: tipo_archivo_desde_empleados(&emps).to_string(),
+                                    anio: pend.anio,
+                                    mes: pend.mes,
+                                    trabajadores: emps.len() as i32,
+                                    paginas: None,
+                                },
+                                clave_final: pend.clave_final.clone(),
+                                clave_staging: pend.clave_staging.clone(),
+                            });
+                        }
+
+                        // Promoción en RustFS (se ejecuta DESPUÉS del COMMIT de PostgreSQL):
+                        // 1) mueve a Trash los archivos sustituidos; 2) promueve SOLO los PDFs registrados en BD
+                        //    (los rechazados por la auditoría no deben llegar a la ruta final);
+                        // 3) descarta el resto del staging del lote.
+                        let claves_a_promover: Vec<(String, String)> = archivos_registrar
+                            .iter()
+                            .map(|a| (a.clave_staging.clone(), a.clave_final.clone()))
+                            .collect();
                         let rustfs_commit_hook = move || -> Result<(), String> {
                             if let Some(ref batch_id) = batch_hook_opt {
                                 for old_fname in &ov_files_hook {
@@ -2490,7 +2635,18 @@ fn spawn_cedulas_view_worker(
                                     let old_local = cache_dir_hook.join("cedulas_de_cuotas").join(old_fname);
                                     let _ = std::fs::remove_file(&old_local);
                                 }
-                                crate::rustfs::commit_staging_files_in_rustfs(
+                                let almacen = crate::cedulas::almacen::AlmacenRustfs;
+                                let mut fallos: Vec<String> = Vec::new();
+                                for (staging, final_key) in &claves_a_promover {
+                                    if let Err(e) = crate::cedulas::almacen::AlmacenArchivos::promover(&almacen, staging, final_key) {
+                                        fallos.push(e);
+                                    }
+                                }
+                                if !fallos.is_empty() {
+                                    // El staging se conserva para que reintentar_promociones_pendientes lo complete
+                                    return Err(fallos.join("; "));
+                                }
+                                crate::rustfs::rollback_staging_files_in_rustfs(
                                     &c_nom_hook,
                                     &rp_hook,
                                     &rev_nom_hook,
@@ -2501,37 +2657,55 @@ fn spawn_cedulas_view_worker(
                             Ok(())
                         };
 
-                        match save_cedulas_audit_to_db(
-                            pool,
-                            &target_sync_id,
-                            &businesses,
-                            &overwrite_months,
-                            Some(&rustfs_commit_hook),
-                            Some(&db_progress_cb),
-                        ) {
-                            Ok(stats) => {
-                                db_saved_summary = format!(
-                                    "Guardadas {} liquidaciones y {} detalles de cédulas.",
-                                    stats.liquidaciones_guardadas, stats.detalles_guardados
+                        if archivos_registrar.is_empty() {
+                            // Sin archivos nuevos válidos: se descarta el staging del lote para no dejar huérfanos
+                            log::info!("Cédulas: ningún archivo nuevo válido que registrar; se descarta el staging del lote");
+                            if let Some(ref batch_id) = staging_batch_id_opt {
+                                let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                                    &client_nombre,
+                                    &rp_for_rustfs,
+                                    &revision_nombre,
+                                    "Cedulas_de_cuotas",
+                                    batch_id,
                                 );
-                                log::info!("Guardado Atómico DB + rustfs Cédulas exitoso: {:?}", stats);
-                                saved_stats_opt = Some(stats);
                             }
-                            Err(e) => {
-                                log::error!("Error en guardado atómico de cédulas (ejecutando rollback): {}", e);
-                                if let Some(ref batch_id) = staging_batch_id_opt {
-                                    let _ = crate::rustfs::rollback_staging_files_in_rustfs(
-                                        &client_nombre,
-                                        &rp_for_rustfs,
-                                        &revision_nombre,
-                                        "Cedulas_de_cuotas",
-                                        batch_id,
+                            for p in &staged_local_paths {
+                                let _ = std::fs::remove_file(p);
+                            }
+                        } else {
+                            match guardar_cedulas_lote(
+                                pool,
+                                &target_sync_id,
+                                &businesses_nuevos,
+                                &archivos_registrar,
+                                &overwrite_months,
+                                Some(&rustfs_commit_hook),
+                                Some(&db_progress_cb),
+                            ) {
+                                Ok(stats) => {
+                                    db_saved_summary = format!(
+                                        "Guardadas {} liquidaciones y {} detalles de cédulas.",
+                                        stats.liquidaciones_guardadas, stats.detalles_guardados
                                     );
+                                    log::info!("Guardado Atómico DB + rustfs Cédulas exitoso: {:?}", stats);
+                                    saved_stats_opt = Some(stats);
                                 }
-                                for p in &staged_local_paths {
-                                    let _ = std::fs::remove_file(p);
+                                Err(e) => {
+                                    log::error!("Error en guardado atómico de cédulas (ejecutando rollback): {}", e);
+                                    if let Some(ref batch_id) = staging_batch_id_opt {
+                                        let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                                            &client_nombre,
+                                            &rp_for_rustfs,
+                                            &revision_nombre,
+                                            "Cedulas_de_cuotas",
+                                            batch_id,
+                                        );
+                                    }
+                                    for p in &staged_local_paths {
+                                        let _ = std::fs::remove_file(p);
+                                    }
+                                    atomic_save_err = Some(e);
                                 }
-                                atomic_save_err = Some(e);
                             }
                         }
                     } else {
@@ -3432,6 +3606,31 @@ fn main() -> Result<(), slint::PlatformError> {
             (None, Arc::new(RwLock::new(HashSet::new())))
         }
     };
+
+    // Reintento de promociones de cédulas pendientes (solo filas STAGED) en segundo plano
+    if let Some(pool_reintento) = db_pool.clone() {
+        let spawn_reintento = std::thread::Builder::new()
+            .name("reintento_promociones_cedulas".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(8));
+                match pool_reintento.get() {
+                    Ok(mut client) => match crate::db::ingesta::reintentar_promociones_pendientes(
+                        &mut client,
+                        &crate::cedulas::almacen::AlmacenRustfs,
+                        5,
+                    ) {
+                        Ok((promovidos, fallidos)) => {
+                            log::info!("Reintento de promociones de cédulas: promovidos={}, fallidos={}", promovidos, fallidos);
+                        }
+                        Err(e) => log::warn!("Reintento de promociones de cédulas falló: {}", e),
+                    },
+                    Err(e) => log::warn!("Reintento de promociones de cédulas: sin conexión al pool: {}", e),
+                }
+            });
+        if let Err(e) = spawn_reintento {
+            log::warn!("No se pudo lanzar el hilo de reintento de promociones de cédulas: {}", e);
+        }
+    }
 
     // Diagnóstico y Estado Inicial de Base de Datos PostgreSQL
     let diag = crate::db::diagnose_postgres();
@@ -7075,6 +7274,31 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // 54c-bis. Fusionar meses ya cargados: procesa los archivos nuevos sin borrar meses existentes
+    // (el worker hace upsert por trabajador); los archivos previos no se mandan a Trash
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = cedulas_session.clone();
+        let pool_clone = db_pool.clone();
+        app_logic.on_fusionar_cedulas_meses_existentes(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_cedulas_overwrite_confirm_modal(false);
+                let n_archivos = {
+                    let mut sess = session_clone.lock().unwrap();
+                    sess.pending_overwrite_months.clear();
+                    sess.pending_overwrite_old_files.clear();
+                    // En fusión los PDFs previos siguen vigentes: vuelven a la lista y a la auditoría
+                    let previos = std::mem::take(&mut sess.pending_overwrite_old_cards);
+                    sess.files.extend(previos);
+                    update_cedulas_view_file_list_ui(&ui, &sess);
+                    sess.pending_archivos.len()
+                };
+                log::info!("Cédulas: carga en modo fusión ({} archivos nuevos)", n_archivos);
+                spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
+            }
+        });
+    }
+
     // 54d. Cancelar reemplazo: revierte el staging en RustFS y limpia copias locales; no toca la BD
     {
         let ui_weak = main_window.as_weak();
@@ -7090,6 +7314,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 sess.pending_overwrite_months.clear();
                 sess.pending_overwrite_old_files.clear();
+                sess.pending_overwrite_old_cards.clear();
+                sess.pending_archivos.clear();
                 (batch, sess.pending_staging_ctx.take())
             };
             if let Some(batch_id) = batch_opt {

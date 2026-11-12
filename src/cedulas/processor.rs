@@ -515,50 +515,47 @@ pub fn process_cedulas(
             progress_callback(
                 0,
                 total_workers,
-                "Conectando a PostgreSQL y preparando guardado concurrente de cédulas...",
+                "Conectando a PostgreSQL y preparando guardado secuencial de cédulas...",
             );
 
-            let num_cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4);
-            let pool_size = (num_cpus * 2).clamp(4, 32) as u32;
-
-            match crate::db::create_pool(pool_size) {
-                Ok(pool) => {
-                    let cb = |done: usize, total: usize| {
-                        progress_callback(
-                            done,
-                            total,
-                            &format!("Guardando cédulas en PostgreSQL de forma concurrente ({}/{})...", done, total),
-                        );
-                    };
+            match crate::db::create_client() {
+                Ok(mut client) => {
+                    progress_callback(
+                        0,
+                        total_workers,
+                        "Guardando cédulas en PostgreSQL (secuencial)...",
+                    );
 
                     let biz_list: Vec<Business> = sheets.iter().map(|(_, b)| b.clone()).collect();
-                    match crate::db::save_cedulas_concurrent(&pool, &biz_list, Some(&cb)) {
+                    match crate::db::save_cedulas_to_db(&mut client, &biz_list) {
                         Ok(db_stats) => {
                             log::info!(
-                                "Cédulas guardadas en PostgreSQL concurrentemente: {} liquidaciones, {} detalles, {} vinculaciones obras, {} empleados, {} registros obras",
+                                "Cédulas guardadas en PostgreSQL: {} liquidaciones, {} detalles, {} vinculaciones obras, {} empleados, {} registros obras",
                                 db_stats.liquidaciones_guardadas,
                                 db_stats.detalles_guardados,
                                 db_stats.vinculaciones_guardadas,
                                 db_stats.empleados_guardados,
                                 db_stats.registros_obras_guardados
                             );
-                            if !db_stats.errores.is_empty() {
-                                for err in db_stats.errores {
-                                    log::warn!("Advertencia al guardar cédula concurrentemente en BD: {}", err);
-                                }
+                            for err in db_stats.errores {
+                                log::warn!("Advertencia al guardar cédula en BD: {}", err);
                             }
                         }
                         Err(e) => {
-                            log::error!("Error al guardar cédulas concurrentes en PostgreSQL: {}", e);
+                            log::error!("Error al guardar cédulas en PostgreSQL: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    log::warn!("No se pudo inicializar pool de PostgreSQL para guardar cédulas: {}", e);
+                    log::warn!("No se pudo conectar a PostgreSQL para guardar cédulas: {}", e);
                 }
             }
+
+            progress_callback(
+                total_workers,
+                total_workers,
+                "Guardado de cédulas en PostgreSQL finalizado.",
+            );
         }
     }
 

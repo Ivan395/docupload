@@ -1804,16 +1804,41 @@ pub fn load_cedulas_from_db(
     Ok(Some((audit, valid_businesses, has_missing_cedulas)))
 }
 
-pub fn save_cedulas_audit_to_db(
+/// Guarda un lote de cédulas registrando sus archivos y promoviéndolos en RustFS después del COMMIT.
+///
+/// Orden de fases:
+/// 1. Transacción PostgreSQL: borra los meses a reemplazar, registra los archivos como STAGED,
+///    marca reemplazados por periodo (si aplica), guarda liquidaciones con su `id_archivo` y sincroniza reportes.
+/// 2. COMMIT de PostgreSQL. Si falla se hace rollback y se devuelve error (el llamador descarta el staging).
+/// 3. Promoción en RustFS (`promover_en_almacen`). Si falla, PostgreSQL ya es la fuente de verdad:
+///    los archivos quedan STAGED para reintento y el resultado es `Ok` con el aviso en `errores`.
+/// 4. Solo tras una promoción exitosa se marcan ACTIVO los archivos registrados.
+pub fn guardar_cedulas_lote(
     pool: &DbPool,
     id_revision: &str,
     businesses: &[Business],
-    overwrite_months: &[(String, String)],
-    rustfs_commit_hook: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
+    archivos: &[crate::db::ingesta::ArchivoParaRegistrar],
+    reemplazar_meses: &[(String, String)],
+    promover_en_almacen: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
     progress_cb: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
 ) -> Result<CedulasDbStats, String> {
-    if businesses.is_empty() {
+    if archivos.is_empty() {
+        log::info!("guardar_cedulas_lote: sin archivos nuevos que guardar");
         return Ok(CedulasDbStats::default());
+    }
+    if businesses.is_empty() {
+        return Err(format!(
+            "No se puede registrar el lote: {} archivo(s) sin registros patronales asociados",
+            archivos.len()
+        ));
+    }
+
+    // El nombre del archivo es la clave de asociación con `Employee.file_name`: debe ser único en el lote.
+    let mut nombres: HashSet<&str> = HashSet::new();
+    for a in archivos {
+        if !nombres.insert(a.nombre_archivo.as_str()) {
+            return Err(format!("Nombre de archivo duplicado en el lote: '{}'", a.nombre_archivo));
+        }
     }
 
     let mut client = pool
@@ -1827,8 +1852,6 @@ pub fn save_cedulas_audit_to_db(
         None
     };
 
-    // Fase 1 (Transacción Atómica Única): todo el lote de cédulas, sincronización de
-    // reportes_liquidaciones y promoción desde staging en rustfs ocurren como una sola unidad atómica.
     let mut tx = client
         .transaction()
         .map_err(|e| format!("Error iniciando transacción en PostgreSQL: {}", crate::db::schema::format_pg_error(&e)))?;
@@ -1836,17 +1859,23 @@ pub fn save_cedulas_audit_to_db(
     let total_emps: usize = businesses.iter().map(|b| b.employees.len()).sum();
     let mut current_emp_idx = 0;
     let total_biz = businesses.len();
+    let mut ids_registrados: Vec<Uuid> = Vec::new();
 
     let tx_result: Result<(), String> = (|| {
         if !id_revision.trim().is_empty() {
-            for (anio_str, mes_str) in overwrite_months {
-                let anio_num: i32 = anio_str.parse().unwrap_or(2026);
+            for (anio_str, mes_str) in reemplazar_meses {
+                // Año ilegible = error (nunca se asume un año por defecto al borrar un mes)
+                let anio_num: i32 = anio_str.trim().parse().map_err(|_| {
+                    format!("Año inválido '{}' al reemplazar el mes {}: no se borró nada", anio_str, mes_str)
+                })?;
                 delete_cedula_for_month_tx(&mut tx, id_revision.trim(), mes_str, anio_num)?;
             }
         }
 
         let mut resolved_rev_id: Option<Uuid> = rev_uuid_opt;
         let mut resolved_rp_id: Option<Uuid> = None;
+        // nombre_archivo -> id_archivo, para asociar cada liquidación con su PDF.
+        let mut mapa_archivos: HashMap<String, Uuid> = HashMap::new();
 
         for (biz_idx, biz) in businesses.iter().enumerate() {
             let current_file_label = biz
@@ -1873,6 +1902,50 @@ pub fn save_cedulas_audit_to_db(
                 resolved_rp_id = Some(ctx.id_registro_patronal);
             }
 
+            // Registro de archivos: una sola vez, con el registro patronal ya resuelto.
+            if biz_idx == 0 {
+                for a in archivos {
+                    let id = crate::db::ingesta::registrar_archivo_staged(
+                        &mut tx,
+                        ctx.id_registro_patronal,
+                        Some(ctx.id_revision),
+                        &a.lote,
+                        &a.clave_final,
+                        &a.clave_staging,
+                    )?;
+                    mapa_archivos.insert(a.nombre_archivo.clone(), id);
+                    ids_registrados.push(id);
+                }
+
+                // Reemplazo por periodo: el nuevo archivo pasa a ACTIVO y los anteriores del mismo periodo a REEMPLAZADO.
+                for a in archivos {
+                    let se_reemplaza = reemplazar_meses.iter().any(|(anio_str, mes_str)| {
+                        anio_str.trim() == a.lote.anio.to_string() && i64::from(month_to_num(mes_str)) == i64::from(a.lote.mes)
+                    });
+                    if !se_reemplaza {
+                        continue;
+                    }
+                    if let Some(&id_nuevo) = mapa_archivos.get(&a.nombre_archivo) {
+                        let reemplazados = crate::db::ingesta::marcar_reemplazados_por_periodo(
+                            &mut tx,
+                            ctx.id_registro_patronal,
+                            a.lote.anio,
+                            a.lote.mes,
+                            id_nuevo,
+                        )?;
+                        if reemplazados > 0 {
+                            log::info!(
+                                "Reemplazados {} archivo(s) previos del periodo {}-{:02} (RP {})",
+                                reemplazados,
+                                a.lote.anio,
+                                a.lote.mes,
+                                ctx.id_registro_patronal
+                            );
+                        }
+                    }
+                }
+            }
+
             for emp in &biz.employees {
                 if let Some(msg) = describe_trabajador_sin_detalles(emp, current_file_label) {
                     stats.errores.push(msg);
@@ -1884,7 +1957,13 @@ pub fn save_cedulas_audit_to_db(
                     }
                     continue;
                 }
-                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx).map_err(|e| {
+
+                let id_archivo = emp
+                    .file_name
+                    .as_deref()
+                    .and_then(|nombre| mapa_archivos.get(nombre).copied());
+
+                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx, id_archivo).map_err(|e| {
                     format!(
                         "Error insertando liquidación de trabajador '{}' (NSS: {}, archivo: '{}'): {}",
                         emp.nombre.as_deref().unwrap_or("SIN NOMBRE"),
@@ -1914,12 +1993,6 @@ pub fn save_cedulas_audit_to_db(
                 .map_err(|e| format!("Error sincronizando reportes_liquidaciones de la revisión: {}", e))?;
         }
 
-        // Fase 4A (Coordinación con rustfs antes del COMMIT de PostgreSQL):
-        // Si la promoción de staging en rustfs falla, se aborta y revierte también la transacción de PostgreSQL.
-        if let Some(commit_hook) = rustfs_commit_hook {
-            commit_hook()?;
-        }
-
         stats.id_revision = resolved_rev_id;
         stats.id_registro_patronal = resolved_rp_id;
 
@@ -1929,8 +2002,9 @@ pub fn save_cedulas_audit_to_db(
     if let Err(err_msg) = tx_result {
         let _ = tx.rollback();
         crate::app_logger::log_db_error(
-            "ROLLBACK save_cedulas_audit_to_db",
+            "ROLLBACK guardar_cedulas_lote",
             &[
+                "public.archivos_cedulas",
                 "public.liquidaciones",
                 "public.detalles_liquidaciones",
                 "public.vinculaciones_obras_liquidaciones",
@@ -1946,8 +2020,9 @@ pub fn save_cedulas_audit_to_db(
         let detailed = crate::db::schema::format_pg_error(&e);
         let msg = format!("Error confirmando transacción (COMMIT) en PostgreSQL: {}", detailed);
         crate::app_logger::log_db_error(
-            "COMMIT_FAILED save_cedulas_audit_to_db",
+            "COMMIT_FAILED guardar_cedulas_lote",
             &[
+                "public.archivos_cedulas",
                 "public.liquidaciones",
                 "public.detalles_liquidaciones",
                 "public.vinculaciones_obras_liquidaciones",
@@ -1957,6 +2032,40 @@ pub fn save_cedulas_audit_to_db(
             &msg,
         );
         return Err(msg);
+    }
+
+    // Fases posteriores al COMMIT: PostgreSQL ya es válido; un fallo aquí no revierte los datos.
+    if let Some(promover) = promover_en_almacen {
+        let pendientes = ids_registrados.len();
+        if let Err(e) = promover() {
+            log::error!(
+                "Datos de cédulas guardados en PostgreSQL, pero falló la promoción en RustFS ({} archivo(s)): {}",
+                pendientes,
+                e
+            );
+            stats.errores.push(format!(
+                "Los datos se guardaron, pero {} archivo(s) PDF quedaron pendientes de mover en RustFS; se reintentará automáticamente: {}",
+                pendientes, e
+            ));
+            return Ok(stats);
+        }
+
+        match pool.get() {
+            Ok(mut conn) => {
+                for id in &ids_registrados {
+                    if let Err(e) = crate::db::ingesta::marcar_archivo_activo(&mut *conn, *id) {
+                        log::warn!("Archivo {id} promovido en RustFS pero no activado en BD: {e}");
+                        stats.errores.push(format!("Archivo {id} promovido pero no activado en BD: {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Sin conexión para activar {pendientes} archivo(s) promovidos: {e}");
+                stats.errores.push(format!(
+                    "Archivos promovidos en RustFS pero sin activar en BD (se reintentará): {e}"
+                ));
+            }
+        }
     }
 
     Ok(stats)

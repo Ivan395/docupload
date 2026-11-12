@@ -2433,7 +2433,7 @@ export component CedulaCuotasView inherits Rectangle {
         }
     }
 
-    // Modal de confirmación: reemplazo de meses ya cargados (muestra impacto en reportes y asignaciones)
+    // Modal de confirmación: meses ya cargados. Opción principal: fusionar; secundaria: reemplazar (borra)
     if AppData.show_cedulas_overwrite_confirm_modal : Rectangle {
         background: #00000088;
         width: 100%;
@@ -2445,7 +2445,7 @@ export component CedulaCuotasView inherits Rectangle {
 
         Rectangle {
             width: 580px;
-            height: 380px;
+            height: 430px;
             border-radius: 12px;
             background: #ffffff;
             x: (parent.width - self.width) / 2;
@@ -2481,20 +2481,20 @@ export component CedulaCuotasView inherits Rectangle {
                         spacing: 6px;
                         horizontal-stretch: 1;
                         Text {
-                            text: "Meses ya cargados: confirmar reemplazo";
+                            text: "Meses ya cargados";
                             font-size: 15px;
                             font-weight: 800;
                             color: #991b1b;
                         }
                         Text {
-                            text: "Esta carga reemplazará los meses listados. Se borrarán sus liquidaciones y las filas del Reporte de Liquidaciones de esa revisión, incluidas las asignaciones de obra hechas manualmente:";
+                            text: "Los archivos nuevos contienen meses que ya tienen datos. Elige cómo cargarlos:\n• Fusionar (recomendado): actualiza cada trabajador con los datos nuevos y conserva las asignaciones de obra hechas en el reporte.\n• Reemplazar: borra por completo esos meses (liquidaciones y filas del Reporte de Liquidaciones, incluidas asignaciones manuales) y los vuelve a cargar.";
                             font-size: 12px;
                             font-weight: 500;
                             color: #475569;
                             wrap: word-wrap;
                         }
                         Rectangle {
-                            height: 130px;
+                            height: 110px;
                             background: #f8fafc;
                             border-radius: 6px;
                             border-width: 1px;
@@ -2545,7 +2545,7 @@ export component CedulaCuotasView inherits Rectangle {
                         height: 36px;
                         width: 150px;
                         border-radius: 6px;
-                        background: btn_confirm_overwrite.has-hover ? #991b1b : #b91c1c;
+                        background: btn_replace_overwrite.has-hover ? #991b1b : #b91c1c;
                         Text {
                             text: "Reemplazar meses";
                             font-size: 12px;
@@ -2554,9 +2554,28 @@ export component CedulaCuotasView inherits Rectangle {
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
-                        btn_confirm_overwrite := TouchArea {
+                        btn_replace_overwrite := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { AppLogic.confirmar_sobrescribir_cedulas(); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 36px;
+                        width: 210px;
+                        border-radius: 6px;
+                        background: btn_merge_overwrite.has-hover ? #1e40af : #1d4ed8;
+                        Text {
+                            text: "Fusionar (conservar asignaciones)";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_merge_overwrite := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.fusionar_cedulas_meses_existentes(); }
                         }
                     }
                 }

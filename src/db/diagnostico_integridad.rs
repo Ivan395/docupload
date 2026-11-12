@@ -154,6 +154,15 @@ const CONSULTAS: &[(&str, &str)] = &[
         "fks_hacia_empleados",
         "SELECT COUNT(*)::bigint FROM pg_constraint WHERE contype = 'f' AND confrelid = 'public.empleados'::regclass",
     ),
+    (
+        // Datos temporales de pruebas de integración que no debieron quedar (deben ser 0)
+        "clientes_prueba_residuales",
+        "SELECT COUNT(*)::bigint FROM public.clientes WHERE nombre LIKE 'ZZ PRUEBA%'",
+    ),
+    (
+        "archivos_cedulas_por_estado_staged",
+        "SELECT COUNT(*)::bigint FROM public.archivos_cedulas WHERE estado = 'STAGED'",
+    ),
     ("postgres_version_num", "SELECT current_setting('server_version_num')::bigint"),
 ];
 

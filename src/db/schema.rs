@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS public.archivos_cedulas (
 );
 CREATE INDEX IF NOT EXISTS idx_archivos_cedulas_rp_periodo ON public.archivos_cedulas(id_registro_patronal, anio_periodo, mes_periodo_int) WHERE estado = 'ACTIVO';
 CREATE INDEX IF NOT EXISTS idx_archivos_cedulas_staged ON public.archivos_cedulas(created_at) WHERE estado = 'STAGED';
+-- Clave temporal en RustFS mientras el archivo está en STAGED (necesaria para reintentar la promoción)
+ALTER TABLE public.archivos_cedulas ADD COLUMN IF NOT EXISTS staging_key varchar(700);
 
 ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS id_archivo uuid REFERENCES public.archivos_cedulas(id) ON UPDATE CASCADE ON DELETE SET NULL;
 ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS origen varchar(5);
