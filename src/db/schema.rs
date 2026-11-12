@@ -2133,10 +2133,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         "#,
     );
 
-    // 10. Limpieza y reasignación de filas duplicadas en reportes de liquidaciones
-    if let Err(e) = crate::db::reporte_liquidaciones::cleanup_all_duplicate_reportes_detalles(client) {
-        log::warn!("Advertencia en limpieza automática de duplicados de reportes: {}", e);
-    }
+    // 10. La limpieza/reasignación de duplicados de reportes (cleanup_all_duplicate_reportes_detalles)
+    //     ya NO se ejecuta al arrancar: modificaba asignaciones de obra hechas por el analista.
+    //     Solo corre desde la acción manual "Reparar desde RustFS" (Vista 6).
 
     // 11. Fase 1 de integridad: tablas/columnas nuevas (idempotente)
     exec_schema_step(client, "4_fase1_integridad_ddl", SQL_FASE1_DDL)?;

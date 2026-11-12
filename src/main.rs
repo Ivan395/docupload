@@ -7244,6 +7244,11 @@ fn main() -> Result<(), slint::PlatformError> {
                                 } else {
                                     log::info!("Limpieza de claves completada");
                                 }
+                                log::info!("Reparación manual: limpieza de tramos duplicados en reportes...");
+                                match crate::db::reporte_liquidaciones::cleanup_all_duplicate_reportes_detalles(&mut client) {
+                                    Ok(stats) => log::info!("Limpieza de tramos duplicados completada: {:?}", stats),
+                                    Err(e) => log::warn!("Limpieza de tramos duplicados (reparación manual) falló: {}", e),
+                                }
                                 log::info!("Reparación manual: reconciliación de vinculaciones desde RustFS...");
                                 match crate::rustfs::reconcile_all_liquidaciones_vinculaciones_from_rustfs(&mut client) {
                                     Ok(stats) => {

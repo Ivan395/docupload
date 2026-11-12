@@ -342,9 +342,88 @@ pub fn depurar_duplicados_fase1(client: &mut Client, dry_run: bool) -> Result<Re
     Ok(r)
 }
 
+/// Restaura desde `revision_history` tramos de `reportes_detalles_liquidaciones` borrados (evento DELETE),
+/// copiando solo las columnas comunes a ambas tablas. Omite tramos cuyo reporte padre ya no existe o que
+/// ya están presentes. Reconstruye las vinculaciones legadas (rvol) de los reportes afectados desde rdl.
+/// Devuelve (restaurados, omitidos).
+pub fn restaurar_tramos_rdl_desde_historial(client: &mut Client, ids: &[uuid::Uuid]) -> Result<(u64, u64), String> {
+    let mut tx = client.transaction().map_err(|e| err_pg("iniciar transacción", e))?;
+    // Columnas comunes (el historial agrega modified_at/event_name y puede carecer de columnas nuevas)
+    let cols: Vec<String> = tx
+        .query(
+            "SELECT quote_ident(p.column_name) FROM information_schema.columns p \
+             JOIN information_schema.columns h ON h.table_schema = 'revision_history' \
+              AND h.table_name = p.table_name AND h.column_name = p.column_name \
+             WHERE p.table_schema = 'public' AND p.table_name = 'reportes_detalles_liquidaciones' \
+             ORDER BY p.ordinal_position",
+            &[],
+        )
+        .map_err(|e| err_pg("columnas comunes rdl", e))?
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    if cols.is_empty() {
+        return Err("No hay columnas comunes entre public y revision_history para reportes_detalles_liquidaciones".into());
+    }
+    let lista = cols.join(", ");
+    let sql = format!(
+        "INSERT INTO public.reportes_detalles_liquidaciones ({lista}) \
+         SELECT {lista} FROM ( \
+             SELECT DISTINCT ON (h.id) h.* FROM revision_history.reportes_detalles_liquidaciones h \
+             WHERE h.id = ANY($1) AND h.event_name = 'DELETE' ORDER BY h.id, h.modified_at DESC \
+         ) h \
+         WHERE EXISTS (SELECT 1 FROM public.reportes_liquidaciones rl WHERE rl.id = h.id_reporte_liquidacion) \
+           AND NOT EXISTS (SELECT 1 FROM public.reportes_detalles_liquidaciones x WHERE x.id = h.id)"
+    );
+    let restaurados = tx.execute(sql.as_str(), &[&ids]).map_err(|e| err_pg("restaurar tramos", e))?;
+    // Mantener coherente la tabla legada de vinculaciones de reportes para los padres afectados
+    tx.execute(
+        "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones v \
+         WHERE v.id_reporte_liquidacion IN (SELECT id_reporte_liquidacion FROM public.reportes_detalles_liquidaciones WHERE id = ANY($1))",
+        &[&ids],
+    )
+    .map_err(|e| err_pg("limpiar rvol de padres afectados", e))?;
+    tx.execute(
+        "INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (id_registro_obra, id_reporte_liquidacion, dias_registro_obra) \
+         SELECT d.id_registro_obra, d.id_reporte_liquidacion, LEAST(SUM(COALESCE(d.dias_registro_obra, 0)), 31)::smallint \
+         FROM public.reportes_detalles_liquidaciones d \
+         WHERE d.id_registro_obra IS NOT NULL AND d.id_reporte_liquidacion IN \
+               (SELECT id_reporte_liquidacion FROM public.reportes_detalles_liquidaciones WHERE id = ANY($1)) \
+         GROUP BY d.id_registro_obra, d.id_reporte_liquidacion",
+        &[&ids],
+    )
+    .map_err(|e| err_pg("reconstruir rvol de padres afectados", e))?;
+    tx.commit().map_err(|e| err_pg("commit restauración", e))?;
+    Ok((restaurados, ids.len() as u64 - restaurados))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Restauración puntual (2026-11-12) de 2 tramos borrados por la limpieza automática de arranque.
+    /// Solo corre con RESTAURAR_TRAMOS_ARRANQUE=SI: `cargo test restaurar_tramos_limpieza_arranque_bd -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn restaurar_tramos_limpieza_arranque_bd() {
+        if std::env::var("RESTAURAR_TRAMOS_ARRANQUE").as_deref() != Ok("SI") {
+            println!("Restauración omitida: defina RESTAURAR_TRAMOS_ARRANQUE=SI");
+            return;
+        }
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Sin conexión a BD: {}", e);
+                return;
+            }
+        };
+        let ids = [
+            uuid::Uuid::parse_str("01a1ce0a-65d8-701d-81d9-dfe079dbf37e").expect("uuid"),
+            uuid::Uuid::parse_str("01a1ce0a-6252-700d-b75b-9a9c3abf0796").expect("uuid"),
+        ];
+        let (rest, omit) = restaurar_tramos_rdl_desde_historial(&mut client, &ids).expect("restauración");
+        println!("RESTAURACION restaurados={} omitidos={}", rest, omit);
+    }
 
     #[test]
     fn respaldo_precede_a_los_borrados() {
