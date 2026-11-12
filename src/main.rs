@@ -55,6 +55,8 @@ pub mod sat;
 pub mod sua_export;
 pub mod updater;
 pub mod validation;
+#[cfg(test)]
+mod pruebas_golden_excel;
 
 use crate::calendario_view_logic::*;
 use crate::db::{create_pool, ensure_schema, DbPool, CedulasDbStats};

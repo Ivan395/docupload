@@ -728,3 +728,73 @@ Fase 0 (crítico) → Fase 1 (BD) → Fase 3 (sync no destructiva) → Fase 2 (i
 ```
 
 La Fase 3 va antes que la 2 porque **detener la pérdida de trabajo** tiene más valor inmediato que el nuevo flujo de carga. La Fase 4 es la de mayor impacto en la productividad, pero se apoya en las restricciones y en `editado_usuario` de las fases anteriores.
+
+---
+
+## 11. Estado de implementación (2026-11-12)
+
+Rama `mejora_cedulas_liquidaciones`. Todas las fases están implementadas y verificadas contra PostgreSQL (con rollback o con clientes temporales que se borran).
+
+### 11.1 Commits por fase
+
+| Fase | Commit | Contenido |
+|---|---|---|
+| 0 | `e3a4045` | Excel sin datos fijos, representante legal, periodo obligatorio, sin detalle inventado, confirmación de meses, reparación manual |
+| 1 | `3eb8ce8` | Restricciones UNIQUE, tablas nuevas, depuración controlada (335 liquidaciones, respaldo JSON) |
+| — | `1ff9cc1` | Limpieza automática de reportes al arrancar desactivada; 2 tramos restaurados |
+| 2 | `c504e3e` | Ingesta idempotente por SHA-256, `archivos_cedulas`, COMMIT PostgreSQL antes de RustFS, fusión/reemplazo |
+| — | `4a5b6ee` | Modal de meses repetidos tapado por la capa de procesamiento |
+| 3 | `44c1d40` | Sincronización no destructiva, prorrateo canónico (Decimal), bitácora, periodo de revisión |
+| 4 | `f1a2f97` | Asignación por empleado y por obra, asistente masivo, deshacer de varios niveles |
+| — | `ea59e2c` | Atajos multiplataforma (KeyBinding), acceso visible al asistente, capa global de avance |
+| 5 | `ac4991c` | Entregable IMSS: verificación, borrador/entregable vN, RustFS + hash, historial; SUA sin datos inventados |
+| — | `dfe5df7` | CP de 2_AFIL tomado del registro patronal |
+| 6 | (este) | Pruebas de integración y golden de la matriz del plan |
+
+### 11.2 Decisiones del usuario que modifican el plan
+
+- **Duplicados y cargas del mismo mes:** gana la carga más reciente y conserva las obras si la nueva no las trae (el plan proponía "SUA prevalece sobre EMA").
+- **Sin obra:** importe completo (factor 1).
+- **Ruta RustFS:** se conserva por revisión, con el hash en el nombre (`Cliente__RP__MES__AÑO__<sha12>.pdf`); no se migró a ruta por RP.
+- **Decimal:** solo en el prorrateo (`src/db/prorrateo.rs`); las columnas siguen en `double precision`.
+- **UNIQUE:** solo por NSS (no por CURP).
+- **CP en SUA:** el del registro patronal; en blanco con aviso si no está capturado.
+
+### 11.3 Ajustes técnicos respecto al plan
+
+- `reportes_vinculaciones_obras_liquidaciones` no se convirtió en vista: se **regenera desde `reportes_detalles_liquidaciones` al cerrar cada edición** (rdl es la única fuente de verdad). Evita reescribir 34 puntos de escritura.
+- La "pantalla de revisión previa" se cubre con dos modales (duplicados por hash y meses repetidos con Fusionar/Reemplazar) en lugar de una tabla nueva.
+- Reportes existentes antes de la Fase 3 se marcaron como editados (migración única) para que ninguna sincronización los altere.
+
+### 11.4 Defectos de fondo encontrados y corregidos (anteriores a este plan)
+
+- Las ediciones del reporte sobrescribían la tabla **maestra** de vinculaciones (debe reflejar solo el PDF).
+- La sincronización restauraba los importes al 100% en cada apertura de la Vista 7 (prorrateo perdido en 122 tramos).
+- La sincronización de una revisión borraba vínculos de obra de las demás revisiones del mismo RP.
+- `add_obra_vinculacion_for_employee` fallaba con empleados sin CURP/RFC/NSS.
+- Operaciones largas corrían en el hilo de la interfaz (sin indicador de avance).
+- "Revertir" no pedía confirmación.
+
+### 11.5 Cobertura de los criterios de aceptación (§9)
+
+| Criterio | Verificación |
+|---|---|
+| Subir el mismo PDF N veces no cambia conteos | `ingesta_idempotente_y_mas_reciente_bd`; omisión por hash en la subida |
+| Ninguna acción automática borra asignaciones | `sync_incremental_no_destructiva_bd` (editados intactos en todas las revisiones); arranque sin limpiezas automáticas |
+| Re-subir un mes muestra el impacto y deja elegir | Modal Fusionar/Reemplazar con conteos por mes (manual) |
+| Trazabilidad liquidación → PDF y entregable → versión | `id_archivo` verificado en ingesta; `registro_y_versionado_de_entregables_bd` |
+| Operaciones del analista por empleado y deshacer | `asignacion_operaciones_y_deshacer_bd` con invariante de dinero en cada paso |
+| Escenario C resuelto con el asistente | Pruebas puras de los 4 planificadores; validación de consultas contra BD (uso en la app: manual) |
+| Excel IMSS sin valores fijos, bloqueado si faltan datos, con todas las filas activas | `pruebas_golden_excel` (4) y `excel_entregable_con_datos_reales` |
+| `ensure_schema` idempotente y restricciones UNIQUE presentes | Ejecutado en cada prueba de integración; `diagnostico_bd` con 0 duplicados |
+
+Pruebas: 262 automáticas sin BD + 14 de integración contra PostgreSQL (solo lectura, rollback o datos temporales).
+
+### 11.6 Pendientes
+
+- **Datos:** capturar el representante legal (bloquea el entregable en las 9 revisiones); folio de una revisión; CP de 1 registro patronal; 1 CURP repetida con NSS distinto; 4 empleado-mes con dos obras al 100% cada una (requieren criterio del analista).
+- **Revisión HERAS 0503/CCE/2026/0180S:** capturar su "Periodo revisado" antes de sincronizar, o 1,282 reportes quedarán "Fuera de periodo".
+- **Tabla maestra de vinculaciones:** ejecutar una vez "Reparar desde RustFS" para reconstruirla desde los PDF (pudo contener ediciones antiguas del analista).
+- **Pruebas del parser con PDF reales anonimizados** (hoy se prueba con texto extraído).
+- **Backfill de `archivos_cedulas`** para los PDF cargados antes de la Fase 2 (hoy se detectan como "mes ya cargado", no como "idéntico").
+- **CURP calculadas** por el respaldo RENAPO usan entidad "CL" por defecto en `empleados.curp`; el SUA ya no lo usa como lugar de nacimiento, pero el dato sigue en la tabla de empleados.

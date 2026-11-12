@@ -721,4 +721,53 @@ MOVIMIENTOS CUOTAS ENFERMEDADES Y MATERNIDAD
         assert_eq!(w3.data_employee[0].clave.as_deref(), Some("baja"));
         assert_eq!(w3.data_employee[0].dias, Some(0.0));
     }
+
+    /// Texto base de una cédula bimestral sintética; cada marcador se inserta debajo.
+    fn texto_bimestral_con(marcador: &str) -> String {
+        format!(
+            "Sistema Único de Autodeterminación\n{marcador}\nRegistro patronal A36 73455 10 3\nDETALLE DE TRABAJADORES\n"
+        )
+    }
+
+    #[test]
+    fn test_admision_rechaza_cedulas_bimestrales() {
+        let marcadores = [
+            "BIMESTRE DE PROCESO 01/2025",
+            "APORTACIONES Y AMORTIZACIONES",
+            "EMISIÓN BIMESTRAL ANTICIPADA",
+            "EBI-01",
+            "EBI - 01",
+            "CUOTAS RCV",
+        ];
+        for marcador in marcadores {
+            let texto = texto_bimestral_con(marcador);
+            assert!(
+                is_bimestral_document(&texto),
+                "debe clasificarse como bimestral: {marcador}"
+            );
+            assert!(
+                !is_ema_document(&texto),
+                "una cédula bimestral no debe admitirse como EMA mensual: {marcador}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_admision_rechaza_texto_sin_capa_vectorial() {
+        use crate::cedulas::view_logic::es_texto_insuficiente;
+
+        assert!(es_texto_insuficiente(""));
+        assert!(es_texto_insuficiente("   \n\t  "));
+        assert!(es_texto_insuficiente(&"a".repeat(49)));
+        assert!(!es_texto_insuficiente(&"a".repeat(50)));
+    }
+
+    #[test]
+    fn test_admision_acepta_ema_mensual_valido() {
+        use crate::cedulas::view_logic::es_texto_insuficiente;
+
+        assert!(!es_texto_insuficiente(SAMPLE_EMA_TEXT));
+        assert!(is_ema_document(SAMPLE_EMA_TEXT));
+        assert!(!is_bimestral_document(SAMPLE_EMA_TEXT));
+    }
 }

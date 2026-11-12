@@ -41,6 +41,8 @@ mod pruebas_integracion_sync;
 mod pruebas_integracion_entregable;
 #[cfg(test)]
 mod pruebas_integracion_asignacion;
+#[cfg(test)]
+mod pruebas_integracion_fase6;
 
 #[cfg(test)]
 mod tests {

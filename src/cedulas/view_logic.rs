@@ -647,6 +647,15 @@ pub fn detect_overlapping_workers(assignments: &[AuditAssignment]) -> usize {
     overlap_count
 }
 
+/// Longitud mínima (en caracteres, sin espacios laterales) de la capa de texto de un PDF.
+/// Por debajo de este umbral el archivo se considera escaneo raster sin OCR vectorial.
+pub const MIN_CARACTERES_TEXTO_VECTORIAL: usize = 50;
+
+/// Indica si el texto extraído es insuficiente (vacío o escaneo sin capa de texto).
+pub fn es_texto_insuficiente(raw_text: &str) -> bool {
+    raw_text.trim().len() < MIN_CARACTERES_TEXTO_VECTORIAL
+}
+
 pub fn process_and_audit_cedulas(
     input_paths: &[PathBuf],
     target_client_rfc: Option<&str>,
@@ -732,7 +741,7 @@ pub fn process_and_audit_cedulas(
                 || lower.contains("emision mensual")
                 || (lower.contains("registro patronal") && (lower.contains("delegación imss") || lower.contains("delegacion imss"))));
 
-        if (!is_sua && !is_ema) || raw_text.trim().len() < 50 {
+        if (!is_sua && !is_ema) || es_texto_insuficiente(&raw_text) {
             no_procesados += 1;
             mismatch_report.items.push(CedulaMismatchItem {
                 filename: file_display_name,
