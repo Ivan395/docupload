@@ -317,6 +317,18 @@ pub struct SuaWorkerRecord {
     pub clave_ubicacion: String,
     pub num_empleado: String,
     pub tipo_trabajador: char, // Siempre '1' según especificación requerida
+    /// Código postal para 2_AFIL: el del registro patronal (5 dígitos) o vacío si no está capturado.
+    pub codigo_postal: String,
+}
+
+/// CP de 5 dígitos para el SUA, o 5 espacios si no es un código postal válido.
+pub fn codigo_postal_sua(cp: &str) -> String {
+    let limpio: String = cp.chars().filter(|c| !c.is_whitespace()).collect();
+    if limpio.len() == 5 && limpio.chars().all(|c| c.is_ascii_digit()) {
+        limpio
+    } else {
+        " ".repeat(5)
+    }
 }
 
 /// Formatea una línea para `1_ASEG_<Folio>.TXT` (Longitud fija estricta oficial SUA: 164 caracteres)
@@ -400,7 +412,9 @@ pub fn format_afil_line(rec: &SuaWorkerRecord) -> String {
     let nss_base = &clean_nss[..10]; // 10
     let nss_dv = &clean_nss[10..11]; // 1
 
-    let cp_5 = "64000"; // 5 (Código Postal default de la región)
+    // 5: código postal del registro patronal; sin un CP válido de 5 dígitos el campo queda en blanco
+    // (antes se usaba "64000" fijo para todos los trabajadores).
+    let cp_5 = codigo_postal_sua(&rec.codigo_postal);
 
     // Extraer fecha de nacimiento y sexo desde CURP oficial validada
     let curp = resolver_curp_valida(&rec.curp, &rec.nombre_completo, &rec.rfc, &rec.nss);
@@ -652,6 +666,7 @@ pub fn export_sua_files(
     folio_revision: &str,
     rows: &[crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb],
     obras: &[crate::db::reporte_liquidaciones::ObraOptionDb],
+    cp_patronal: &str,
 ) -> Result<SuaExportResult, String> {
     if rows.is_empty() {
         return Err("No hay registros disponibles para exportar al SUA.".to_string());
@@ -770,6 +785,7 @@ pub fn export_sua_files(
             clave_ubicacion: ubicacion_final,
             num_empleado: num_emp_final,
             tipo_trabajador: '1',
+            codigo_postal: cp_patronal.to_string(),
         };
 
         // Agrupar filas del empleado cronológicamente por mes
@@ -1020,6 +1036,11 @@ pub fn export_sua_files(
 
     // Advertencias: un aviso por trabajador (NSS) cuyo lugar de nacimiento no se pudo determinar
     let mut advertencias: Vec<String> = Vec::new();
+    if codigo_postal_sua(cp_patronal).trim().is_empty() {
+        advertencias.push(
+            "Código postal del registro patronal no capturado o inválido: campo CP en blanco en 2_AFIL (captúralo en Registros Patronales)".to_string(),
+        );
+    }
     let mut nss_advertidos: std::collections::HashSet<String> = std::collections::HashSet::new();
     for w in &workers {
         if !curp_tiene_entidad_valida(w) && nss_advertidos.insert(w.nss.clone()) {
@@ -1187,6 +1208,7 @@ mod tests {
             clave_ubicacion: "OBRA-C01".into(),
             num_empleado: "EMP001".into(),
             tipo_trabajador: '1',
+            codigo_postal: "64000".to_string(),
         };
 
         let line = format_aseg_line(&rec);
@@ -1217,6 +1239,7 @@ mod tests {
             clave_ubicacion: "ALTA".into(),
             num_empleado: "ALTA".into(),
             tipo_trabajador: '1',
+            codigo_postal: "64000".to_string(),
         };
 
         let line = format_aseg_line(&rec);
@@ -1301,12 +1324,22 @@ mod tests {
             clave_ubicacion: "OBRA-C01".into(),
             num_empleado: "EMP002".into(),
             tipo_trabajador: '1',
+            codigo_postal: "64000".to_string(),
         };
 
         let line = format_afil_line(&rec);
         assert_eq!(line.len(), 80, "Debe ser de exactamente 80 caracteres para SUA");
         assert!(!line.contains("COAHUILA"), "No debe asumirse un estado por defecto");
         assert!(!curp_tiene_entidad_valida(&rec));
+    }
+
+    #[test]
+    fn test_codigo_postal_sua_valido_o_en_blanco() {
+        assert_eq!(codigo_postal_sua("25000"), "25000");
+        assert_eq!(codigo_postal_sua(" 25 000 "), "25000");
+        assert_eq!(codigo_postal_sua(""), "     ");
+        assert_eq!(codigo_postal_sua("2500"), "     ");
+        assert_eq!(codigo_postal_sua("25A00"), "     ");
     }
 
     #[test]
@@ -1325,6 +1358,7 @@ mod tests {
             clave_ubicacion: "OBRA-C01".into(),
             num_empleado: "EMP001".into(),
             tipo_trabajador: '1',
+            codigo_postal: "64000".to_string(),
         };
 
         let line = format_afil_line(&rec);
@@ -1482,7 +1516,7 @@ mod tests {
         row.obra_numero = "C0896231".into();
         row.dias_obra = 30;
 
-        let res = export_sua_files(&temp_dir, "REV1", &[row], &[]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV1", &[row], &[], "64000").expect("export should succeed");
         assert_eq!(res.aseg_filename, "1_ASEG_REV1.TXT");
         assert_eq!(res.afil_filename, "2_AFIL_REV1.TXT");
         assert_eq!(res.mov_obra_filename, "3_MOVOBRA_REV1.TXT");
@@ -1539,7 +1573,7 @@ mod tests {
             "01",
         );
 
-        let res = export_sua_files(&temp_dir, "REV1", &[row], &[]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV1", &[row], &[], "64000").expect("export should succeed");
         // No debe generar movimiento 08 para un trabajador vigente sin incidencias
         assert_eq!(res.movt_count, 0, "No debe haber movimientos para un trabajador vigente sin incidencias");
 
@@ -1574,7 +1608,7 @@ mod tests {
         row3.fecha = Some(NaiveDate::from_ymd_opt(2024, 9, 15).unwrap());
         row3.clave = "BAJA".into(); // Movimiento de baja
 
-        let res = export_sua_files(&temp_dir, "REV2", &[row1, row2, row3], &[]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV2", &[row1, row2, row3], &[], "64000").expect("export should succeed");
         assert_eq!(res.movt_count, 2, "Debe registrar modificación de salario (07) y baja (02)");
 
         let movt_file = temp_dir.join(&res.movt_filename);
@@ -1605,7 +1639,7 @@ mod tests {
         row2.sdi = 261.20; // Mismo salario que el anterior
         row2.clave = "07".into(); // Clave 07 o M/S en la cédula, pero salario idéntico
 
-        let res = export_sua_files(&temp_dir, "REV3", &[row1, row2], &[]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV3", &[row1, row2], &[], "64000").expect("export should succeed");
         // No debe generar movimiento 07 porque el salario no cambió (evita error SUA: "El Salario Diario Integrado no puede ser igual al anterior")
         assert_eq!(res.movt_count, 0, "No debe haber movimiento 07 si el salario es igual");
 
@@ -1671,6 +1705,7 @@ mod tests {
             "REV_PENS",
             &[row_pensionado_activo, row_pensionado_alta, row_pensionado_baja, row_normal],
             &[],
+            "64000",
         )
         .expect("export should succeed");
 
@@ -1786,6 +1821,7 @@ mod tests {
             "REV_VIG",
             &[row_adriana_dias, row_adriana_baja, row_ruiz_baja, row_ruiz_sept],
             &[mock_obra],
+            "64000",
         )
         .expect("export should succeed");
 

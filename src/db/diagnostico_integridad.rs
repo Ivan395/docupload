@@ -204,6 +204,12 @@ const CONSULTAS: &[(&str, &str)] = &[
             JOIN public.reportes_liquidaciones rl ON rl.id = r.id_reporte_liquidacion AND rl.estado = 'ACTIVO' \
             GROUP BY 1, 2, 3 HAVING bool_or(r.id_registro_obra IS NULL) AND bool_or(r.id_registro_obra IS NOT NULL)) g",
     ),
+    (
+        // Registros patronales sin código postal válido (el SUA 2_AFIL lo deja en blanco)
+        "registros_patronales_sin_cp_valido",
+        "SELECT COUNT(*)::bigint FROM public.registros_patronales WHERE codigo_postal IS NULL OR BTRIM(codigo_postal) !~ '^[0-9]{5}$'",
+    ),
+    ("registros_patronales_total", "SELECT COUNT(*)::bigint FROM public.registros_patronales"),
     ("postgres_version_num", "SELECT current_setting('server_version_num')::bigint"),
 ];
 

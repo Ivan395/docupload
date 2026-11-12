@@ -6643,6 +6643,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
+        let pool_sua = db_pool.clone();
         app_logic.on_reporte_generar_sua(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let (selected_obra_ids, include_unassigned, all_rows, folio_rev, all_obras) = {
@@ -6688,7 +6689,25 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     None => return,
                 };
 
-                match sua_export::export_sua_files(&folder, &folio_rev, &filtered_rows, &all_obras) {
+                // CP del registro patronal de la revisión para 2_AFIL (vacío si no está capturado)
+                let cp_patronal: String = {
+                    let rev_id = ui.global::<AppData>().get_selected_revision_id().to_string();
+                    match (Uuid::parse_str(&rev_id), pool_sua.as_ref().and_then(|p| p.get().ok())) {
+                        (Ok(rev_uuid), Some(mut client)) => client
+                            .query_opt(
+                                "SELECT COALESCE(BTRIM(rp.codigo_postal), '') FROM public.revisiones r \
+                                 JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal WHERE r.id = $1",
+                                &[&rev_uuid],
+                            )
+                            .ok()
+                            .flatten()
+                            .map(|r| r.get::<_, String>(0))
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    }
+                };
+
+                match sua_export::export_sua_files(&folder, &folio_rev, &filtered_rows, &all_obras, &cp_patronal) {
                     Ok(res) => {
                         let msg = format!(
                             "Archivos SUA exportados exitosamente en:\n{}\n• 1. ASEG: {} trabajadores\n• 2. AFIL: {} afiliados\n• 3. MovObra: {} vinculaciones a obra\n• 4. MOVT: {} movimientos\n• 5. CRED: {}\n• 6. INCAP: {} incapacidades",
