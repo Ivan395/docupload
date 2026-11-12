@@ -50,6 +50,182 @@ pub fn format_boxed_pg_error(err: &(dyn std::error::Error + 'static)) -> String 
     }
 }
 
+/// Fase 1 de integridad: tablas, columnas e índices nuevos. Todo idempotente.
+/// Los CHECK se crean solo si no existen, mediante bloques DO.
+const SQL_FASE1_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS public.archivos_cedulas (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    id_registro_patronal uuid NOT NULL REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    id_revision_carga uuid REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE SET NULL,
+    sha256 char(64) NOT NULL,
+    nombre_original varchar(350) NOT NULL,
+    rustfs_key varchar(700),
+    tipo varchar(10) NOT NULL CHECK (tipo IN ('SUA','EMA')),
+    anio_periodo smallint NOT NULL,
+    mes_periodo_int smallint NOT NULL CHECK (mes_periodo_int BETWEEN 1 AND 12),
+    paginas smallint,
+    trabajadores integer,
+    estado varchar(20) NOT NULL DEFAULT 'STAGED' CHECK (estado IN ('STAGED','ACTIVO','REEMPLAZADO','PAPELERA')),
+    reemplazado_por uuid REFERENCES public.archivos_cedulas(id) ON DELETE SET NULL,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_archivos_cedulas_rp_sha UNIQUE (id_registro_patronal, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_archivos_cedulas_rp_periodo ON public.archivos_cedulas(id_registro_patronal, anio_periodo, mes_periodo_int) WHERE estado = 'ACTIVO';
+CREATE INDEX IF NOT EXISTS idx_archivos_cedulas_staged ON public.archivos_cedulas(created_at) WHERE estado = 'STAGED';
+
+ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS id_archivo uuid REFERENCES public.archivos_cedulas(id) ON UPDATE CASCADE ON DELETE SET NULL;
+ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS origen varchar(5);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_liquidaciones_origen') THEN
+        ALTER TABLE public.liquidaciones ADD CONSTRAINT chk_liquidaciones_origen CHECK (origen IS NULL OR origen IN ('SUA','EMA'));
+    END IF;
+END $$;
+
+ALTER TABLE public.revisiones ADD COLUMN IF NOT EXISTS periodo_inicio date;
+ALTER TABLE public.revisiones ADD COLUMN IF NOT EXISTS periodo_fin date;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_revisiones_periodo') THEN
+        ALTER TABLE public.revisiones ADD CONSTRAINT chk_revisiones_periodo CHECK (periodo_inicio IS NULL OR periodo_fin IS NULL OR periodo_inicio <= periodo_fin);
+    END IF;
+END $$;
+
+ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS estado varchar(20) NOT NULL DEFAULT 'ACTIVO';
+ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS editado_usuario boolean NOT NULL DEFAULT false;
+ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS cedula_actualizada boolean NOT NULL DEFAULT false;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_reportes_liquidaciones_estado') THEN
+        ALTER TABLE public.reportes_liquidaciones ADD CONSTRAINT chk_reportes_liquidaciones_estado CHECK (estado IN ('ACTIVO','FUERA_PERIODO','EXCLUIDO'));
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.reportes_cambios (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    id_reporte_liquidacion uuid REFERENCES public.reportes_liquidaciones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    lote_id uuid NOT NULL,
+    accion varchar(30) NOT NULL,
+    antes jsonb,
+    despues jsonb,
+    usuario varchar(100),
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_reportes_cambios_rev ON public.reportes_cambios(id_revision, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reportes_cambios_lote ON public.reportes_cambios(lote_id);
+
+CREATE TABLE IF NOT EXISTS public.exportaciones_reportes (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    tipo varchar(10) NOT NULL CHECK (tipo IN ('XLSX','SUA')),
+    version integer NOT NULL,
+    sha256 char(64) NOT NULL,
+    rustfs_key varchar(700) NOT NULL,
+    resumen jsonb,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_export_rev_tipo_version UNIQUE (id_revision, tipo, version)
+);
+
+-- Respaldo de registros eliminados por procesos de depuración (permite reconstruir lo borrado)
+CREATE TABLE IF NOT EXISTS public.respaldo_depuracion (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    proceso varchar(60) NOT NULL,
+    tabla varchar(80) NOT NULL,
+    id_registro uuid NOT NULL,
+    id_sobreviviente uuid,
+    datos jsonb NOT NULL,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_respaldo_depuracion_proceso ON public.respaldo_depuracion(proceso, tabla);
+"#;
+
+/// Restricciones de integridad sobre datos existentes. Cada una se crea solo si no existe
+/// y no hay registros que la violen; si los hay, emite un aviso y continúa sin abortar.
+pub(crate) const SQL_FASE1_RESTRICCIONES: &str = r#"
+-- a) Empleados: NSS único por cliente (solo NSS no vacíos)
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_empleados_cliente_nss')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_empleados_cliente_nss') THEN
+        SELECT COUNT(*) INTO n FROM (
+            SELECT 1 FROM public.empleados
+            WHERE nss IS NOT NULL AND BTRIM(nss) <> ''
+            GROUP BY id_cliente, nss
+            HAVING COUNT(*) > 1
+        ) g;
+        IF n = 0 THEN
+            CREATE UNIQUE INDEX uq_empleados_cliente_nss ON public.empleados(id_cliente, nss)
+                WHERE nss IS NOT NULL AND BTRIM(nss) <> '';
+        ELSE
+            RAISE WARNING 'uq_empleados_cliente_nss omitida: existen % registros que la violan; ejecutar depuracion de Fase 1', n;
+        END IF;
+    END IF;
+END $$;
+
+-- b) Liquidaciones: mes_periodo_int en 1..12 y NOT NULL (solo si no hay filas que lo violen)
+DO $$
+DECLARE n_bad bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_liquidaciones_mes_periodo_int') THEN
+        SELECT COUNT(*) INTO n_bad FROM public.liquidaciones
+        WHERE mes_periodo_int IS NULL OR mes_periodo_int NOT BETWEEN 1 AND 12;
+        IF n_bad = 0 THEN
+            ALTER TABLE public.liquidaciones ADD CONSTRAINT chk_liquidaciones_mes_periodo_int CHECK (mes_periodo_int BETWEEN 1 AND 12);
+            ALTER TABLE public.liquidaciones ALTER COLUMN mes_periodo_int SET NOT NULL;
+        ELSE
+            RAISE WARNING 'chk_liquidaciones_mes_periodo_int omitida: existen % registros que la violan; ejecutar depuracion de Fase 1', n_bad;
+        END IF;
+    END IF;
+END $$;
+
+-- c) Liquidaciones: un registro por patrón, empleado y periodo (NULLs tratados como iguales)
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_liquidaciones_rp_emp_periodo')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_liquidaciones_rp_emp_periodo') THEN
+        SELECT COUNT(*) INTO n FROM (
+            SELECT 1 FROM public.liquidaciones
+            GROUP BY id_registro_patronal, id_empleado, anio_periodo, mes_periodo_int
+            HAVING COUNT(*) > 1
+        ) g;
+        IF n = 0 THEN
+            ALTER TABLE public.liquidaciones ADD CONSTRAINT uq_liquidaciones_rp_emp_periodo
+                UNIQUE NULLS NOT DISTINCT (id_registro_patronal, id_empleado, anio_periodo, mes_periodo_int);
+        ELSE
+            RAISE WARNING 'uq_liquidaciones_rp_emp_periodo omitida: existen % registros que la violan; ejecutar depuracion de Fase 1', n;
+        END IF;
+    END IF;
+END $$;
+
+-- d) Reportes de liquidaciones: un registro por revisión, empleado y periodo
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_rl_rev_emp_periodo')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_rl_rev_emp_periodo') THEN
+        SELECT COUNT(*) INTO n FROM (
+            SELECT 1 FROM public.reportes_liquidaciones
+            GROUP BY id_revision, id_empleado, anio_periodo, mes_periodo_int
+            HAVING COUNT(*) > 1
+        ) g;
+        IF n = 0 THEN
+            ALTER TABLE public.reportes_liquidaciones ADD CONSTRAINT uq_rl_rev_emp_periodo
+                UNIQUE NULLS NOT DISTINCT (id_revision, id_empleado, anio_periodo, mes_periodo_int);
+        ELSE
+            RAISE WARNING 'uq_rl_rev_emp_periodo omitida: existen % registros que la violan; ejecutar depuracion de Fase 1', n;
+        END IF;
+    END IF;
+END $$;
+"#;
+
+/// Nombres de las restricciones de integridad de la Fase 1 que deben existir tras `SQL_FASE1_RESTRICCIONES`.
+const RESTRICCIONES_FASE1: [&str; 4] = [
+    "uq_empleados_cliente_nss",
+    "chk_liquidaciones_mes_periodo_int",
+    "uq_liquidaciones_rp_emp_periodo",
+    "uq_rl_rev_emp_periodo",
+];
+
 fn exec_schema_step(
     client: &mut Client,
     step_name: &str,
@@ -1962,6 +2138,24 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         log::warn!("Advertencia en limpieza automática de duplicados de reportes: {}", e);
     }
 
+    // 11. Fase 1 de integridad: tablas/columnas nuevas (idempotente)
+    exec_schema_step(client, "4_fase1_integridad_ddl", SQL_FASE1_DDL)?;
+
+    // 12. Restricciones UNIQUE/CHECK de integridad (solo si no hay datos que las violen)
+    exec_schema_step(client, "4b_fase1_restricciones_guardadas", SQL_FASE1_RESTRICCIONES)?;
+
+    match restricciones_fase1_pendientes(client) {
+        Ok(lista) if !lista.is_empty() => log::warn!(
+            "Restricciones de integridad pendientes (hay duplicados por depurar): {}",
+            lista.join(", ")
+        ),
+        Ok(_) => {}
+        Err(e) => log::warn!(
+            "No se pudo verificar restricciones de integridad pendientes: {}",
+            format_pg_error(&e)
+        ),
+    }
+
     log::info!("Esquema de base de datos verificado y listo.");
     Ok(())
 }
@@ -2072,4 +2266,57 @@ pub fn backfill_empleados_curp_renapo(client: &mut Client) -> Result<usize, post
         log::info!("Se actualizaron {} CURPs oficiales de RENAPO para empleados.", count);
     }
     Ok(count)
+}
+
+/// Devuelve los nombres de las restricciones de integridad de la Fase 1 que aún no existen
+/// (ni como restricción ni como índice). Se usa para avisar en log, sin abortar el arranque.
+/// Genérica sobre `Client` o `Transaction` para poder verificarse dentro de la depuración.
+pub fn restricciones_fase1_pendientes<C: postgres::GenericClient>(
+    client: &mut C,
+) -> Result<Vec<&'static str>, postgres::Error> {
+    let mut pendientes = Vec::new();
+    for nombre in RESTRICCIONES_FASE1 {
+        let row = client.query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = $1::text) \
+             OR EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1::text)",
+            &[&nombre],
+        )?;
+        let existe: bool = row.get(0);
+        if !existe {
+            pendientes.push(nombre);
+        }
+    }
+    Ok(pendientes)
+}
+
+#[cfg(test)]
+mod tests_fase1_ddl {
+    use super::*;
+
+    #[test]
+    fn ddl_contiene_tablas_nuevas_y_no_es_destructivo() {
+        assert!(SQL_FASE1_DDL.contains("CREATE TABLE IF NOT EXISTS public.archivos_cedulas"));
+        assert!(SQL_FASE1_DDL.contains("public.respaldo_depuracion"));
+        assert!(!SQL_FASE1_DDL.contains("RAISE EXCEPTION"));
+        assert!(!SQL_FASE1_DDL.contains("DROP TABLE"));
+    }
+
+    #[test]
+    fn restricciones_son_unicas_no_bloqueantes_y_no_destructivas() {
+        assert!(SQL_FASE1_RESTRICCIONES.contains("NULLS NOT DISTINCT"));
+        assert!(SQL_FASE1_RESTRICCIONES.contains("RAISE WARNING"));
+        assert!(!SQL_FASE1_RESTRICCIONES.contains("RAISE EXCEPTION"));
+        assert!(!SQL_FASE1_RESTRICCIONES.contains("DROP TABLE"));
+    }
+
+    #[test]
+    fn nombres_de_restricciones_coinciden_con_el_sql() {
+        for nombre in RESTRICCIONES_FASE1 {
+            assert!(
+                SQL_FASE1_RESTRICCIONES.contains(nombre),
+                "falta {} en SQL_FASE1_RESTRICCIONES",
+                nombre
+            );
+        }
+    }
 }

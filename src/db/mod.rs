@@ -3,6 +3,8 @@ pub mod catalogos;
 pub mod cedulas;
 pub mod client;
 pub mod config;
+pub mod depuracion_fase1;
+pub mod diagnostico_integridad;
 pub mod nominas;
 pub mod nominas_reporte;
 pub mod reporte_liquidaciones;
