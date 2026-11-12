@@ -5,6 +5,9 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::cedulas::business::{mes_to_periodo_int, month_num_to_name, month_to_num};
+use crate::db::bitacora_reportes::{
+    self, ACCION_ASIGNAR_LOTE, ACCION_DESVINCULAR, ACCION_DIAS, ACCION_REVERTIR, ACCION_VINCULAR,
+};
 
 #[derive(Debug, Clone)]
 pub struct ObraOptionDb {
@@ -158,6 +161,11 @@ pub struct ReporteLiquidacionRowDb {
     // Auditoría e inconsistencias
     pub tiene_inconsistencia: bool,
     pub observacion_validacion: String,
+
+    // Estado de reporte y marcas de auditoría (columnas de public.reportes_liquidaciones)
+    pub estado: String,
+    pub cedula_actualizada: bool,
+    pub editado_usuario: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -675,8 +683,45 @@ pub fn check_missing_cedulas_for_revision(
 }
 
 
+/// Expresión SQL del mes normalizado (1..12) de `public.reportes_liquidaciones` (alias `rl`).
+const SQL_MES_RL: &str = "LEAST(GREATEST(COALESCE(NULLIF(rl.mes_periodo_int, 0), CASE UPPER(TRIM(rl.mes_periodo)) WHEN 'ENERO' THEN 1 WHEN 'FEBRERO' THEN 2 WHEN 'MARZO' THEN 3 WHEN 'ABRIL' THEN 4 WHEN 'MAYO' THEN 5 WHEN 'JUNIO' THEN 6 WHEN 'JULIO' THEN 7 WHEN 'AGOSTO' THEN 8 WHEN 'SEPTIEMBRE' THEN 9 WHEN 'OCTUBRE' THEN 10 WHEN 'NOVIEMBRE' THEN 11 WHEN 'DICIEMBRE' THEN 12 ELSE 1 END)::int, 1), 12)";
+
+/// Condición SQL booleana: el mes (`anio`, `mes`, expresiones enteras) pertenece al universo de la
+/// revisión identificada por el parámetro `$3`. Prioridad:
+/// 1) si la revisión tiene `periodo_inicio` y `periodo_fin`, el mes debe traslapar ese rango;
+/// 2) si no, y existen obras creadas por el usuario en la revisión, el mes debe traslapar alguna obra;
+/// 3) si no, todos los meses pertenecen al universo.
+fn sql_en_universo(anio: &str, mes: &str) -> String {
+    let md = format!("MAKE_DATE(({anio})::int, ({mes})::int, 1)");
+    let fin_mes = format!("({md} + INTERVAL '1 month' - INTERVAL '1 day')::date");
+    format!(
+        r#"(
+            CASE
+                WHEN (SELECT rv.periodo_inicio IS NOT NULL AND rv.periodo_fin IS NOT NULL FROM public.revisiones rv WHERE rv.id = $3) THEN
+                    {md} <= (SELECT rv.periodo_fin FROM public.revisiones rv WHERE rv.id = $3)
+                    AND {fin_mes} >= (SELECT rv.periodo_inicio FROM public.revisiones rv WHERE rv.id = $3)
+                WHEN EXISTS (
+                    SELECT 1 FROM public.registros_obras ro
+                    WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true
+                ) THEN EXISTS (
+                    SELECT 1 FROM public.registros_obras ro
+                    WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true
+                      AND (ro.fecha_inicio IS NULL OR {md} <= COALESCE(ro.fecha_fin, ro.fecha_inicio))
+                      AND (ro.fecha_fin IS NULL OR {fin_mes} >= COALESCE(ro.fecha_inicio, ro.fecha_fin))
+                )
+                ELSE true
+            END
+        )"#
+    )
+}
+
 /// Versión transaccional de `sync_reportes_liquidaciones_for_revision` para ejecutarse dentro
 /// de la misma transacción atómica que inserta en `public.liquidaciones`.
+///
+/// Comportamiento NO destructivo: nunca borra filas de `reportes_liquidaciones`. Los meses fuera del
+/// universo de la revisión pasan a `FUERA_PERIODO` y regresan a `ACTIVO` si reingresan; los `EXCLUIDO`
+/// no se tocan. Las ediciones del analista (`editado_usuario = true`) no se modifican ni se borran.
+/// Los importes se recalculan con la regla canónica de prorrateo (`recalcular_prorrateo_tx`).
 pub fn sync_reportes_liquidaciones_for_revision_tx(
     tx: &mut Transaction,
     id_revision: Uuid,
@@ -704,137 +749,77 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         }
     };
 
-    let valid_obras_rows = tx.query(
+    // 1. Universo de la revisión (ver `sql_en_universo`). Se usa UPDATE en lugar de DELETE: los meses
+    // fuera del universo quedan como FUERA_PERIODO con sus ediciones intactas, y reaparecen como ACTIVO
+    // si el analista ajusta el periodo de la revisión o la vigencia de sus obras.
+    let en_universo_rl = sql_en_universo("rl.anio_periodo", SQL_MES_RL);
+
+    let sql_marcar_fuera = format!(
         r#"
-        SELECT ro.id, ro.fecha_inicio, ro.fecha_fin
-        FROM public.registros_obras ro
-        WHERE (
-            ($1::uuid IS NOT NULL AND ro.id_revision = $1)
-            OR ($1::uuid IS NULL AND ro.id_registro_patronal = ANY($2))
-        )
-        AND COALESCE(ro.creado_usuario, false) = true
-        "#,
-        &[&rev_uuid_opt, &all_rp_uuids],
+        UPDATE public.reportes_liquidaciones rl
+        SET estado = 'FUERA_PERIODO'
+        WHERE rl.id_registro_patronal = ANY($2)
+          AND ($1::uuid IS NULL OR rl.id_revision = $1)
+          AND rl.estado = 'ACTIVO'
+          AND NOT {en_universo_rl}
+        "#
+    );
+    tx.execute(
+        sql_marcar_fuera.as_str(),
+        &[&rev_uuid_opt, &all_rp_uuids, &active_rev_id],
     ).map_err(|e| {
         let err_str = crate::db::schema::format_pg_error(&e);
         crate::app_logger::log_db_error(
-            "SELECT valid_obras_rows",
-            &["public.registros_obras"],
-            "SELECT ro.id, ro.fecha_inicio, ro.fecha_fin FROM public.registros_obras ro WHERE ...",
+            "UPDATE reportes_liquidaciones estado FUERA_PERIODO",
+            &["public.reportes_liquidaciones"],
+            "UPDATE public.reportes_liquidaciones SET estado = 'FUERA_PERIODO' WHERE ...",
             &err_str,
         );
         format!(
-            "Error consultando registros de obras válidos del usuario: {}",
+            "Error marcando reportes fuera de periodo: {}",
             err_str
         )
     })?;
 
-    let valid_obras_vec: Vec<Uuid> = valid_obras_rows.iter().map(|r| r.get(0)).collect();
-
-    // 1. Limpieza de Tablas de Reportes (Filtrado Estricto por Periodo de Obra y Deduplicación):
-    // Si existen obras creadas por el usuario en esta revisión, eliminar de las tablas de reportes
-    // cualquier liquidación cuyo mes/año caiga estrictamente fuera del rango [fecha_inicio, fecha_fin]
-    if !valid_obras_vec.is_empty() {
-        tx.execute(
-            r#"
-            DELETE FROM public.reportes_liquidaciones rl
-            WHERE rl.id_registro_patronal = ANY($2)
-              AND ($1::uuid IS NULL OR rl.id_revision = $1)
-              AND NOT EXISTS (
-                  SELECT 1 FROM public.registros_obras ro
-                  WHERE (($1::uuid IS NOT NULL AND ro.id_revision = $1) OR ($1::uuid IS NULL AND ro.id_registro_patronal = ANY($2)))
-                    AND COALESCE(ro.creado_usuario, false) = true
-                    AND (
-                        ro.fecha_inicio IS NULL 
-                        OR MAKE_DATE(
-                            rl.anio_periodo::int, 
-                            LEAST(GREATEST(COALESCE(NULLIF(rl.mes_periodo_int, 0), CASE UPPER(TRIM(rl.mes_periodo))
-                                WHEN 'ENERO' THEN 1 WHEN 'FEBRERO' THEN 2 WHEN 'MARZO' THEN 3
-                                WHEN 'ABRIL' THEN 4 WHEN 'MAYO' THEN 5 WHEN 'JUNIO' THEN 6
-                                WHEN 'JULIO' THEN 7 WHEN 'AGOSTO' THEN 8 WHEN 'SEPTIEMBRE' THEN 9
-                                WHEN 'OCTUBRE' THEN 10 WHEN 'NOVIEMBRE' THEN 11 WHEN 'DICIEMBRE' THEN 12
-                                ELSE 1 END)::int, 1), 12),
-                            1
-                        ) <= COALESCE(ro.fecha_fin, ro.fecha_inicio)
-                    )
-                    AND (
-                        ro.fecha_fin IS NULL 
-                        OR (
-                            MAKE_DATE(
-                                rl.anio_periodo::int, 
-                                LEAST(GREATEST(COALESCE(NULLIF(rl.mes_periodo_int, 0), CASE UPPER(TRIM(rl.mes_periodo))
-                                    WHEN 'ENERO' THEN 1 WHEN 'FEBRERO' THEN 2 WHEN 'MARZO' THEN 3
-                                    WHEN 'ABRIL' THEN 4 WHEN 'MAYO' THEN 5 WHEN 'JUNIO' THEN 6
-                                    WHEN 'JULIO' THEN 7 WHEN 'AGOSTO' THEN 8 WHEN 'SEPTIEMBRE' THEN 9
-                                    WHEN 'OCTUBRE' THEN 10 WHEN 'NOVIEMBRE' THEN 11 WHEN 'DICIEMBRE' THEN 12
-                                    ELSE 1 END)::int, 1), 12),
-                                1
-                            ) + INTERVAL '1 month' - INTERVAL '1 day'
-                        )::date >= COALESCE(ro.fecha_inicio, ro.fecha_fin)
-                    )
-              )
-            "#,
-            &[&rev_uuid_opt, &all_rp_uuids],
-        ).map_err(|e| {
-            let err_str = crate::db::schema::format_pg_error(&e);
-            crate::app_logger::log_db_error(
-                "DELETE stale reportes_liquidaciones",
-                &["public.reportes_liquidaciones"],
-                "DELETE FROM public.reportes_liquidaciones rl WHERE ...",
-                &err_str,
-            );
-            format!(
-                "Error limpiando reportes_liquidaciones fuera de periodo: {}",
-                err_str
-            )
-        })?;
-    }
-
-    // 1.1 Eliminar liquidaciones duplicadas existentes en reportes_liquidaciones para el mismo empleado y periodo,
-    // preservando únicamente la liquidación oficial principal (priorizando Cédulas SUA con obras y ramas completas).
-    tx.execute(
+    let sql_reactivar = format!(
         r#"
-        DELETE FROM public.reportes_liquidaciones rl
+        UPDATE public.reportes_liquidaciones rl
+        SET estado = 'ACTIVO'
         WHERE rl.id_registro_patronal = ANY($2)
           AND ($1::uuid IS NULL OR rl.id_revision = $1)
-          AND rl.id IN (
-              SELECT sub.id
-              FROM (
-                  SELECT rl2.id,
-                         ROW_NUMBER() OVER (
-                             PARTITION BY rl2.id_registro_patronal, rl2.id_revision, rl2.id_empleado, rl2.anio_periodo, rl2.mes_periodo_int
-                             ORDER BY 
-                                 (EXISTS (SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol WHERE vol.id_liquidacion = rl2.id_liquidacion)) DESC,
-                                 (EXISTS (SELECT 1 FROM public.reportes_vinculaciones_obras_liquidaciones rvol WHERE rvol.id_reporte_liquidacion = rl2.id)) DESC,
-                                 (EXISTS (SELECT 1 FROM public.detalles_liquidaciones dl WHERE dl.id_liquidacion = rl2.id_liquidacion AND COALESCE(dl.cf, 0) > 0)) DESC,
-                                 rl2.created_at ASC
-                         ) as rn
-                  FROM public.reportes_liquidaciones rl2
-                  WHERE rl2.id_registro_patronal = ANY($2)
-                    AND ($1::uuid IS NULL OR rl2.id_revision = $1)
-              ) sub
-              WHERE sub.rn > 1
-          )
-        "#,
-        &[&rev_uuid_opt, &all_rp_uuids],
+          AND rl.estado = 'FUERA_PERIODO'
+          AND {en_universo_rl}
+        "#
+    );
+    tx.execute(
+        sql_reactivar.as_str(),
+        &[&rev_uuid_opt, &all_rp_uuids, &active_rev_id],
     ).map_err(|e| {
         let err_str = crate::db::schema::format_pg_error(&e);
         crate::app_logger::log_db_error(
-            "DELETE duplicate reportes_liquidaciones",
+            "UPDATE reportes_liquidaciones estado ACTIVO",
             &["public.reportes_liquidaciones"],
-            "DELETE FROM public.reportes_liquidaciones rl WHERE ... rn > 1",
+            "UPDATE public.reportes_liquidaciones SET estado = 'ACTIVO' WHERE ...",
             &err_str,
         );
-        format!("Error limpiando liquidaciones duplicadas en reportes: {}", err_str)
+        format!(
+            "Error reactivando reportes dentro de periodo: {}",
+            err_str
+        )
     })?;
 
-    // 1.2 Limpiar vinculaciones fantasma en reportes que no existen en la tabla maestra vinculaciones_obras_liquidaciones
+    // 1.1 (Eliminado) Los duplicados por empleado/periodo los impide la restricción uq_rl_rev_emp_periodo.
+
+    // 1.2 Desvincular obras fantasma en reportes NO editados por el analista: vinculaciones que ya no existen
+    // en la tabla maestra vinculaciones_obras_liquidaciones. Los reportes editados conservan sus vínculos.
     tx.execute(
         r#"
         DELETE FROM public.reportes_vinculaciones_obras_liquidaciones rvol
         WHERE rvol.id_reporte_liquidacion IN (
-            SELECT rl.id FROM public.reportes_liquidaciones rl 
-            WHERE rl.id_registro_patronal = ANY($2) AND ($1::uuid IS NULL OR rl.id_revision = $1)
+            SELECT rl.id FROM public.reportes_liquidaciones rl
+            WHERE rl.id_registro_patronal = ANY($2)
+              AND ($1::uuid IS NULL OR rl.id_revision = $1)
+              AND rl.editado_usuario = false
         )
         AND NOT EXISTS (
             SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol
@@ -860,13 +845,15 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         format!("Error depurando vinculaciones no existentes en cédulas: {}", err_str)
     })?;
 
-    // 1.3 Limpiar renglones de detalle en reportes con obras no autorizadas
+    // 1.3 Limpiar renglones de detalle con obras no autorizadas, solo en reportes NO editados por el analista.
     tx.execute(
         r#"
         DELETE FROM public.reportes_detalles_liquidaciones rdl
         WHERE rdl.id_reporte_liquidacion IN (
-            SELECT rl.id FROM public.reportes_liquidaciones rl 
-            WHERE rl.id_registro_patronal = ANY($2) AND ($1::uuid IS NULL OR rl.id_revision = $1)
+            SELECT rl.id FROM public.reportes_liquidaciones rl
+            WHERE rl.id_registro_patronal = ANY($2)
+              AND ($1::uuid IS NULL OR rl.id_revision = $1)
+              AND rl.editado_usuario = false
         )
         AND rdl.id_registro_obra IS NOT NULL
         AND NOT EXISTS (
@@ -892,10 +879,11 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         format!("Error depurando detalles con obras inexistentes: {}", err_str)
     })?;
 
-    // 2. Inserción / Copia Filtrada a public.reportes_liquidaciones:
-    // Copiar de public.liquidaciones hacia public.reportes_liquidaciones seleccionando de forma unívoca
-    // (DISTINCT ON) una única liquidación por empleado y periodo (priorizando la que tenga obras y cuotas completas).
-    let inserted_count = tx.execute(
+    // 2. Inserción de liquidaciones en public.reportes_liquidaciones dentro del universo de la revisión.
+    // DISTINCT ON elige una única liquidación por empleado y periodo (la de obras y cuotas completas).
+    // Los reportes ya existentes se respetan mediante ON CONFLICT sobre uq_rl_rev_emp_periodo.
+    let en_universo_l = sql_en_universo("l.anio_periodo", "l.calc_mes_int");
+    let sql_insert_reportes = format!(
         r#"
         INSERT INTO public.reportes_liquidaciones (
             id, id_liquidacion, id_registro_patronal, id_revision, id_empleado,
@@ -912,7 +900,7 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
             l.anio_periodo,
             l.nombre_archivo
         FROM (
-            SELECT 
+            SELECT
                 l_inner.*,
                 LEAST(GREATEST(COALESCE(NULLIF(l_inner.mes_periodo_int, 0), CASE UPPER(TRIM(l_inner.mes_periodo))
                     WHEN 'ENERO' THEN 1 WHEN 'FEBRERO' THEN 2 WHEN 'MARZO' THEN 3
@@ -923,52 +911,28 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
             FROM public.liquidaciones l_inner
             WHERE l_inner.id_registro_patronal = ANY($2)
         ) l
-        WHERE NOT EXISTS (
-            SELECT 1 FROM public.reportes_liquidaciones rl 
-            WHERE ($1::uuid IS NULL OR rl.id_revision = $1)
-              AND rl.id_empleado = l.id_empleado
-              AND rl.anio_periodo = l.anio_periodo
-              AND rl.mes_periodo_int = l.calc_mes_int
-        )
-        AND (
-            -- Si no hay obras creadas por el usuario en esta revisión, reflejar todas las liquidaciones
-            NOT EXISTS (
-                SELECT 1 FROM public.registros_obras ro_check
-                WHERE (($1::uuid IS NOT NULL AND ro_check.id_revision = $1) OR ($1::uuid IS NULL AND ro_check.id_registro_patronal = ANY($2)))
-                  AND COALESCE(ro_check.creado_usuario, false) = true
-            )
-            -- Si existen obras creadas por el usuario, filtrar estrictamente al rango [fecha_inicio, fecha_fin]
-            OR EXISTS (
-                SELECT 1 FROM public.registros_obras ro
-                WHERE (($1::uuid IS NOT NULL AND ro.id_revision = $1) OR ($1::uuid IS NULL AND ro.id_registro_patronal = ANY($2)))
-                  AND COALESCE(ro.creado_usuario, false) = true
-                  AND (
-                      ro.fecha_inicio IS NULL 
-                      OR MAKE_DATE(l.anio_periodo::int, l.calc_mes_int::int, 1) <= COALESCE(ro.fecha_fin, ro.fecha_inicio)
-                  )
-                  AND (
-                      ro.fecha_fin IS NULL 
-                      OR (MAKE_DATE(l.anio_periodo::int, l.calc_mes_int::int, 1) + INTERVAL '1 month' - INTERVAL '1 day')::date >= COALESCE(ro.fecha_inicio, ro.fecha_fin)
-                  )
-            )
-        )
-        ORDER BY 
-            l.id_registro_patronal, 
-            l.id_empleado, 
-            l.anio_periodo, 
+        WHERE {en_universo_l}
+        ORDER BY
+            l.id_registro_patronal,
+            l.id_empleado,
+            l.anio_periodo,
             l.calc_mes_int,
             (EXISTS (SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol WHERE vol.id_liquidacion = l.id)) DESC,
             (EXISTS (SELECT 1 FROM public.detalles_liquidaciones dl WHERE dl.id_liquidacion = l.id AND COALESCE(dl.cf, 0) > 0)) DESC,
             (EXISTS (SELECT 1 FROM public.detalles_liquidaciones dl WHERE dl.id_liquidacion = l.id AND COALESCE(dl.subtotal, 0) > 0)) DESC,
             l.created_at ASC
-        "#,
-        &[&active_rev_id, &all_rp_uuids],
+        ON CONFLICT ON CONSTRAINT uq_rl_rev_emp_periodo DO NOTHING
+        "#
+    );
+    let inserted_count = tx.execute(
+        sql_insert_reportes.as_str(),
+        &[&active_rev_id, &all_rp_uuids, &active_rev_id],
     ).map_err(|e| {
         let err_str = crate::db::schema::format_pg_error(&e);
         crate::app_logger::log_db_error(
             "INSERT reportes_liquidaciones SELECT",
             &["public.reportes_liquidaciones", "public.liquidaciones", "public.registros_obras"],
-            "INSERT INTO public.reportes_liquidaciones SELECT DISTINCT ON ... FROM public.liquidaciones l WHERE ...",
+            "INSERT INTO public.reportes_liquidaciones SELECT DISTINCT ON ... ON CONFLICT DO NOTHING",
             &err_str,
         );
         format!(
@@ -1090,7 +1054,7 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
                 exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
                 gps, patronal, obrera, subtotal, id_registro_obra, dias_registro_obra
             )
-            SELECT 
+            SELECT
                 uuidv7(),
                 rl.id,
                 dl.clave,
@@ -1150,8 +1114,8 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         })?;
     }
 
-    // Asegurar que aquellos renglones de detalles que no tenían obra asignada se vinculen
-    // a la obra del reporte (rvol) si existe una vinculación establecida
+    // Asignar la obra de la vinculación (rvol) a los renglones sin obra, SOLO en reportes NO editados
+    // por el analista: si dejó un tramo sin obra de forma intencional, se respeta.
     tx.execute(
         r#"
         UPDATE public.reportes_detalles_liquidaciones rdl
@@ -1161,8 +1125,15 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         WHERE rvol.id_reporte_liquidacion = rdl.id_reporte_liquidacion
           AND rdl.id_registro_obra IS NULL
           AND LOWER(TRIM(COALESCE(rdl.clave, ''))) != 'baja'
+          AND EXISTS (
+              SELECT 1 FROM public.reportes_liquidaciones rl
+              WHERE rl.id = rdl.id_reporte_liquidacion
+                AND rl.editado_usuario = false
+                -- Solo la revisión que se sincroniza (antes afectaba a todas las revisiones)
+                AND rl.id_revision = $1
+          )
         "#,
-        &[],
+        &[&active_rev_id],
     ).map_err(|e| {
         let err_str = crate::db::schema::format_pg_error(&e);
         crate::app_logger::log_db_error(
@@ -1174,12 +1145,75 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         format!("Error actualizando registro de obra en detalles: {}", err_str)
     })?;
 
+    // 2.1 Tramos huérfanos: renglones de reporte que ya no tienen correspondencia (clave normalizada y fecha)
+    // en detalles_liquidaciones de su liquidación.
+    // - Reportes NO editados: el tramo se elimina (refleja la cédula vigente).
+    // - Reportes editados: el tramo se conserva y el reporte se marca cedula_actualizada para revisión.
+    tx.execute(
+        r#"
+        DELETE FROM public.reportes_detalles_liquidaciones rdl
+        USING public.reportes_liquidaciones rl
+        WHERE rdl.id_reporte_liquidacion = rl.id
+          AND rl.id_registro_patronal = ANY($1)
+          AND ($2::uuid IS NULL OR rl.id_revision = $2)
+          AND rl.editado_usuario = false
+          AND NOT EXISTS (
+              SELECT 1 FROM public.detalles_liquidaciones dl
+              WHERE dl.id_liquidacion = rl.id_liquidacion
+                AND COALESCE(BTRIM(LOWER(dl.clave)), '') = COALESCE(BTRIM(LOWER(rdl.clave)), '')
+                AND dl.fecha IS NOT DISTINCT FROM rdl.fecha
+          )
+        "#,
+        &[&all_rp_uuids, &rev_uuid_opt],
+    ).map_err(|e| {
+        let err_str = crate::db::schema::format_pg_error(&e);
+        crate::app_logger::log_db_error(
+            "DELETE tramos huérfanos reportes_detalles_liquidaciones",
+            &["public.reportes_detalles_liquidaciones", "public.detalles_liquidaciones"],
+            "DELETE FROM public.reportes_detalles_liquidaciones rdl USING public.reportes_liquidaciones rl WHERE ...",
+            &err_str,
+        );
+        format!("Error eliminando tramos huérfanos en reportes: {}", err_str)
+    })?;
+
+    tx.execute(
+        r#"
+        UPDATE public.reportes_liquidaciones rl
+        SET cedula_actualizada = true
+        WHERE rl.id_registro_patronal = ANY($1)
+          AND ($2::uuid IS NULL OR rl.id_revision = $2)
+          AND rl.editado_usuario = true
+          AND EXISTS (
+              SELECT 1 FROM public.reportes_detalles_liquidaciones rdl
+              WHERE rdl.id_reporte_liquidacion = rl.id
+                AND NOT EXISTS (
+                    SELECT 1 FROM public.detalles_liquidaciones dl
+                    WHERE dl.id_liquidacion = rl.id_liquidacion
+                      AND COALESCE(BTRIM(LOWER(dl.clave)), '') = COALESCE(BTRIM(LOWER(rdl.clave)), '')
+                      AND dl.fecha IS NOT DISTINCT FROM rdl.fecha
+                )
+          )
+        "#,
+        &[&all_rp_uuids, &rev_uuid_opt],
+    ).map_err(|e| {
+        let err_str = crate::db::schema::format_pg_error(&e);
+        crate::app_logger::log_db_error(
+            "UPDATE reportes_liquidaciones cedula_actualizada",
+            &["public.reportes_liquidaciones", "public.reportes_detalles_liquidaciones", "public.detalles_liquidaciones"],
+            "UPDATE public.reportes_liquidaciones SET cedula_actualizada = true WHERE ...",
+            &err_str,
+        );
+        format!("Error marcando reportes con cédula actualizada: {}", err_str)
+    })?;
+
+    // Eliminar vinculaciones a obras fuera de la revisión, SOLO en reportes NO editados por el analista.
     tx.execute(
         r#"
         DELETE FROM public.reportes_vinculaciones_obras_liquidaciones rvol
         USING public.reportes_liquidaciones rl
         WHERE rvol.id_reporte_liquidacion = rl.id
           AND rl.id_registro_patronal = ANY($2)
+          AND rl.editado_usuario = false
           AND rvol.id_registro_obra IS NOT NULL
           AND rvol.id_registro_obra NOT IN (
               SELECT ro.id FROM public.registros_obras ro
@@ -1197,42 +1231,29 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         )
     })?;
 
-    // Restaurar los importes exactos de las cédulas originales en reportes_detalles_liquidaciones
-    tx.execute(
-        r#"
-        UPDATE public.reportes_detalles_liquidaciones rdl
-        SET cf = dl.cf,
-            exc_pat = dl.exc_pat,
-            exc_obr = dl.exc_obr,
-            pd_pat = dl.pd_pat,
-            pd_obr = dl.pd_obr,
-            gmp_pat = dl.gmp_pat,
-            gmp_obr = dl.gmp_obr,
-            rt = dl.rt,
-            iv_pat = dl.iv_pat,
-            iv_obr = dl.iv_obr,
-            gps = dl.gps,
-            patronal = dl.patronal,
-            obrera = dl.obrera,
-            subtotal = dl.subtotal
-        FROM public.reportes_liquidaciones rl
-        JOIN public.detalles_liquidaciones dl ON dl.id_liquidacion = rl.id_liquidacion
-        WHERE rdl.id_reporte_liquidacion = rl.id
-          AND (
-              (rdl.clave IS NULL AND dl.clave IS NULL)
-              OR TRIM(LOWER(COALESCE(rdl.clave, ''))) = TRIM(LOWER(COALESCE(dl.clave, '')))
-          )
-          AND (
-              (rdl.fecha IS NULL AND dl.fecha IS NULL)
-              OR rdl.fecha = dl.fecha
-          )
-          AND rl.id_registro_patronal = ANY($1)
-          AND ($2::uuid IS NULL OR rl.id_revision = $2);
-        "#,
-        &[&all_rp_uuids, &rev_uuid_opt],
-    ).map_err(|e| {
-        format!("Error restaurando importes exactos en reportes_detalles: {}", crate::db::schema::format_pg_error(&e))
-    })?;
+    // 3. Recalcular importes prorrateados de los tramos de los reportes de la revisión con la regla canónica.
+    // Sustituye la restauración de importes de cédula original, que anulaba el prorrateo por días de obra.
+    let ids_reportes: Vec<Uuid> = tx
+        .query(
+            r#"
+            SELECT id FROM public.reportes_liquidaciones
+            WHERE id_registro_patronal = ANY($1)
+              AND ($2::uuid IS NULL OR id_revision = $2)
+            "#,
+            &[&all_rp_uuids, &rev_uuid_opt],
+        )
+        .map_err(|e| {
+            format!(
+                "Error consultando reportes para recalcular prorrateo: {}",
+                crate::db::schema::format_pg_error(&e)
+            )
+        })?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+
+    crate::db::prorrateo::recalcular_prorrateo_tx(tx, &ids_reportes)
+        .map_err(|e| format!("Error recalculando prorrateo de tramos tras sincronizar: {}", e))?;
 
     let copied_count = (inserted_count as i64 + missing_det) as usize;
 
@@ -1320,6 +1341,18 @@ pub fn revertir_reporte_liquidaciones_a_originales(
             }
         }
     }
+
+    // Bitácora: foto "antes" de todos los reportes que esta reversión limpia o reconstruye.
+    // Mismo alcance que los DELETE de este bloque.
+    let ids_reportes: Vec<Uuid> = tx.query(
+        "SELECT id FROM public.reportes_liquidaciones WHERE id_registro_patronal = ANY($1) AND ($2::uuid IS NULL OR id_revision = $2)",
+        &[&all_rp_uuids, &rev_uuid_opt],
+    ).map_err(|e| format!("Error consultando reportes para bitácora: {}", e))?
+    .into_iter()
+    .map(|r| r.get::<_, Uuid>(0))
+    .collect();
+    let lote = bitacora_reportes::iniciar_edicion(&mut tx, ACCION_REVERTIR, &ids_reportes)
+        .map_err(|e| format!("Error iniciando bitácora de edición: {}", e))?;
 
     // 2. Limpiar todos los detalles y vinculaciones actuales de reportes para este registro patronal y revisión
     tx.execute(
@@ -1589,6 +1622,23 @@ pub fn revertir_reporte_liquidaciones_a_originales(
         }
     }
 
+    // Bitácora: la reversión restaura originales, así que NO marca editado_usuario.
+    // Los reportes borrados conservan su foto "antes" (FK ON DELETE SET NULL en reportes_cambios).
+    bitacora_reportes::cerrar_edicion(&mut tx, lote, false)
+        .map_err(|e| format!("Error cerrando bitácora de edición: {}", e))?;
+
+    // La reversión borra y recrea reportes: cerrar_edicion no alcanza a los recreados (ids nuevos),
+    // así que se recalcula explícitamente el prorrateo canónico de todo el alcance revertido.
+    let ids_recreados: Vec<Uuid> = tx.query(
+        "SELECT id FROM public.reportes_liquidaciones WHERE id_registro_patronal = ANY($1) AND ($2::uuid IS NULL OR id_revision = $2)",
+        &[&all_rp_uuids, &rev_uuid_opt],
+    ).map_err(|e| format!("Error consultando reportes recreados: {}", crate::db::schema::format_pg_error(&e)))?
+    .into_iter()
+    .map(|r| r.get::<_, Uuid>(0))
+    .collect();
+    crate::db::prorrateo::recalcular_prorrateo_tx(&mut tx, &ids_recreados)
+        .map_err(|e| format!("Error recalculando prorrateo tras la reversión: {}", e))?;
+
     tx.commit().map_err(|e| format!("Error en commit de reversión: {}", e))?;
     crate::app_logger::log_db_op(
         "REVERT_ORIGINAL",
@@ -1718,7 +1768,10 @@ pub fn fetch_reporte_liquidaciones(
         rl.id_revision,
         rl.mes_periodo_int,
         COALESCE(rdl.tiene_inconsistencia, false) AS tiene_inconsistencia,
-        COALESCE(rdl.observacion_validacion, '') AS observacion_validacion
+        COALESCE(rdl.observacion_validacion, '') AS observacion_validacion,
+        rl.estado::text AS estado_reporte,
+        rl.cedula_actualizada,
+        rl.editado_usuario
     FROM public.reportes_liquidaciones AS rl
     LEFT JOIN public.reportes_detalles_liquidaciones AS rdl
         ON rl.id = rdl.id_reporte_liquidacion
@@ -1853,6 +1906,10 @@ pub fn fetch_reporte_liquidaciones(
             .unwrap_or_else(|| mes_to_periodo_int(&mes_clean));
         let tiene_inconsistencia: bool = r.try_get(54).unwrap_or(false);
         let observacion_validacion: String = r.try_get::<_, Option<String>>(55).ok().flatten().unwrap_or_default();
+        // Columnas 56-58: estado, cedula_actualizada, editado_usuario (con valores por defecto si faltan)
+        let estado: String = r.try_get::<_, Option<String>>(56).ok().flatten().unwrap_or_else(|| "ACTIVO".to_string());
+        let cedula_actualizada: bool = r.try_get::<_, Option<bool>>(57).ok().flatten().unwrap_or(false);
+        let editado_usuario: bool = r.try_get::<_, Option<bool>>(58).ok().flatten().unwrap_or(false);
 
         result.push(ReporteLiquidacionRowDb {
             id_reporte_liq: id_rep_liq,
@@ -1917,6 +1974,9 @@ pub fn fetch_reporte_liquidaciones(
 
             tiene_inconsistencia,
             observacion_validacion,
+            estado,
+            cedula_actualizada,
+            editado_usuario,
         });
     }
 
@@ -1956,6 +2016,14 @@ pub fn batch_save_reporte_row_updates(
     }
 
     let mut tx = client.transaction().map_err(|e| format!("Error iniciando tx de actualización: {}", e))?;
+
+    // Bitácora: foto "antes" de los reportes afectados (rows[i].0 son ids de TRAMO)
+    let ids_tramos: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    let ids_reportes = bitacora_reportes::reportes_de_tramos(&mut tx, &ids_tramos)
+        .map_err(|e| format!("Error resolviendo reportes para bitácora: {}", e))?;
+    let lote = bitacora_reportes::iniciar_edicion(&mut tx, ACCION_DIAS, &ids_reportes)
+        .map_err(|e| format!("Error iniciando bitácora de edición: {}", e))?;
+
     let mut updated_count = 0;
 
     for &(id_reporte_liq, dias_cedula, dias_obra, id_registro_obra_opt) in rows {
@@ -2123,6 +2191,10 @@ pub fn batch_save_reporte_row_updates(
 
         updated_count += 1;
     }
+
+    // Bitácora: foto "después" + prorrateo canónico, dentro de la misma tx
+    bitacora_reportes::cerrar_edicion(&mut tx, lote, true)
+        .map_err(|e| format!("Error cerrando bitácora de edición: {}", e))?;
 
     match tx.commit() {
         Ok(_) => {
@@ -2454,6 +2526,10 @@ pub fn add_obra_vinculacion_for_employee(
 
     let mut tx = client.transaction().map_err(|e| format!("Error iniciando tx: {}", e))?;
 
+    // Bitácora: foto "antes" del reporte padre (id de REPORTE)
+    let lote = bitacora_reportes::iniciar_edicion(&mut tx, ACCION_VINCULAR, &[id_parent_reporte_liq])
+        .map_err(|e| format!("Error iniciando bitácora de edición: {}", e))?;
+
     // 1. Obtener datos del padre (reportes_liquidaciones) y detalle base
     let base_info = tx.query_opt(
         r#"
@@ -2671,7 +2747,37 @@ pub fn add_obra_vinculacion_for_employee(
         &[&id_parent_reporte_liq, &id_liq],
     ).map_err(|e| format!("Error actualizando vinculaciones maestras: {}", e))?;
 
+    // Bitácora: prorrateo canónico y foto "después" antes del commit
+    bitacora_reportes::cerrar_edicion(&mut tx, lote, true)
+        .map_err(|e| format!("Error cerrando bitácora de edición: {}", e))?;
+
     tx.commit().map_err(|e| format!("Error en commit de nueva vinculación: {}", e))?;
+
+    // Relectura post-commit: los importes devueltos son los recalculados por la regla canónica
+    let importes = client.query_one(
+        r#"
+        SELECT cf::float8, exc_pat::float8, exc_obr::float8, pd_pat::float8, pd_obr::float8,
+               gmp_pat::float8, gmp_obr::float8, rt::float8, iv_pat::float8, iv_obr::float8,
+               gps::float8, patronal::float8, obrera::float8, subtotal::float8
+        FROM public.reportes_detalles_liquidaciones
+        WHERE id = $1
+        "#,
+        &[&new_detail_id],
+    ).map_err(|e| format!("Error releyendo importes recalculados: {}", e))?;
+    let cf: f64 = importes.get(0);
+    let exc_pat: f64 = importes.get(1);
+    let exc_obr: f64 = importes.get(2);
+    let pd_pat: f64 = importes.get(3);
+    let pd_obr: f64 = importes.get(4);
+    let gmp_pat: f64 = importes.get(5);
+    let gmp_obr: f64 = importes.get(6);
+    let rt: f64 = importes.get(7);
+    let iv_pat: f64 = importes.get(8);
+    let iv_obr: f64 = importes.get(9);
+    let gps: f64 = importes.get(10);
+    let patronal: f64 = importes.get(11);
+    let obrera: f64 = importes.get(12);
+    let subtotal: f64 = importes.get(13);
 
     Ok(ReporteLiquidacionRowDb {
         id_reporte_liq: new_detail_id,
@@ -2732,6 +2838,9 @@ pub fn add_obra_vinculacion_for_employee(
         subtotal_orig,
         tiene_inconsistencia: false,
         observacion_validacion: String::new(),
+        estado: "ACTIVO".to_string(),
+        cedula_actualizada: false,
+        editado_usuario: false,
     })
 }
 
@@ -2774,6 +2883,10 @@ pub fn delete_obra_vinculacion_detail(
         return Err("No se puede eliminar una fila original de la cédula. Si deseas desvincular la obra, modifícala a 'Sin Asignar'.".to_string());
     }
 
+    // Bitácora: foto "antes" con el padre calculado ANTES de borrar el tramo
+    let lote = bitacora_reportes::iniciar_edicion(&mut tx, ACCION_DESVINCULAR, &[parent_id])
+        .map_err(|e| format!("Error iniciando bitácora de edición: {}", e))?;
+
     tx.execute(
         "DELETE FROM public.reportes_detalles_liquidaciones WHERE id = $1",
         &[&id_reporte_liq],
@@ -2814,6 +2927,10 @@ pub fn delete_obra_vinculacion_detail(
         "#,
         &[&parent_id, &id_liq],
     ).map_err(|e| format!("Error actualizando vinculaciones maestras: {}", e))?;
+
+    // Bitácora: foto "después" y prorrateo canónico antes del commit
+    bitacora_reportes::cerrar_edicion(&mut tx, lote, true)
+        .map_err(|e| format!("Error cerrando bitácora de edición: {}", e))?;
 
     tx.commit().map_err(|e| format!("Error en commit al eliminar detalle: {}", e))?;
 
@@ -3161,6 +3278,10 @@ pub fn batch_assign_multiple_obras_to_employees(
     if obra_candidates.is_empty() {
         return Err("Ninguna de las obras seleccionadas existe en la base de datos.".to_string());
     }
+
+    // Bitácora: foto "antes" de los reportes del lote (parent_ids son ids de REPORTE)
+    let lote = bitacora_reportes::iniciar_edicion(&mut tx, ACCION_ASIGNAR_LOTE, parent_ids)
+        .map_err(|e| format!("Error iniciando bitácora de edición: {}", e))?;
 
     let mut employees_updated = 0;
     let mut rows_created = 0;
@@ -3597,6 +3718,10 @@ pub fn batch_assign_multiple_obras_to_employees(
         employees_updated += 1;
     }
 
+    // Bitácora: foto "después" y prorrateo canónico antes del commit
+    bitacora_reportes::cerrar_edicion(&mut tx, lote, true)
+        .map_err(|e| format!("Error cerrando bitácora de edición: {}", e))?;
+
     tx.commit().map_err(|e| format!("Error en commit de asignación masiva de obras: {}", crate::db::schema::format_pg_error(&e)))?;
     let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(client);
 
@@ -3622,6 +3747,11 @@ pub fn batch_update_reporte_rows(
     }
 
     let mut tx = client.transaction().map_err(|e| format!("Error iniciando tx masiva: {}", e))?;
+
+    // Bitácora: ids son ids de REPORTE; VINCULAR si se asigna obra, DIAS si solo cambian días
+    let accion = if set_obra_id.is_some() { ACCION_VINCULAR } else { ACCION_DIAS };
+    let lote = bitacora_reportes::iniciar_edicion(&mut tx, accion, ids)
+        .map_err(|e| format!("Error iniciando bitácora de edición: {}", e))?;
 
     let mut updated_count = 0;
 
@@ -3813,6 +3943,10 @@ pub fn batch_update_reporte_rows(
             updated_count += 1;
         }
     }
+
+    // Bitácora: foto "después" y prorrateo canónico antes del commit
+    bitacora_reportes::cerrar_edicion(&mut tx, lote, true)
+        .map_err(|e| format!("Error cerrando bitácora de edición: {}", e))?;
 
     tx.commit().map_err(|e| format!("Error en commit de lote masivo: {}", e))?;
     crate::app_logger::log_db_write(
@@ -6597,6 +6731,9 @@ mod tests {
             subtotal_orig: sub,
             tiene_inconsistencia: false,
             observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
         }
     }
 
@@ -7116,6 +7253,10 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_verify_no_duplicate_rows_in_reportes_detalles() {
         let mut client = match crate::db::client::create_client() {
             Ok(c) => c,

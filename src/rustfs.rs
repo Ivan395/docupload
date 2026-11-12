@@ -1429,6 +1429,10 @@ mod tests {
     use super::*;
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_rustfs_full_flow() {
         let res = ensure_bucket_exists();
         if let Err(e) = res {
@@ -1498,6 +1502,10 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_upload_nested_structure_and_move_all_to_trash() {
         if let Err(e) = ensure_bucket_exists() {
             eprintln!("RustFS no disponible para test (skipping): {}", e);
@@ -1540,6 +1548,10 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_list_gondesa_files() {
         let files = list_rustfs_files(
             "GONDESA",
@@ -1556,6 +1568,10 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_sync_and_load_gondesa_view_files() {
         let temp_dir = tempfile::tempdir().unwrap();
         let cards = sync_and_load_cedulas_view_files(
@@ -1574,6 +1590,10 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_move_revision_rp_client_to_trash() {
         if let Err(e) = ensure_bucket_exists() {
             eprintln!("RustFS no disponible para test (skipping): {}", e);
@@ -1631,6 +1651,14 @@ mod tests {
 
 
     #[test]
+
+
+
+    #[ignore]
+
+
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_reconcile_and_verify_database() {
         let mut client = match crate::db::client::create_client() {
             Ok(c) => c,
@@ -1744,6 +1772,10 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_clean_and_verify_detalles_liquidaciones_database() {
         let mut client = match crate::db::client::create_client() {
             Ok(c) => c,
@@ -1860,6 +1892,10 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_comprehensive_vinculaciones_comparison_rustfs_vs_db() {
         let mut client = match crate::db::client::create_client() {
             Ok(c) => c,
@@ -2184,6 +2220,10 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_diagnose_unlinked_pdfs() {
         let key = "INDUSTRIAS VC DEL DESIERTO/A3673455103/REVISION 1_2024/Cedulas_de_cuotas/septiembre 24.pdf";
         let b = download_rustfs_file(key).unwrap();

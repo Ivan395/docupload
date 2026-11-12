@@ -11,6 +11,8 @@ keywords = ["sat", "cfdi", "sua", "imss", "nominas"]
 categories = ["office-software", "gui"]
 
 [dependencies]
+# Aritmética decimal exacta para el prorrateo de cuotas IMSS (redondeo igual a ROUND(numeric, 2) de PostgreSQL)
+rust_decimal = "1.36"
 slint = "1.18.1"
 chrono = "0.4"
 fancy-regex = "0.18"

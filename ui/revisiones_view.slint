@@ -877,6 +877,14 @@ export component RevisionesView inherits Rectangle {
                             }
                         }
 
+                        // Línea 4b: Periodo revisado (si está capturado completo)
+                        if rev.periodo_inicio != "" && rev.periodo_fin != "" : Text {
+                            text: "Periodo: " + rev.periodo_inicio + " – " + rev.periodo_fin;
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #1e3a8a;
+                        }
+
                         // Línea 5: Acciones Inferiores
                         HorizontalLayout {
                             alignment: end;
@@ -1247,6 +1255,42 @@ export component RevisionesView inherits Rectangle {
 
                             Rectangle { height: 1px; background: #f1f5f9; }
 
+                            // Sección: Periodo revisado (define universo de meses para el Reporte de Liquidaciones)
+                            Text { text: "Periodo revisado (meses que cubre la corrección):"; font-size: 10px; font-weight: 800; color: #1e3a8a; }
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Inicio"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    dp_rev_per_ini := DatePickerField {
+                                        date-val <=> AppData.rev_form_periodo_inicio;
+                                        placeholder-text: "DD/MM/YYYY (ej. 01/01/2023)";
+                                        enabled: true;
+                                        accepted => { dp_rev_per_fin.focus(); }
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text { text: "Fin"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    dp_rev_per_fin := DatePickerField {
+                                        date-val <=> AppData.rev_form_periodo_fin;
+                                        placeholder-text: "DD/MM/YYYY (ej. 31/12/2023)";
+                                        enabled: true;
+                                        accepted => { dp_rev_ent_rev.focus(); }
+                                    }
+                                }
+                            }
+                            Text {
+                                text: "Define qué meses entran al Reporte de Liquidaciones. Si se deja vacío, se usan las vigencias de los Registros de Obra.";
+                                font-size: 10px;
+                                color: #94a3b8;
+                                wrap: word-wrap;
+                            }
+
                             // Sección: Prórrogas
                             HorizontalLayout {
                                 alignment: space-between;
@@ -1378,7 +1422,9 @@ export component RevisionesView inherits Rectangle {
                                         AppData.rev_form_fecha_aprobacion_imss,
                                         AppData.rev_form_pidio_prorroga,
                                         AppData.rev_form_fecha_aprobacion_prorroga,
-                                        AppData.rev_form_fecha_entrega_con_prorroga
+                                        AppData.rev_form_fecha_entrega_con_prorroga,
+                                    AppData.rev_form_periodo_inicio,
+                                    AppData.rev_form_periodo_fin
                                     );
                                     return accept;
                                 }
@@ -1425,7 +1471,9 @@ export component RevisionesView inherits Rectangle {
                                             AppData.rev_form_fecha_aprobacion_imss,
                                             AppData.rev_form_pidio_prorroga,
                                             AppData.rev_form_fecha_aprobacion_prorroga,
-                                            AppData.rev_form_fecha_entrega_con_prorroga
+                                            AppData.rev_form_fecha_entrega_con_prorroga,
+                                        AppData.rev_form_periodo_inicio,
+                                        AppData.rev_form_periodo_fin
                                         );
                                     }
                                 }

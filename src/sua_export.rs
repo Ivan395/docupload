@@ -1383,6 +1383,9 @@ mod tests {
             subtotal_orig: 1000.0,
             tiene_inconsistencia: false,
             observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
         }
     }
 

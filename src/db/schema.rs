@@ -141,6 +141,44 @@ CREATE INDEX IF NOT EXISTS idx_respaldo_depuracion_proceso ON public.respaldo_de
 
 /// Restricciones de integridad sobre datos existentes. Cada una se crea solo si no existe
 /// y no hay registros que la violen; si los hay, emite un aviso y continúa sin abortar.
+/// Migraciones de datos que deben ejecutarse UNA sola vez. Cada una se registra en
+/// `public.migraciones_aplicadas` y se omite en arranques posteriores.
+pub(crate) const SQL_MIGRACIONES_UNICAS: &str = r#"
+CREATE TABLE IF NOT EXISTS public.migraciones_aplicadas (
+    nombre varchar(120) PRIMARY KEY,
+    aplicada_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Fase 3: la bitácora debe sobrevivir al borrado de un reporte (p. ej. "Revertir" borra y recrea
+-- reportes): la FK a reportes_liquidaciones pasa de ON DELETE CASCADE a ON DELETE SET NULL.
+DO $$
+DECLARE nombre_fk text;
+BEGIN
+    SELECT c.conname INTO nombre_fk FROM pg_constraint c
+    WHERE c.conrelid = 'public.reportes_cambios'::regclass AND c.contype = 'f'
+      AND c.confrelid = 'public.reportes_liquidaciones'::regclass;
+    IF nombre_fk IS NOT NULL AND EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = nombre_fk AND confdeltype <> 'n'
+    ) THEN
+        EXECUTE format('ALTER TABLE public.reportes_cambios DROP CONSTRAINT %I', nombre_fk);
+        ALTER TABLE public.reportes_cambios ADD CONSTRAINT fk_reportes_cambios_reporte
+            FOREIGN KEY (id_reporte_liquidacion) REFERENCES public.reportes_liquidaciones(id)
+            ON UPDATE CASCADE ON DELETE SET NULL;
+    END IF;
+END $$;
+
+-- Fase 3: los reportes existentes antes de introducir `editado_usuario` pudieron ser trabajados por el
+-- analista (asignaciones de obra, días). No hay forma fiable de distinguirlos, así que se consideran
+-- editados: la sincronización incremental nunca borrará ni reasignará su contenido.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.migraciones_aplicadas WHERE nombre = 'fase3_reportes_historicos_editados') THEN
+        UPDATE public.reportes_liquidaciones SET editado_usuario = true WHERE editado_usuario = false;
+        INSERT INTO public.migraciones_aplicadas (nombre) VALUES ('fase3_reportes_historicos_editados');
+    END IF;
+END $$;
+"#;
+
 pub(crate) const SQL_FASE1_RESTRICCIONES: &str = r#"
 -- a) Empleados: NSS único por cliente (solo NSS no vacíos)
 DO $$
@@ -2144,6 +2182,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
 
     // 12. Restricciones UNIQUE/CHECK de integridad (solo si no hay datos que las violen)
     exec_schema_step(client, "4b_fase1_restricciones_guardadas", SQL_FASE1_RESTRICCIONES)?;
+
+    // 13. Migraciones de datos de una sola vez (registradas en public.migraciones_aplicadas)
+    exec_schema_step(client, "5_migraciones_unicas", SQL_MIGRACIONES_UNICAS)?;
 
     match restricciones_fase1_pendientes(client) {
         Ok(lista) if !lista.is_empty() => log::warn!(

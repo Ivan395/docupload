@@ -938,6 +938,32 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     }
                 }
 
+                // Sincronizar con cédulas (recarga conservando ediciones)
+                Rectangle {
+                    height: 38px;
+                    width: 200px;
+                    border-radius: 6px;
+                    background: btn_sync_cedulas.has-hover ? #1e40af : #1d4ed8;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Text { text: "⟳"; font-size: 13px; color: #ffffff; vertical-alignment: center; }
+                        Text {
+                            text: "Sincronizar con cédulas";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_sync_cedulas := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.reload_reporte_liquidaciones(); }
+                    }
+                }
+
                 // Revertir Cambios
                 Rectangle {
                     height: 38px;
@@ -2201,6 +2227,26 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                                     font-size: 10px;
                                                     font-weight: 800;
                                                     color: #b91c1c;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                        // Insignia: cédula cambió tras sincronizar un reporte editado
+                                        if item.cedula_actualizada : Rectangle {
+                                            height: 18px;
+                                            border-radius: 3px;
+                                            background: #fef3c7;
+                                            border-width: 1px;
+                                            border-color: #f59e0b;
+                                            HorizontalLayout {
+                                                padding-left: 5px;
+                                                padding-right: 5px;
+                                                cross-axis-alignment: center;
+                                                Text {
+                                                    text: "📄 Cédula actualizada";
+                                                    font-size: 10px;
+                                                    font-weight: 800;
+                                                    color: #92400e;
                                                     vertical-alignment: center;
                                                 }
                                             }

@@ -23,6 +23,10 @@ pub struct RevisionItem {
     pub fecha_entrega_revision: Option<NaiveDate>,
     pub fecha_aprobacion_prorroga: Option<NaiveDate>,
     pub fecha_entrega_con_prorroga: Option<NaiveDate>,
+    /// Inicio del periodo revisado (meses que cubre la corrección). None si no se capturó.
+    pub periodo_inicio: Option<NaiveDate>,
+    /// Fin del periodo revisado. None si no se capturó.
+    pub periodo_fin: Option<NaiveDate>,
     pub pidio_prorroga: bool,
     pub obras_count: i32,
     pub created_at: String,
@@ -140,7 +144,9 @@ pub fn fetch_revisiones_by_rp(client: &mut Client, id_rp: &str) -> Result<Vec<Re
             r.fecha_entrega_con_prorroga,
             COALESCE(r.pidio_prorroga, false) AS pidio_prorroga,
             (SELECT COUNT(*)::int FROM public.registros_obras ro WHERE ro.id_revision = r.id AND COALESCE(ro.creado_usuario, false) = true) AS obras_count,
-            TO_CHAR(r.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at_str
+            TO_CHAR(r.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at_str,
+            r.periodo_inicio,
+            r.periodo_fin
         FROM public.revisiones r
         LEFT JOIN public.conceptos c ON c.id = r.id_concepto_diferencia
         LEFT JOIN public.estatus e_imss ON e_imss.id = r.id_estatus_imss
@@ -174,6 +180,8 @@ pub fn fetch_revisiones_by_rp(client: &mut Client, id_rp: &str) -> Result<Vec<Re
         let pidio_pror: bool = row.get(18);
         let obras_count: i32 = row.get(19);
         let created_at: String = row.get(20);
+        let periodo_ini: Option<NaiveDate> = row.get(21);
+        let periodo_fin_val: Option<NaiveDate> = row.get(22);
 
         list.push(RevisionItem {
             id: id_u.to_string(),
@@ -194,6 +202,8 @@ pub fn fetch_revisiones_by_rp(client: &mut Client, id_rp: &str) -> Result<Vec<Re
             fecha_entrega_revision: f_ent_rev,
             fecha_aprobacion_prorroga: f_aprob_pror,
             fecha_entrega_con_prorroga: f_ent_pror,
+            periodo_inicio: periodo_ini,
+            periodo_fin: periodo_fin_val,
             pidio_prorroga: pidio_pror,
             obras_count,
             created_at,
@@ -358,8 +368,10 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
             fecha_entrega_revision,
             fecha_aprobacion_prorroga,
             fecha_entrega_con_prorroga,
-            pidio_prorroga
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            pidio_prorroga,
+            periodo_inicio,
+            periodo_fin
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         RETURNING id, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS');
     "#;
 
@@ -390,6 +402,8 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
                 &item.fecha_aprobacion_prorroga,
                 &item.fecha_entrega_con_prorroga,
                 &item.pidio_prorroga,
+                &item.periodo_inicio,
+                &item.periodo_fin,
             ],
         )
         .map_err(|e| {
@@ -441,7 +455,9 @@ pub fn update_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
             fecha_entrega_revision = $12,
             fecha_aprobacion_prorroga = $13,
             fecha_entrega_con_prorroga = $14,
-            pidio_prorroga = $15
+            pidio_prorroga = $15,
+            periodo_inicio = $16,
+            periodo_fin = $17
         WHERE id = $1;
     "#;
 
@@ -472,6 +488,8 @@ pub fn update_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
                 &item.fecha_aprobacion_prorroga,
                 &item.fecha_entrega_con_prorroga,
                 &item.pidio_prorroga,
+                &item.periodo_inicio,
+                &item.periodo_fin,
             ],
         )
         .map_err(|e| {

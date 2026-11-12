@@ -877,6 +877,8 @@ fn load_revisiones_ui(ui: &MainWindow, pool: &DbPool, rp_id: &str) {
                 fecha_entrega_revision: format_date_opt(r.fecha_entrega_revision).into(),
                 fecha_aprobacion_prorroga: format_date_opt(r.fecha_aprobacion_prorroga).into(),
                 fecha_entrega_con_prorroga: format_date_opt(r.fecha_entrega_con_prorroga).into(),
+                periodo_inicio: r.periodo_inicio.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default().into(),
+                periodo_fin: r.periodo_fin.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default().into(),
                 pidio_prorroga: r.pidio_prorroga,
                 obras_count: r.obras_count,
                 created_at_str: r.created_at.into(),
@@ -4563,7 +4565,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
                 if view_idx == 7 {
                     let target_id = if !rev_id.is_empty() { rev_id.clone() } else { rp_id.clone() };
-                    sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &target_id);
+                    sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &target_id, false);
                 }
 
 
@@ -4856,6 +4858,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_rev_form_pidio_prorroga(false);
                 app_data.set_rev_form_fecha_aprobacion_prorroga("".into());
                 app_data.set_rev_form_fecha_entrega_con_prorroga("".into());
+                app_data.set_rev_form_periodo_inicio("".into());
+                app_data.set_rev_form_periodo_fin("".into());
                 app_data.set_show_revision_modal(true);
             }
         });
@@ -4952,6 +4956,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                     r.fecha_entrega_con_prorroga
                                 };
                                 app_data.set_rev_form_fecha_entrega_con_prorroga(format_date_opt(f_ent_pror).into());
+                                app_data.set_rev_form_periodo_inicio(format_date_opt(r.periodo_inicio).into());
+                                app_data.set_rev_form_periodo_fin(format_date_opt(r.periodo_fin).into());
                                 app_data.set_show_revision_modal(true);
 
                                 // Verificar qué datos existen para esta revisión y actualizar propiedades de navegación
@@ -4986,7 +4992,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
         let holidays_clone = imss_inhabiles.clone();
-        app_logic.on_submit_revision(move |id, nombre, folio, concepto_val, estatus_val, estatus_imss_val, f_ent_rev, f_max_ent_rev, f_ent_imss, f_max_ent_imss, f_aprob_imss, pidio_pror, f_aprob_pror, f_ent_pror| {
+        app_logic.on_submit_revision(move |id, nombre, folio, concepto_val, estatus_val, estatus_imss_val, f_ent_rev, f_max_ent_rev, f_ent_imss, f_max_ent_imss, f_aprob_imss, pidio_pror, f_aprob_pror, f_ent_pror, per_ini, per_fin| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 let rp_id = app_data.get_selected_rp_id().to_string();
@@ -4999,6 +5005,25 @@ fn main() -> Result<(), slint::PlatformError> {
                     show_toast_message(&ui, "El nombre de la revisión es obligatorio.");
                     return;
                 }
+
+                // Periodo revisado: ambas fechas deben ser válidas y en orden, o ambas vacías
+                let d_per_ini = parse_date_opt(per_ini.as_str());
+                let d_per_fin = parse_date_opt(per_fin.as_str());
+                if let (Some(i), Some(f)) = (d_per_ini, d_per_fin) {
+                    if i > f {
+                        show_toast_message(&ui, "El periodo revisado es inválido: el inicio es posterior al fin.");
+                        return;
+                    }
+                }
+                let (periodo_ini_val, periodo_fin_val, periodo_warn) = match (d_per_ini, d_per_fin) {
+                    (Some(i), Some(f)) => (Some(i), Some(f), None),
+                    (None, None) => (None, None, None),
+                    _ => (
+                        None,
+                        None,
+                        Some("Captura inicio y fin del periodo revisado (o deja ambos vacíos)."),
+                    ),
+                };
                 if let Some(ref pool) = pool_clone {
                     let mut client = match pool.get() {
                         Ok(c) => c,
@@ -5072,6 +5097,8 @@ fn main() -> Result<(), slint::PlatformError> {
                         pidio_prorroga: pidio_pror,
                         fecha_aprobacion_prorroga: d_aprob_pror,
                         fecha_entrega_con_prorroga: d_ent_pror,
+                        periodo_inicio: periodo_ini_val,
+                        periodo_fin: periodo_fin_val,
                         ..Default::default()
                     };
 
@@ -5095,7 +5122,11 @@ fn main() -> Result<(), slint::PlatformError> {
                             load_revisiones_ui(&ui, pool, &rp_id);
                             update_global_stats(&ui, pool);
                             let msg = if is_edit { "Revisión actualizada exitosamente." } else { "Revisión creada exitosamente." };
-                            show_toast_message(&ui, msg);
+                            let msg_final = match periodo_warn {
+                                Some(w) => format!("{} {}", msg, w),
+                                None => msg.to_string(),
+                            };
+                            show_toast_message(&ui, &msg_final);
                         }
                         Err(e) => {
                             show_toast_message(&ui, &format!("Error al guardar revisión: {}", e));
@@ -8002,6 +8033,9 @@ mod tests_ui {
                 subtotal_orig: 1792.40,
                 tiene_inconsistencia: false,
                 observacion_validacion: String::new(),
+                estado: "ACTIVO".to_string(),
+                cedula_actualizada: false,
+                editado_usuario: false,
             };
 
             recalculate_row_in_memory(&mut r);

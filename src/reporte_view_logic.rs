@@ -37,6 +37,8 @@ pub struct ReporteSessionState {
     pub revision_nombre: String,
     pub revision_folio: String,
     pub all_rows: Vec<ReporteLiquidacionRowDb>,
+    /// Filas FUERA_PERIODO/EXCLUIDO: fuera de KPIs, totales y Excel; solo visibles con el filtro "Fuera de periodo".
+    pub rows_fuera_periodo: Vec<ReporteLiquidacionRowDb>,
     pub filtered_rows: Vec<ReporteLiquidacionRowDb>,
     pub selected_ids: HashSet<Uuid>,
     pub obras_options: Vec<ObraOptionDb>,
@@ -103,6 +105,7 @@ impl Default for ReporteSessionState {
             revision_nombre: String::new(),
             revision_folio: String::new(),
             all_rows: Vec::new(),
+            rows_fuera_periodo: Vec::new(),
             filtered_rows: Vec::new(),
             selected_ids: HashSet::new(),
             obras_options: Vec::new(),
@@ -240,42 +243,9 @@ pub fn get_obra_colors(index: usize) -> (slint::Color, slint::Color, slint::Colo
 }
 
 pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
-    let dias_cedula_f = row.dias_cedula as f64;
-    let sum_incidencias = row.lic + row.inc + row.aus;
-    let dias_efectivos = (dias_cedula_f - sum_incidencias).max(0.0);
+    use crate::db::prorrateo::{dias_efectivos, factor_prorrateo, prorratear, ImportesTramo};
 
-    // Restricción: Días obra no puede exceder los días efectivos de cédula (dias_cedula - LIC - INC - AUS)
-    if (row.dias_obra as f64) > dias_efectivos {
-        row.dias_obra = dias_efectivos.round() as i16;
-    }
-
-    if dias_cedula_f <= 0.0001 || row.dias_obra <= 0 {
-        row.cf = 0.0;
-        row.exc_pat = 0.0;
-        row.exc_obr = 0.0;
-        row.pd_pat = 0.0;
-        row.pd_obr = 0.0;
-        row.gmp_pat = 0.0;
-        row.gmp_obr = 0.0;
-        row.rt = 0.0;
-        row.iv_pat = 0.0;
-        row.iv_obr = 0.0;
-        row.gps = 0.0;
-        row.patronal = 0.0;
-        row.obrera = 0.0;
-        row.subtotal = 0.0;
-        return;
-    }
-
-    // Regla de tres estricta: Valor_Prorrateado = (Valor_Original / Días_Cédula) * Días_Obra
-    let factor = if row.id_registro_obra.is_some() {
-        (row.dias_obra as f64) / dias_cedula_f
-    } else {
-        1.0
-    };
-    let round2 = |v: f64| (v * 100.0).round() / 100.0;
-
-    // Respaldo de seguridad: Si los campos originales estaban en 0.0 pero la fila ya tenía importes, no perder la base
+    // Respaldo de seguridad: si los campos originales estaban en 0.0 pero la fila ya tenía importes, no perder la base
     if row.cf_orig == 0.0 && row.cf > 0.0 { row.cf_orig = row.cf; }
     if row.exc_pat_orig == 0.0 && row.exc_pat > 0.0 { row.exc_pat_orig = row.exc_pat; }
     if row.exc_obr_orig == 0.0 && row.exc_obr > 0.0 { row.exc_obr_orig = row.exc_obr; }
@@ -289,23 +259,55 @@ pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
     if row.gps_orig == 0.0 && row.gps > 0.0 { row.gps_orig = row.gps; }
     if row.subtotal_orig == 0.0 && row.subtotal > 0.0 { row.subtotal_orig = row.subtotal; }
 
-    row.cf = round2(row.cf_orig * factor);
-    row.exc_pat = round2(row.exc_pat_orig * factor);
-    row.exc_obr = round2(row.exc_obr_orig * factor);
-    row.pd_pat = round2(row.pd_pat_orig * factor);
-    row.pd_obr = round2(row.pd_obr_orig * factor);
-    row.gmp_pat = round2(row.gmp_pat_orig * factor);
-    row.gmp_obr = round2(row.gmp_obr_orig * factor);
-    row.rt = round2(row.rt_orig * factor);
-    row.iv_pat = round2(row.iv_pat_orig * factor);
-    row.iv_obr = round2(row.iv_obr_orig * factor);
-    row.gps = round2(row.gps_orig * factor);
+    let dias_cedula = row.dias_cedula as i32;
 
-    row.patronal = round2(
-        row.cf + row.exc_pat + row.pd_pat + row.gmp_pat + row.rt + row.iv_pat + row.gps,
+    // Restricción de UI: días obra no puede exceder los días efectivos de cédula (dias_cedula - LIC - INC - AUS)
+    let efectivos = dias_efectivos(dias_cedula, row.lic, row.inc, row.aus);
+    if (row.dias_obra as i32) > efectivos {
+        row.dias_obra = efectivos as i16;
+    }
+
+    // Regla canónica de prorrateo (sin obra => factor 1; con obra => min(dias_obra, efectivos) / dias_cedula)
+    let factor = factor_prorrateo(
+        row.id_registro_obra.is_some(),
+        dias_cedula,
+        row.dias_obra as i32,
+        row.lic,
+        row.inc,
+        row.aus,
     );
-    row.obrera = round2(row.exc_obr + row.pd_obr + row.gmp_obr + row.iv_obr);
-    row.subtotal = round2(row.subtotal_orig * factor);
+
+    let originales = ImportesTramo {
+        cf: row.cf_orig,
+        exc_pat: row.exc_pat_orig,
+        exc_obr: row.exc_obr_orig,
+        pd_pat: row.pd_pat_orig,
+        pd_obr: row.pd_obr_orig,
+        gmp_pat: row.gmp_pat_orig,
+        gmp_obr: row.gmp_obr_orig,
+        rt: row.rt_orig,
+        iv_pat: row.iv_pat_orig,
+        iv_obr: row.iv_obr_orig,
+        gps: row.gps_orig,
+        subtotal: row.subtotal_orig,
+        ..Default::default()
+    };
+    let r = prorratear(&originales, factor);
+
+    row.cf = r.cf;
+    row.exc_pat = r.exc_pat;
+    row.exc_obr = r.exc_obr;
+    row.pd_pat = r.pd_pat;
+    row.pd_obr = r.pd_obr;
+    row.gmp_pat = r.gmp_pat;
+    row.gmp_obr = r.gmp_obr;
+    row.rt = r.rt;
+    row.iv_pat = r.iv_pat;
+    row.iv_obr = r.iv_obr;
+    row.gps = r.gps;
+    row.patronal = r.patronal;
+    row.obrera = r.obrera;
+    row.subtotal = r.subtotal;
 }
 
 /// Recalcula el Tope Máx dinámico para cada obra en el modal individual (o multi-obra).
@@ -645,8 +647,13 @@ pub fn apply_reporte_filtering(state: &mut ReporteSessionState) {
         None
     };
 
-    state.filtered_rows = state
-        .all_rows
+    // Índice 3 = "Fuera de periodo": la fuente son las filas no ACTIVAS; el resto usa all_rows
+    let source_rows: &Vec<ReporteLiquidacionRowDb> = if state.filter_estado_idx == 3 {
+        &state.rows_fuera_periodo
+    } else {
+        &state.all_rows
+    };
+    state.filtered_rows = source_rows
         .iter()
         .filter(|r| {
             // Filtro de búsqueda textual
@@ -1116,6 +1123,7 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             movimientos_resumen: movimientos_resumen.into(),
             tiene_inconsistencia,
             observacion_validacion: observacion_validacion.into(),
+            cedula_actualizada: r.cedula_actualizada,
             is_baja,
             idx: (start_idx + page_offset + 1) as i32,
             id_reporte_liq: r.id_reporte_liq.to_string().into(),
@@ -1401,35 +1409,56 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
     sync_unique_empleados_to_ui(state, &app_data);
 }
 
+/// Separa las filas por estado: `ACTIVO` (primer elemento) y `FUERA_PERIODO`/`EXCLUIDO` (segundo).
+pub fn separar_filas_por_estado(
+    rows: Vec<ReporteLiquidacionRowDb>,
+) -> (Vec<ReporteLiquidacionRowDb>, Vec<ReporteLiquidacionRowDb>) {
+    rows.into_iter().partition(|r| r.estado == "ACTIVO")
+}
+
+/// Carga el reporte de la revisión. Solo sincroniza con las cédulas si `sincronizar` es true.
+/// Devuelve el número de filas sincronizadas (0 si no se sincronizó o falló).
 pub fn sync_and_load_reporte_data(
     ui: &MainWindow,
     pool_opt: &Option<Arc<DbPool>>,
     session_arc: &Arc<Mutex<ReporteSessionState>>,
     revision_id_str: &str,
-) {
+    sincronizar: bool,
+) -> Option<usize> {
     let pool = match pool_opt {
         Some(p) => p,
-        None => return,
+        None => return None,
     };
 
     let rev_uuid = match Uuid::parse_str(revision_id_str) {
         Ok(u) => u,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     let mut client = match pool.get() {
         Ok(c) => c,
         Err(e) => {
             log::error!("Error obteniendo conexión a BD para reporte: {}", e);
-            return;
+            return None;
         }
     };
 
-    // 1. Sincronizar liquidaciones hacia tablas de reportes
-    match sync_reportes_liquidaciones_for_revision(&mut client, rev_uuid) {
-        Ok(c) => log::info!("Sincronizadas {} filas de reporte liquidaciones", c),
-        Err(e) => log::error!("Error sincronizando reporte liquidaciones: {}", e),
-    }
+    // 1. Sincronizar liquidaciones hacia tablas de reportes (solo bajo solicitud explícita)
+    // None = la sincronización falló (los datos se cargan igualmente); Some(n) = filas nuevas
+    let filas_sincronizadas: Option<usize> = if sincronizar {
+        match sync_reportes_liquidaciones_for_revision(&mut client, rev_uuid) {
+            Ok(c) => {
+                log::info!("Sincronizadas {} filas de reporte liquidaciones", c);
+                Some(c)
+            }
+            Err(e) => {
+                log::error!("Error sincronizando reporte liquidaciones: {}", e);
+                None
+            }
+        }
+    } else {
+        Some(0)
+    };
 
     // 2. Consultar filas y opciones de obras en paralelo concurrente aprovechando el pool de conexiones
     let (rows_res, obras_res, all_obras_res) = std::thread::scope(|s| {
@@ -1460,6 +1489,10 @@ pub fn sync_and_load_reporte_data(
             Vec::new()
         }
     };
+
+    // Solo las filas ACTIVAS alimentan KPIs, periodos, obras y Excel; el resto va al filtro "Fuera de periodo"
+    let (rows, rows_fuera_periodo) = separar_filas_por_estado(rows);
+    let n_fuera = rows_fuera_periodo.len();
 
     let obras = match obras_res {
         Ok(o) => o,
@@ -1559,6 +1592,13 @@ pub fn sync_and_load_reporte_data(
         app_data.set_reporte_show_missing_cedulas_details(false);
     }
 
+    app_data.set_reporte_estado_options(ModelRc::new(VecModel::from(vec![
+        SharedString::from("Todos"),
+        SharedString::from("Asignados"),
+        SharedString::from("Sin Asignar (Pendiente)"),
+        SharedString::from(format!("Fuera de periodo ({})", n_fuera)),
+    ])));
+
     // 4. Actualizar estado de sesión
     {
         let mut state = session_arc.lock().unwrap();
@@ -1568,6 +1608,7 @@ pub fn sync_and_load_reporte_data(
         state.revision_nombre = rev_name;
         state.revision_folio = rev_folio;
         state.all_rows = rows;
+        state.rows_fuera_periodo = rows_fuera_periodo;
         state.obras_options = obras;
         state.all_obras_options = all_obras;
         state.periodo_options = periodo_options;
@@ -1604,6 +1645,8 @@ pub fn sync_and_load_reporte_data(
         apply_reporte_filtering(&mut state);
         render_reporte_ui(ui, &state);
     }
+
+    filas_sincronizadas
 }
 
 pub fn refresh_sua_modal_ui(app_data: &AppData, state: &ReporteSessionState) {
@@ -1714,7 +1757,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 }
                 app_data.set_reporte_liquidaciones_access_allowed(true);
                 app_data.set_current_view(7);
-                sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id);
+                sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id, false);
             }
         });
     }
@@ -1738,8 +1781,14 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     &format!("target_id={}", target_id),
                 );
                 if !target_id.is_empty() {
-                    sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id);
-                    crate::show_toast_message(&ui, "Reporte de liquidaciones recargado.");
+                    let mensaje = match sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id, true) {
+                        Some(filas_nuevas) => format!(
+                            "Sincronizado con las cédulas: {} filas nuevas; las ediciones del analista se conservaron.",
+                            filas_nuevas
+                        ),
+                        None => "No se pudo sincronizar con las cédulas (ver log). Se muestran los datos actuales sin cambios.".to_string(),
+                    };
+                    crate::show_toast_message(&ui, &mensaje);
                 }
             }
         });
@@ -5291,7 +5340,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                     match revertir_reporte_liquidaciones_a_originales(&mut client, rev_uuid) {
                                         Ok(count) => {
                                             log::info!("Revertidos {} registros de reporte liquidaciones a sus valores originales.", count);
-                                            sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &rev_id);
+                                            sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &rev_id, false);
                                             crate::show_toast_message(&ui, "Cambios revertidos exitosamente a los valores originales de las cédulas.");
                                         }
                                         Err(e) => {
@@ -6642,6 +6691,9 @@ mod tests {
                 subtotal_orig: 100.0,
                 tiene_inconsistencia: false,
                 observacion_validacion: String::new(),
+                estado: "ACTIVO".to_string(),
+                cedula_actualizada: false,
+                editado_usuario: false,
             }
         };
 
@@ -6752,6 +6804,9 @@ mod tests {
                 subtotal_orig: 100.0,
                 tiene_inconsistencia: false,
                 observacion_validacion: String::new(),
+                estado: "ACTIVO".to_string(),
+                cedula_actualizada: false,
+                editado_usuario: false,
             }
         };
 
@@ -6907,6 +6962,9 @@ mod tests {
             subtotal_orig: 50.0,
             tiene_inconsistencia: false,
             observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
         };
 
         let mut row_baja = row1.clone();
@@ -6937,7 +6995,9 @@ mod tests {
         assert_eq!(r1.dias_obra, 0);
         assert_eq!(r1.obra_numero, "");
         assert_eq!(r1.obra_label, "⚠️ Sin Asignar (Pendiente)");
-        assert_eq!(r1.subtotal, 0.0); // Sin obra asignada el subtotal se pone a 0.0
+        // Regla canónica (decidida por el usuario, Fase 3): sin obra asignada el tramo conserva
+        // el importe completo de la cédula (factor 1), visible como "Sin asignar".
+        assert_eq!(r1.subtotal, 50.0);
 
         let r2 = rows.iter().find(|r| r.id_reporte_liq == row2_id).unwrap();
         assert_eq!(r2.clave, "BAJA");
@@ -7010,6 +7070,9 @@ mod tests {
             subtotal_orig: 896.98,
             tiene_inconsistencia: false,
             observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
         };
 
         let mut row_baja = row_activa.clone();
@@ -7137,6 +7200,9 @@ mod tests {
             subtotal_orig: 1604.71,
             tiene_inconsistencia: false,
             observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
         };
 
         let mut row2 = row1.clone();
@@ -7197,3 +7263,87 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod tests_separacion_estado {
+    use super::*;
+
+    fn fila_prueba(estado: &str) -> ReporteLiquidacionRowDb {
+        ReporteLiquidacionRowDb {
+            id_reporte_liq: Uuid::nil(),
+            id_parent_reporte_liq: Uuid::nil(),
+            id_liquidacion: Uuid::nil(),
+            id_revision: Uuid::nil(),
+            id_empleado: Uuid::nil(),
+            nombre_trabajador: String::new(),
+            rfc: String::new(),
+            curp: String::new(),
+            nss: String::new(),
+            pensionado: String::new(),
+            registro_patronal: String::new(),
+            mes_periodo: String::new(),
+            mes_periodo_int: 1,
+            anio_periodo: 2026,
+            periodo_str: String::new(),
+            dias_cedula: 0,
+            id_registro_obra: None,
+            obra_numero: String::new(),
+            obra_label: String::new(),
+            dias_obra: 0,
+            obra_creado_usuario: false,
+            clave: String::new(),
+            fecha: None,
+            fecha_str: String::new(),
+            sdi: 0.0,
+            lic: 0.0,
+            inc: 0.0,
+            aus: 0.0,
+            cf: 0.0,
+            exc_pat: 0.0,
+            exc_obr: 0.0,
+            pd_pat: 0.0,
+            pd_obr: 0.0,
+            gmp_pat: 0.0,
+            gmp_obr: 0.0,
+            rt: 0.0,
+            iv_pat: 0.0,
+            iv_obr: 0.0,
+            gps: 0.0,
+            patronal: 0.0,
+            obrera: 0.0,
+            subtotal: 0.0,
+            cf_orig: 0.0,
+            exc_pat_orig: 0.0,
+            exc_obr_orig: 0.0,
+            pd_pat_orig: 0.0,
+            pd_obr_orig: 0.0,
+            gmp_pat_orig: 0.0,
+            gmp_obr_orig: 0.0,
+            rt_orig: 0.0,
+            iv_pat_orig: 0.0,
+            iv_obr_orig: 0.0,
+            gps_orig: 0.0,
+            patronal_orig: 0.0,
+            obrera_orig: 0.0,
+            subtotal_orig: 0.0,
+            tiene_inconsistencia: false,
+            observacion_validacion: String::new(),
+            estado: estado.to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
+        }
+    }
+
+    #[test]
+    fn separar_filas_por_estado_separa_activas_de_fuera_periodo() {
+        let rows = vec![
+            fila_prueba("ACTIVO"),
+            fila_prueba("ACTIVO"),
+            fila_prueba("FUERA_PERIODO"),
+        ];
+        let (activas, fuera) = separar_filas_por_estado(rows);
+        assert_eq!(activas.len(), 2, "deben quedar 2 filas ACTIVO");
+        assert_eq!(fuera.len(), 1, "debe quedar 1 fila FUERA_PERIODO");
+        assert!(activas.iter().all(|r| r.estado == "ACTIVO"));
+        assert!(fuera.iter().all(|r| r.estado != "ACTIVO"));
+    }
+}

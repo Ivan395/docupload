@@ -121,6 +121,8 @@ export struct RevisionData {
     fecha_entrega_revision: string,
     fecha_aprobacion_prorroga: string,
     fecha_entrega_con_prorroga: string,
+    periodo_inicio: string,
+    periodo_fin: string,
     pidio_prorroga: bool,
     obras_count: int,
     created_at_str: string,
@@ -327,6 +329,7 @@ export struct ReporteLiquidacionRow {
     movimientos_resumen: string,
     tiene_inconsistencia: bool,
     observacion_validacion: string,
+    cedula_actualizada: bool,
     idx: int,
     id_reporte_liq: string,
     id_liquidacion: string,
@@ -822,6 +825,8 @@ export global AppData {
     in-out property <bool> rev_form_pidio_prorroga: false;
     in-out property <string> rev_form_fecha_aprobacion_prorroga: "";
     in-out property <string> rev_form_fecha_entrega_con_prorroga: "";
+    in-out property <string> rev_form_periodo_inicio: "";
+    in-out property <string> rev_form_periodo_fin: "";
 
     // Modal: Confirmación Eliminar Revisión
     in-out property <bool> show_delete_revision_modal: false;
@@ -1499,7 +1504,7 @@ export global AppLogic {
     callback open_new_revision_dialog();
     callback close_revision_dialog();
     callback select_revision_for_edit(string);
-    callback submit_revision(string, string, string, string, string, string, string, string, string, string, string, bool, string, string);
+    callback submit_revision(string, string, string, string, string, string, string, string, string, string, string, bool, string, string, string, string);
     callback open_delete_revision_dialog(string, string, string);
     callback close_delete_revision_dialog();
     callback confirm_delete_revision(string);

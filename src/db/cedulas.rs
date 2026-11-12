@@ -990,6 +990,9 @@ const SQL_INSERT_EMPLEADO_UPSERT: &str = r#"
     RETURNING id, (xmax = 0) AS insertado
     "#;
 
+/// Marca para revisión los reportes ya editados por el analista cuya liquidación cambió de detalles.
+const SQL_MARCAR_CEDULA_ACTUALIZADA: &str = "UPDATE public.reportes_liquidaciones SET cedula_actualizada = true WHERE id_liquidacion = $1 AND editado_usuario = true AND cedula_actualizada = false";
+
 /// Guarda un trabajador de cédula con sus liquidaciones, detalles y vinculaciones a obras.
 /// Regla de conflicto: ante una liquidación existente del mismo RP/empleado/periodo gana la carga
 /// más reciente (sin distinguir SUA de EMA). Las vinculaciones de obra solo se reemplazan cuando la
@@ -1380,6 +1383,8 @@ pub fn save_single_cedula_employee_tx(
                 "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion = $1",
                 &[&rep_id],
             )?;
+            // Los reportes ya editados por el analista deben revisar el cambio de detalles
+            tx.execute(SQL_MARCAR_CEDULA_ACTUALIZADA, &[&rep_id])?;
             // Las vinculaciones de obra solo se reemplazan si la carga nueva trae obras; si no, se conservan
             if !obras_to_process.is_empty() {
                 tx.execute(
@@ -1422,6 +1427,8 @@ pub fn save_single_cedula_employee_tx(
                     "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion = $1",
                     &[&target],
                 )?;
+                // Los reportes ya editados por el analista deben revisar el cambio de detalles
+                tx.execute(SQL_MARCAR_CEDULA_ACTUALIZADA, &[&target])?;
             }
             target
         };
@@ -1992,5 +1999,24 @@ mod tests_upsert_sql {
             "falta ON CONFLICT sobre el índice único parcial de NSS"
         );
         assert!(sql.contains("RETURNING id, (xmax = 0)"), "falta RETURNING id, (xmax = 0)");
+    }
+}
+
+#[cfg(test)]
+mod tests_cedula_actualizada {
+    use super::*;
+
+    /// Colapsa espacios en blanco para que las comparaciones de texto SQL no dependan del formato.
+    fn normalizar(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn marca_solo_reportes_editados_de_la_liquidacion() {
+        let sql = normalizar(SQL_MARCAR_CEDULA_ACTUALIZADA);
+        assert!(sql.contains("editado_usuario = true"), "falta filtro de reportes editados");
+        assert!(sql.contains("cedula_actualizada = true"), "falta marca cedula_actualizada");
+        assert!(sql.contains("id_liquidacion = $1"), "falta filtro por id_liquidacion");
+        assert!(!sql.contains("DELETE"), "la marca no debe borrar datos");
     }
 }

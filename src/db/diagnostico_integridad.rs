@@ -163,6 +163,25 @@ const CONSULTAS: &[(&str, &str)] = &[
         "archivos_cedulas_por_estado_staged",
         "SELECT COUNT(*)::bigint FROM public.archivos_cedulas WHERE estado = 'STAGED'",
     ),
+    (
+        // Tramos con obra y días de obra < días de cédula (deberían estar prorrateados)
+        "rdl_tramos_que_requieren_prorrateo",
+        "SELECT COUNT(*)::bigint FROM public.reportes_detalles_liquidaciones rdl \
+         WHERE rdl.id_registro_obra IS NOT NULL AND COALESCE(rdl.dias, 0) > 0 \
+           AND COALESCE(rdl.dias_registro_obra, 0) < rdl.dias AND COALESCE(rdl.subtotal, 0) > 0",
+    ),
+    (
+        // De esos, cuántos tienen el importe COMPLETO de la cédula (prorrateo perdido)
+        "rdl_prorrateo_perdido_importe_completo",
+        "SELECT COUNT(*)::bigint FROM public.reportes_detalles_liquidaciones rdl \
+         JOIN public.reportes_liquidaciones rl ON rl.id = rdl.id_reporte_liquidacion \
+         JOIN public.detalles_liquidaciones dl ON dl.id_liquidacion = rl.id_liquidacion \
+          AND COALESCE(BTRIM(LOWER(dl.clave)),'') = COALESCE(BTRIM(LOWER(rdl.clave)),'') \
+          AND dl.fecha IS NOT DISTINCT FROM rdl.fecha \
+         WHERE rdl.id_registro_obra IS NOT NULL AND COALESCE(rdl.dias, 0) > 0 \
+           AND COALESCE(rdl.dias_registro_obra, 0) < rdl.dias AND COALESCE(rdl.subtotal, 0) > 0 \
+           AND ABS(rdl.subtotal - dl.subtotal) < 0.01",
+    ),
     ("postgres_version_num", "SELECT current_setting('server_version_num')::bigint"),
 ];
 
@@ -324,6 +343,67 @@ mod tests {
             let c: Vec<String> = (0..5).map(|i| r.get::<_, String>(i)).collect();
             println!("BORRADO {}", c.join(" | "));
         }
+        tx.rollback().expect("rollback");
+    }
+
+    /// Borrados recientes (solo lectura) en tablas maestras según revision_history:
+    /// `cargo test borrados_recientes_bd -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn borrados_recientes_bd() {
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Sin conexión a BD: {}", e);
+                return;
+            }
+        };
+        let mut tx = client.build_transaction().read_only(true).start().expect("tx read only");
+        for tabla in ["empleados", "liquidaciones", "reportes_liquidaciones", "clientes", "registros_patronales", "revisiones"] {
+            let existe: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'revision_history' AND table_name = $1)",
+                    &[&tabla],
+                )
+                .expect("existe")
+                .get(0);
+            if !existe {
+                println!("BORR {tabla}: sin tabla de historial");
+                continue;
+            }
+            let sql = format!(
+                "SELECT to_char(date_trunc('minute', modified_at), 'YYYY-MM-DD HH24:MI'), COUNT(*)::text \
+                 FROM revision_history.{tabla} WHERE event_name = 'DELETE' AND modified_at > now() - interval '24 hours' \
+                 GROUP BY 1 ORDER BY 1"
+            );
+            for r in tx.query(sql.as_str(), &[]).expect("historial") {
+                println!("BORR {tabla} {} x{}", r.get::<_, String>(0), r.get::<_, String>(1));
+            }
+        }
+        let filas = tx
+            .query(
+                "SELECT to_char(date_trunc('minute', modified_at), 'YYYY-MM-DD HH24:MI'), COALESCE(nombre_archivo,''), \
+                        anio_periodo::text || '-' || mes_periodo_int::text, COUNT(*)::text \
+                 FROM revision_history.liquidaciones WHERE event_name = 'DELETE' AND modified_at > now() - interval '24 hours' \
+                 GROUP BY 1, 2, 3 ORDER BY 1 LIMIT 20",
+                &[],
+            )
+            .expect("detalle liquidaciones");
+        for r in filas {
+            println!("LIQ {} | {} | {} | x{}", r.get::<_, String>(0), r.get::<_, String>(1), r.get::<_, String>(2), r.get::<_, String>(3));
+        }
+        for r in tx
+            .query(
+                "SELECT to_char(modified_at, 'YYYY-MM-DD HH24:MI:SS'), COALESCE(nombre,''), COALESCE(rfc,'') \
+                 FROM revision_history.clientes WHERE event_name = 'DELETE' AND modified_at > now() - interval '24 hours' ORDER BY 1",
+                &[],
+            )
+            .expect("clientes borrados")
+        {
+            println!("CLI {} | {} | {}", r.get::<_, String>(0), r.get::<_, String>(1), r.get::<_, String>(2));
+        }
+        let ahora: String = tx.query_one("SELECT to_char(now(), 'YYYY-MM-DD HH24:MI')", &[]).expect("now").get(0);
+        println!("AHORA {ahora}");
         tx.rollback().expect("rollback");
     }
 

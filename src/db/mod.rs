@@ -1,3 +1,4 @@
+pub mod bitacora_reportes;
 pub mod calendario;
 pub mod catalogos;
 pub mod cedulas;
@@ -8,6 +9,7 @@ pub mod diagnostico_integridad;
 pub mod ingesta;
 pub mod nominas;
 pub mod nominas_reporte;
+pub mod prorrateo;
 pub mod reporte_liquidaciones;
 pub mod revisiones;
 pub mod schema;
@@ -31,6 +33,8 @@ pub use schema::{ensure_schema, format_boxed_pg_error, format_pg_error};
 
 #[cfg(test)]
 mod pruebas_integracion_ingesta;
+#[cfg(test)]
+mod pruebas_integracion_sync;
 
 #[cfg(test)]
 mod tests {
@@ -42,6 +46,10 @@ mod tests {
     use crate::cedulas::employees::{DataEmployee, Employee as CedulaEmployee, RegistroObra};
 
     #[test]
+
+    #[ignore]
+
+    // Escribe en la BD y/o RustFS configurados (producción): ejecutar solo explícitamente con --ignored
     fn test_db_ensure_schema_and_save_data() {
         let mut client = match create_client() {
             Ok(c) => c,
