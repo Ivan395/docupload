@@ -1387,6 +1387,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_detalles_liquidaciones_id_liquidacion ON public.detalles_liquidaciones(id_liquidacion);
         CREATE INDEX IF NOT EXISTS idx_vinculaciones_obras_id_obra ON public.vinculaciones_obras_liquidaciones(id_registro_obra);
         CREATE INDEX IF NOT EXISTS idx_vinculaciones_obras_id_liq ON public.vinculaciones_obras_liquidaciones(id_liquidacion);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_vol_liq_obra_id ON public.vinculaciones_obras_liquidaciones(id_liquidacion, id_registro_obra);
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_nomina ON public.reportes_nominas(id_nomina);
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_revision ON public.reportes_nominas(id_revision);
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_empleado ON public.reportes_nominas(id_empleado);
@@ -1950,6 +1951,11 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         DROP TABLE IF EXISTS revision_history.conexiones CASCADE;
         "#,
     );
+
+    // 10. Limpieza y reasignación de filas duplicadas en reportes de liquidaciones
+    if let Err(e) = crate::db::reporte_liquidaciones::cleanup_all_duplicate_reportes_detalles(client) {
+        log::warn!("Advertencia en limpieza automática de duplicados de reportes: {}", e);
+    }
 
     log::info!("Esquema de base de datos verificado y listo.");
     Ok(())

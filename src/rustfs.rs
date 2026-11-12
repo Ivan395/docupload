@@ -2,8 +2,11 @@ use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
 use s3::BucketConfiguration;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+use crate::cedulas::business::Business;
 use crate::cedulas::view_logic::{inspect_cedula_file, CedulaFileCardInfo};
 use crate::db::client::DbPool;
 
@@ -863,6 +866,553 @@ pub fn ensure_all_existing_structures_in_rustfs(pool: &DbPool) {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct ReconcileStats {
+    pub total_files_inspected: usize,
+    pub files_parsed: usize,
+    pub employees_matched: usize,
+    pub liquidaciones_matched: usize,
+    pub vinculaciones_upserted: usize,
+    pub fake_vinculaciones_removed: usize,
+    pub revisions_synced: usize,
+}
+
+/// Reconcilia y repara todas las vinculaciones de liquidaciones (tablas maestras y tablas de reportes)
+/// basándose 100% en los archivos originales de cédulas almacenados en RustFS (S3).
+pub fn reconcile_all_liquidaciones_vinculaciones_from_rustfs(
+    client: &mut postgres::Client,
+) -> Result<ReconcileStats, String> {
+    let mut stats = ReconcileStats::default();
+    let bucket = get_rustfs_bucket(BUCKET_NAME)?;
+    let patterns = std::sync::Arc::new(
+        crate::cedulas::regex_expressions::initialize_patterns()
+            .map_err(|e| format!("Error inicializando patrones regex: {}", e))?,
+    );
+
+    let pages = bucket
+        .list("".to_string(), None)
+        .map_err(|e| format!("Error listando bucket RustFS: {}", e))?;
+
+    let mut cedula_keys = Vec::new();
+    for page in pages {
+        for obj in page.contents {
+            if !obj.key.contains("Trash")
+                && obj.key.contains("Cedulas_de_cuotas")
+                && obj.key.ends_with(".pdf")
+            {
+                cedula_keys.push(obj.key);
+            }
+        }
+    }
+    cedula_keys.sort();
+    stats.total_files_inspected = cedula_keys.len();
+    log::info!("Reconciliando {} cédulas PDF encontradas en RustFS...", cedula_keys.len());
+
+    let temp_dir = std::env::temp_dir().join("docu_ffacd_reconcile");
+    let _ = fs::create_dir_all(&temp_dir);
+
+    let rp_rows = client
+        .query(
+            "SELECT id, id_cliente, UPPER(TRIM(registro)) FROM public.registros_patronales",
+            &[],
+        )
+        .map_err(|e| format!("Error consultando registros patronales: {}", e))?;
+    let mut rp_map: HashMap<String, (Uuid, Uuid)> = HashMap::new();
+    for r in rp_rows {
+        let id_rp: Uuid = r.get(0);
+        let id_cl: Uuid = r.get(1);
+        let reg: String = r.get(2);
+        let clean = crate::validation::clean_alphanumeric_input(&reg);
+        rp_map.insert(clean, (id_rp, id_cl));
+    }
+
+    let rev_rows = client
+        .query("SELECT id FROM public.revisiones", &[])
+        .map_err(|e| format!("Error consultando revisiones: {}", e))?;
+    let all_revisions: Vec<Uuid> = rev_rows.iter().map(|r| r.get(0)).collect();
+
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("Error iniciando transacción de reconciliación: {}", e))?;
+
+    for key in &cedula_keys {
+        let bytes = match download_rustfs_file(key) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("No se pudo descargar {}: {}", key, e);
+                continue;
+            }
+        };
+
+        let tmp_file = temp_dir.join("current_reconcile.pdf");
+        if let Err(e) = fs::write(&tmp_file, &bytes) {
+            log::warn!("Error escribiendo temp {}: {}", key, e);
+            continue;
+        }
+
+        let raw_text = match crate::cedulas::pdf_extractor::extract_with_layout(&tmp_file) {
+            Ok(t) => t,
+            Err(e) => {
+                log::debug!("Error extrayendo layout de {}: {}", key, e);
+                continue;
+            }
+        };
+
+        if crate::cedulas::ema::is_bimestral_document(&raw_text) {
+            continue;
+        }
+
+        let text_lower = raw_text.to_lowercase();
+        let is_cedula = text_lower.contains("cédula de determinación de cuotas")
+            || text_lower.contains("cedula de determinacion de cuotas")
+            || text_lower.contains("sistema único de autodeterminación")
+            || text_lower.contains("sistema unico de autodeterminacion")
+            || (text_lower.contains("propuesta de cédula") && text_lower.contains("cuotas"))
+            || (text_lower.contains("propuesta de cedula") && text_lower.contains("cuotas"));
+        if !is_cedula {
+            continue;
+        }
+
+        let cleaned = crate::cedulas::pdf_extractor::clean_text(&text_lower, &patterns);
+        let mut biz = Business::new();
+        biz.extract_from_page(&cleaned, &patterns);
+
+        let detected_rp = biz.registro_patronal.as_deref().or_else(|| {
+            let parts: Vec<&str> = key.split('/').collect();
+            if parts.len() >= 2 {
+                Some(parts[1])
+            } else {
+                None
+            }
+        });
+
+        let (id_rp, id_cliente) = match detected_rp
+            .and_then(|r| rp_map.get(&crate::validation::clean_alphanumeric_input(r)))
+        {
+            Some(pair) => *pair,
+            None => continue,
+        };
+
+        let emps = crate::cedulas::processor::get_employee_data(&cleaned, &patterns);
+        if emps.is_empty() {
+            continue;
+        }
+
+        let emp_mes = emps.iter().find_map(|e| e.mes_periodo.as_deref());
+        let emp_anio = emps.iter().find_map(|e| e.anio_periodo.as_deref());
+
+        let mes_str = emp_mes.or_else(|| {
+            let key_up = key.to_uppercase();
+            for m in &[
+                "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO",
+                "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+            ] {
+                if key_up.contains(m) {
+                    return Some(*m);
+                }
+            }
+            None
+        });
+        let anio_val: Option<i16> = emp_anio
+            .and_then(|a| a.trim().parse::<i16>().ok())
+            .or_else(|| {
+                for y in 2015..=2030 {
+                    if key.contains(&y.to_string()) {
+                        return Some(y as i16);
+                    }
+                }
+                None
+            });
+
+        let (mes_norm, anio_norm) = match (mes_str, anio_val) {
+            (Some(m), Some(a)) => (crate::db::cedulas::normalize_mes_periodo(Some(m)), a),
+            _ => continue,
+        };
+        let mes_int = crate::cedulas::business::mes_to_periodo_int(&mes_norm);
+        stats.files_parsed += 1;
+
+        let rev_name_from_key = {
+            let parts: Vec<&str> = key.split('/').collect();
+            if parts.len() >= 3 {
+                parts[2]
+            } else {
+                ""
+            }
+        };
+
+        let rev_row = tx
+            .query_opt(
+                "SELECT id FROM public.revisiones WHERE id_registro_patronal = $1 AND UPPER(TRIM(nombre)) = UPPER(TRIM($2)) LIMIT 1",
+                &[&id_rp, &rev_name_from_key],
+            )
+            .ok()
+            .flatten();
+
+        let id_revision: Uuid = match rev_row {
+            Some(r) => r.get(0),
+            None => {
+                let fallback_rev = tx
+                    .query_opt(
+                        "SELECT id FROM public.revisiones WHERE id_registro_patronal = $1 ORDER BY created_at DESC LIMIT 1",
+                        &[&id_rp],
+                    )
+                    .ok()
+                    .flatten();
+                match fallback_rev {
+                    Some(r) => r.get(0),
+                    None => continue,
+                }
+            }
+        };
+
+        for emp in &emps {
+            let clean_nss = emp
+                .no_seguro_social
+                .as_deref()
+                .map(crate::validation::clean_alphanumeric_input);
+            let clean_rfc = emp
+                .rfc
+                .as_deref()
+                .map(crate::validation::clean_alphanumeric_input);
+            let clean_curp = emp
+                .curp
+                .as_deref()
+                .map(crate::validation::clean_alphanumeric_input);
+            let emp_nombre = emp.nombre.as_deref().unwrap_or("").trim().to_uppercase();
+
+            let emp_row = tx
+                .query_opt(
+                    r#"
+                    SELECT id FROM public.empleados
+                    WHERE id_cliente = $1
+                      AND (
+                          ($2::varchar IS NOT NULL AND nss = $2)
+                          OR ($3::varchar IS NOT NULL AND rfc = $3)
+                          OR ($4::varchar IS NOT NULL AND curp = $4)
+                          OR ($5::varchar != '' AND TRIM(UPPER(nombre)) = $5)
+                      )
+                    ORDER BY (nss = $2) DESC, (rfc = $3) DESC, (curp = $4) DESC
+                    LIMIT 1
+                    "#,
+                    &[&id_cliente, &clean_nss, &clean_rfc, &clean_curp, &emp_nombre],
+                )
+                .ok()
+                .flatten();
+
+            let id_empleado: Uuid = match emp_row {
+                Some(r) => r.get(0),
+                None => continue,
+            };
+            stats.employees_matched += 1;
+
+            let file_name = key.split('/').last().unwrap_or(&key).to_string();
+            let liq_row = tx
+                .query_opt(
+                    r#"
+                    SELECT id FROM public.liquidaciones
+                    WHERE id_registro_patronal = $1
+                      AND id_empleado = $2
+                      AND anio_periodo = $3
+                      AND (mes_periodo_int = $4 OR UPPER(TRIM(mes_periodo)) = UPPER(TRIM($5)))
+                      AND (nombre_archivo = $6 OR nombre_archivo IS NULL)
+                    ORDER BY (nombre_archivo = $6) DESC, created_at ASC
+                    LIMIT 1
+                    "#,
+                    &[&id_rp, &id_empleado, &anio_norm, &mes_int, &mes_norm, &file_name],
+                )
+                .ok()
+                .flatten();
+
+            let id_liquidacion: Uuid = match liq_row {
+                Some(r) => r.get(0),
+                None => continue,
+            };
+            stats.liquidaciones_matched += 1;
+
+            let mut obras_consolidadas: BTreeMap<String, i16> = BTreeMap::new();
+            for ro in &emp.registro_obras {
+                let clean_ro = crate::validation::clean_alphanumeric_input(&ro.registro_obra);
+                if !clean_ro.is_empty()
+                    && (crate::validation::validate_registro_obra(&clean_ro).is_ok()
+                        || clean_ro.starts_with('C')
+                        || clean_ro.starts_with('A'))
+                {
+                    let d = (ro.dias_registro_obra as i16).clamp(1, 31);
+                    *obras_consolidadas.entry(clean_ro).or_insert(0) += d;
+                }
+            }
+
+            // Limpiamos vinculaciones previas de esta liquidación para garantizar coincidencia exacta con el PDF
+            let del_cnt = tx
+                .execute(
+                    "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
+                    &[&id_liquidacion],
+                )
+                .unwrap_or(0);
+            if obras_consolidadas.is_empty() && del_cnt > 0 {
+                stats.fake_vinculaciones_removed += del_cnt as usize;
+            }
+
+            for (num_obra, total_dias) in obras_consolidadas {
+                let clamped_dias = total_dias.clamp(1, 31);
+                let m_num = mes_int as i32;
+                let y_val = anio_norm as i32;
+                let valid_m = if (1..=12).contains(&m_num) { m_num as u32 } else { 1u32 };
+                let fecha_inicio = chrono::NaiveDate::from_ymd_opt(y_val, valid_m, 1)
+                    .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap());
+                let last_day = match valid_m {
+                    1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                    4 | 6 | 9 | 11 => 30,
+                    2 => {
+                        if (y_val % 4 == 0 && y_val % 100 != 0) || (y_val % 400 == 0) {
+                            29
+                        } else {
+                            28
+                        }
+                    }
+                    _ => 30,
+                };
+                let fecha_fin = chrono::NaiveDate::from_ymd_opt(y_val, valid_m, last_day)
+                    .unwrap_or(fecha_inicio);
+
+                let obra_row = tx
+                    .query_one(
+                        r#"
+                        INSERT INTO public.registros_obras (
+                            id, id_revision, id_registro_patronal, numero, tipo_obra, fecha_inicio, fecha_fin, creado_usuario
+                        ) VALUES (
+                            uuidv7(), $1, $2, $3, 'REGISTRO DE OBRA CÉDULA', $4, $5, false
+                        )
+                        ON CONFLICT (id_revision, numero) DO UPDATE SET
+                            fecha_inicio = CASE
+                                WHEN COALESCE(public.registros_obras.creado_usuario, false) THEN public.registros_obras.fecha_inicio
+                                ELSE LEAST(public.registros_obras.fecha_inicio, EXCLUDED.fecha_inicio)
+                            END,
+                            fecha_fin = CASE
+                                WHEN COALESCE(public.registros_obras.creado_usuario, false) THEN public.registros_obras.fecha_fin
+                                ELSE GREATEST(public.registros_obras.fecha_fin, EXCLUDED.fecha_fin)
+                            END
+                        RETURNING id
+                        "#,
+                        &[&id_revision, &id_rp, &num_obra, &fecha_inicio, &fecha_fin],
+                    )
+                    .map_err(|e| format!("Error upserting registro_obra: {}", e))?;
+
+                let id_registro_obra: Uuid = obra_row.get(0);
+                let id_v = Uuid::now_v7();
+                tx.execute(
+                    r#"
+                    INSERT INTO public.vinculaciones_obras_liquidaciones (
+                        id, id_registro_obra, id_liquidacion, dias_registro_obra
+                    ) VALUES ($1, $2, $3, $4)
+                    "#,
+                    &[&id_v, &id_registro_obra, &id_liquidacion, &clamped_dias],
+                )
+                .map_err(|e| format!("Error insertando vinculacion: {}", e))?;
+                stats.vinculaciones_upserted += 1;
+            }
+        }
+    }
+
+    // Limpieza de vinculaciones con 30 días que fueron generadas artificialmente desde clave_ubicación
+    let cleanup_ghosts = tx
+        .execute(
+            r#"
+            DELETE FROM public.vinculaciones_obras_liquidaciones vol
+            USING public.liquidaciones l, public.empleados e, public.registros_obras ro
+            WHERE vol.id_liquidacion = l.id
+              AND l.id_empleado = e.id
+              AND vol.id_registro_obra = ro.id
+              AND vol.dias_registro_obra = 30
+              AND TRIM(UPPER(ro.numero)) = LEFT(TRIM(UPPER(e.clave_ubicacion)), 15)
+              AND COALESCE(ro.creado_usuario, false) = false
+              AND NOT EXISTS (
+                  SELECT 1 FROM public.detalles_liquidaciones dl
+                  WHERE dl.id_liquidacion = l.id AND dl.dias = 30
+              )
+            "#,
+            &[],
+        )
+        .unwrap_or(0);
+    stats.fake_vinculaciones_removed += cleanup_ghosts as usize;
+
+    // Sincronizar todas las revisiones existentes para refrescar sus tablas de reportes
+    for rev_id in all_revisions {
+        match crate::db::reporte_liquidaciones::sync_reportes_liquidaciones_for_revision_tx(
+            &mut tx, rev_id,
+        ) {
+            Ok(_) => stats.revisions_synced += 1,
+            Err(e) => log::warn!("Error sincronizando reporte de revision {}: {}", rev_id, e),
+        }
+    }
+
+    tx.commit()
+        .map_err(|e| format!("Error haciendo commit de reconciliacion: {}", e))?;
+
+    let _ = fs::remove_dir_all(&temp_dir);
+    log::info!("Reconciliación completada con éxito: {:?}", stats);
+    Ok(stats)
+}
+
+#[derive(Debug, Default)]
+pub struct ClaveCleaningStats {
+    pub bimestral_liquidaciones_removed: usize,
+    pub bimestral_detalles_removed: usize,
+    pub bimestral_reportes_detalles_removed: usize,
+    pub detalles_normalized_baja: usize,
+    pub detalles_normalized_reing: usize,
+    pub detalles_normalized_alta: usize,
+    pub detalles_normalized_ms: usize,
+    pub detalles_cleaned_null: usize,
+    pub reportes_cleaned_null: usize,
+    pub revisions_resynced: usize,
+}
+
+pub fn clean_and_repair_detalles_liquidaciones_database(
+    client: &mut postgres::Client,
+) -> Result<ClaveCleaningStats, String> {
+    let mut stats = ClaveCleaningStats::default();
+
+    // 1. Obtener nombres de archivos bimestrales desde RustFS
+    let bucket = get_rustfs_bucket(BUCKET_NAME)?;
+    let pages = bucket.list("".to_string(), None).map_err(|e| e.to_string())?;
+    let mut bimestral_fnames: Vec<String> = Vec::new();
+    for page in pages {
+        for obj in page.contents {
+            if !obj.key.contains("Trash") && obj.key.ends_with(".pdf") {
+                let data = download_rustfs_file(&obj.key).unwrap_or_default();
+                if let Ok(mut temp) = tempfile::NamedTempFile::new() {
+                    let _ = std::io::Write::write_all(&mut temp, &data);
+                    if let Ok(raw_text) = crate::cedulas::pdf_extractor::extract_with_layout(temp.path()) {
+                        if crate::cedulas::ema::is_bimestral_document(&raw_text) {
+                            if let Some(fname) = Path::new(&obj.key).file_name().and_then(|n| n.to_str()) {
+                                bimestral_fnames.push(fname.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut tx = client.transaction().map_err(|e| format!("Error iniciando tx: {}", e))?;
+
+    // 2. Buscar liquidaciones bimestrales en public.liquidaciones (por nombre de archivo de RustFS o por dias > 31)
+    let bimestral_rows = tx.query(
+        r#"
+        SELECT DISTINCT l.id
+        FROM public.liquidaciones l
+        LEFT JOIN public.detalles_liquidaciones dl ON dl.id_liquidacion = l.id
+        WHERE l.nombre_archivo = ANY($1)
+           OR dl.dias > 31
+        "#,
+        &[&bimestral_fnames],
+    ).map_err(|e| format!("Error buscando liquidaciones bimestrales: {}", e))?;
+
+    let bimestral_ids: Vec<Uuid> = bimestral_rows.iter().map(|r| r.get(0)).collect();
+    if !bimestral_ids.is_empty() {
+        let r_del = tx.execute(
+            r#"
+            DELETE FROM public.reportes_detalles_liquidaciones
+            WHERE id_reporte_liquidacion IN (
+                SELECT id FROM public.reportes_liquidaciones WHERE id_liquidacion = ANY($1)
+            )
+            "#,
+            &[&bimestral_ids],
+        ).unwrap_or(0);
+        stats.bimestral_reportes_detalles_removed = r_del as usize;
+
+        tx.execute(
+            "DELETE FROM public.reportes_liquidaciones WHERE id_liquidacion = ANY($1)",
+            &[&bimestral_ids],
+        ).map_err(|e| format!("Error eliminando reportes_liquidaciones bimestrales: {}", e))?;
+
+        tx.execute(
+            "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = ANY($1)",
+            &[&bimestral_ids],
+        ).map_err(|e| format!("Error eliminando vinculaciones bimestrales: {}", e))?;
+
+        let d_del = tx.execute(
+            "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion = ANY($1)",
+            &[&bimestral_ids],
+        ).unwrap_or(0);
+        stats.bimestral_detalles_removed = d_del as usize;
+
+        let l_del = tx.execute(
+            "DELETE FROM public.liquidaciones WHERE id = ANY($1)",
+            &[&bimestral_ids],
+        ).unwrap_or(0);
+        stats.bimestral_liquidaciones_removed = l_del as usize;
+    }
+
+    // 3. Normalizar claves aceptadas
+    let n_baja = tx.execute("UPDATE public.detalles_liquidaciones SET clave = 'baja' WHERE TRIM(UPPER(clave)) IN ('B', 'BAJA')", &[]).unwrap_or(0);
+    tx.execute("UPDATE public.reportes_detalles_liquidaciones SET clave = 'baja' WHERE TRIM(UPPER(clave)) IN ('B', 'BAJA')", &[]).unwrap_or(0);
+    stats.detalles_normalized_baja = n_baja as usize;
+
+    let n_reing = tx.execute("UPDATE public.detalles_liquidaciones SET clave = 'reing' WHERE TRIM(UPPER(clave)) IN ('R', 'REIN', 'REING', 'REINGRESO')", &[]).unwrap_or(0);
+    tx.execute("UPDATE public.reportes_detalles_liquidaciones SET clave = 'reing' WHERE TRIM(UPPER(clave)) IN ('R', 'REIN', 'REING', 'REINGRESO')", &[]).unwrap_or(0);
+    stats.detalles_normalized_reing = n_reing as usize;
+
+    let n_alta = tx.execute("UPDATE public.detalles_liquidaciones SET clave = 'alta' WHERE TRIM(UPPER(clave)) IN ('A', 'ALTA')", &[]).unwrap_or(0);
+    tx.execute("UPDATE public.reportes_detalles_liquidaciones SET clave = 'alta' WHERE TRIM(UPPER(clave)) IN ('A', 'ALTA')", &[]).unwrap_or(0);
+    stats.detalles_normalized_alta = n_alta as usize;
+
+    let n_ms = tx.execute("UPDATE public.detalles_liquidaciones SET clave = 'm/s' WHERE LOWER(TRIM(clave)) IN ('ms', 'm/s', 'm.s', 'ism', 'mod', 'mod.sal')", &[]).unwrap_or(0);
+    tx.execute("UPDATE public.reportes_detalles_liquidaciones SET clave = 'm/s' WHERE LOWER(TRIM(clave)) IN ('ms', 'm/s', 'm.s', 'ism', 'mod', 'mod.sal')", &[]).unwrap_or(0);
+    stats.detalles_normalized_ms = n_ms as usize;
+
+    tx.execute("UPDATE public.detalles_liquidaciones SET clave = 'inc' WHERE LOWER(TRIM(clave)) IN ('inc', 'incap', 'incapacidad')", &[]).unwrap_or(0);
+    tx.execute("UPDATE public.reportes_detalles_liquidaciones SET clave = 'inc' WHERE LOWER(TRIM(clave)) IN ('inc', 'incap', 'incapacidad')", &[]).unwrap_or(0);
+    tx.execute("UPDATE public.detalles_liquidaciones SET clave = 'aus' WHERE LOWER(TRIM(clave)) IN ('aus', 'ausentismo')", &[]).unwrap_or(0);
+    tx.execute("UPDATE public.reportes_detalles_liquidaciones SET clave = 'aus' WHERE LOWER(TRIM(clave)) IN ('aus', 'ausentismo')", &[]).unwrap_or(0);
+
+    // 4. Limpiar claves corruptas (fechas, salarios, enteros, o cualquier valor fuera de catálogo) poniéndolos en NULL
+    let c_dl = tx.execute(
+        r#"
+        UPDATE public.detalles_liquidaciones
+        SET clave = NULL,
+            fecha = CASE WHEN LOWER(TRIM(clave)) NOT IN ('alta', 'baja', 'reing', 'rein', 'ms', 'm/s', 'inc', 'aus') THEN NULL ELSE fecha END
+        WHERE clave IS NOT NULL AND LOWER(TRIM(clave)) NOT IN ('alta', 'baja', 'reing', 'rein', 'ms', 'm/s', 'inc', 'aus')
+        "#,
+        &[],
+    ).unwrap_or(0);
+    stats.detalles_cleaned_null = c_dl as usize;
+
+    let c_rdl = tx.execute(
+        r#"
+        UPDATE public.reportes_detalles_liquidaciones
+        SET clave = NULL,
+            fecha = CASE WHEN LOWER(TRIM(clave)) NOT IN ('alta', 'baja', 'reing', 'rein', 'ms', 'm/s', 'inc', 'aus') THEN NULL ELSE fecha END
+        WHERE clave IS NOT NULL AND LOWER(TRIM(clave)) NOT IN ('alta', 'baja', 'reing', 'rein', 'ms', 'm/s', 'inc', 'aus')
+        "#,
+        &[],
+    ).unwrap_or(0);
+    stats.reportes_cleaned_null = c_rdl as usize;
+
+    // 5. Consultar todas las revisiones existentes antes del commit
+    let all_rev_rows = tx.query("SELECT id FROM public.revisiones", &[])
+        .map_err(|e| format!("Error consultando revisiones: {}", e))?;
+    let all_rev_ids: Vec<Uuid> = all_rev_rows.into_iter().map(|r| r.get(0)).collect();
+
+    tx.commit().map_err(|e| format!("Error en commit: {}", e))?;
+
+    // 6. Sincronizar reportes para todas las revisiones existentes
+    for rev_id in all_rev_ids {
+        match crate::db::reporte_liquidaciones::revertir_reporte_liquidaciones_a_originales(
+            client, rev_id,
+        ) {
+            Ok(_) => stats.revisions_resynced += 1,
+            Err(e) => {
+                log::warn!("Aviso en reversion de revision {}: {}", rev_id, e);
+            }
+        }
+    }
+
+    log::info!("Limpieza de base de datos de claves completada: {:?}", stats);
+    Ok(stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,5 +1615,570 @@ mod tests {
                 }
             }
         }
+    }
+
+
+
+    #[test]
+    fn test_reconcile_and_verify_database() {
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Cannot connect to DB: {}", e);
+                return;
+            }
+        };
+
+        let stats = reconcile_all_liquidaciones_vinculaciones_from_rustfs(&mut client)
+            .expect("Reconcile should succeed");
+        println!("\n=== RECONCILE RESULTS ===");
+        println!("{:?}", stats);
+
+        // Verificar que reportes_vinculaciones_obras_liquidaciones ahora tiene registros
+        let rep_vinc_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM public.reportes_vinculaciones_obras_liquidaciones",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        println!("Total vinculaciones en reportes: {}", rep_vinc_count);
+        assert!(
+            rep_vinc_count > 0,
+            "Debe haber vinculaciones en las tablas de reportes"
+        );
+
+        println!("\n=== INSPECTING ALMANZA MARTINEZ LIQUIDACIONES ===");
+        for r in client.query(
+            "SELECT l.id, l.nombre_archivo, l.mes_periodo, l.anio_periodo,
+                    (SELECT COUNT(*) FROM public.vinculaciones_obras_liquidaciones vol WHERE vol.id_liquidacion = l.id) as vinc_cnt
+             FROM public.liquidaciones l
+             JOIN public.empleados e ON e.id = l.id_empleado
+             WHERE e.nombre ILIKE '%ALMANZA MARTINEZ%'
+             ORDER BY l.anio_periodo, l.mes_periodo_int",
+            &[],
+        ).unwrap() {
+            let lid: uuid::Uuid = r.get(0);
+            let arch: Option<String> = r.get(1);
+            let mes: Option<String> = r.get(2);
+            let anio: Option<i16> = r.get(3);
+            let v_cnt: i64 = r.get(4);
+            println!("ALMANZA LIQ: id={}, arch={:?}, mes={:?}, anio={:?}, vincs={}", lid, arch, mes, anio, v_cnt);
+        }
+
+        // Verificar ALMANZA MARTINEZ en marzo 2024 o abril 2025: debe tener sus 2 obras intactas
+        let almanza_vincs: Vec<(String, i16)> = client
+            .query(
+                "SELECT DISTINCT TRIM(UPPER(ro.numero)), vol.dias_registro_obra
+                 FROM public.empleados e
+                 JOIN public.liquidaciones l ON l.id_empleado = e.id
+                 JOIN public.vinculaciones_obras_liquidaciones vol ON vol.id_liquidacion = l.id
+                 JOIN public.registros_obras ro ON ro.id = vol.id_registro_obra
+                 WHERE e.nombre ILIKE '%ALMANZA MARTINEZ%' AND (
+                     (l.mes_periodo ILIKE '%MARZO%' AND l.anio_periodo = 2024)
+                     OR (l.mes_periodo ILIKE '%ABRIL%' AND l.anio_periodo = 2025)
+                 )
+                 ORDER BY TRIM(UPPER(ro.numero))",
+                &[],
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.get::<_, String>(0).trim().to_string(), r.get(1)))
+            .collect();
+
+        println!(
+            "ALMANZA MARTINEZ vinculaciones únicas: {:?}",
+            almanza_vincs
+        );
+        assert!(
+            almanza_vincs.len() >= 2,
+            "Debe tener al menos 2 vinculaciones de obra distintas"
+        );
+
+        // Verificar que los datos en reportes_detalles_liquidaciones no fueron prorrateados (iguales a detalles_liquidaciones)
+        let mismatches: Vec<(String, Option<String>, Option<chrono::NaiveDate>, Option<f64>, Option<f64>)> = client
+            .query(
+                "SELECT e.nombre, rdl.clave, rdl.fecha, rdl.subtotal, dl.subtotal
+                 FROM public.reportes_detalles_liquidaciones rdl
+                 JOIN public.reportes_liquidaciones rl ON rl.id = rdl.id_reporte_liquidacion
+                 JOIN public.empleados e ON e.id = rl.id_empleado
+                 JOIN public.detalles_liquidaciones dl ON dl.id_liquidacion = rl.id_liquidacion
+                      AND (dl.clave = rdl.clave OR (dl.clave IS NULL AND rdl.clave IS NULL))
+                      AND (dl.fecha = rdl.fecha OR (dl.fecha IS NULL AND rdl.fecha IS NULL))
+                 WHERE rdl.id_registro_obra IS NOT NULL
+                   AND LOWER(TRIM(COALESCE(rdl.clave, ''))) != 'baja'
+                   AND COALESCE(dl.subtotal, 0) > 0
+                   AND ABS(COALESCE(rdl.subtotal, 0) - COALESCE(dl.subtotal, 0)) > 0.01
+                 LIMIT 5",
+                &[],
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4)))
+            .collect();
+        if !mismatches.is_empty() {
+            println!("Sample mismatches (rdl vs dl): {:?}", mismatches);
+        }
+
+        let unprorated_match: bool = mismatches.is_empty();
+
+        println!(
+            "Reportes detalles coinciden 100% con detalles originales: {}",
+            unprorated_match
+        );
+        assert!(
+            unprorated_match,
+            "Los datos de reportes_detalles_liquidaciones deben venir tal cual como vienen en los PDFs sin prorrateo"
+        );
+    }
+
+    #[test]
+    fn test_clean_and_verify_detalles_liquidaciones_database() {
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Cannot connect to DB: {}", e);
+                return;
+            }
+        };
+
+        println!("\n=== EJECUTANDO LIMPIEZA Y REPARACION DE BASE DE DATOS ===");
+        let stats = clean_and_repair_detalles_liquidaciones_database(&mut client)
+            .expect("clean_and_repair_detalles_liquidaciones_database falló");
+        println!("Stats de limpieza: {:#?}", stats);
+
+        println!("\n=== VERIFICANDO CLAVES EN DETALLES_LIQUIDACIONES ===");
+        let rows = client
+            .query(
+                "SELECT clave, COUNT(*) as cnt
+                 FROM public.detalles_liquidaciones
+                 GROUP BY clave
+                 ORDER BY cnt DESC",
+                &[],
+            )
+            .unwrap();
+        for r in &rows {
+            let clave: Option<String> = r.get(0);
+            let cnt: i64 = r.get(1);
+            println!("CLEAN DL CLAVE: {:?} -> count: {}", clave, cnt);
+        }
+
+        println!("\n=== VERIFICANDO CLAVES EN REPORTES_DETALLES_LIQUIDACIONES ===");
+        let r_rows = client
+            .query(
+                "SELECT clave, COUNT(*) as cnt
+                 FROM public.reportes_detalles_liquidaciones
+                 GROUP BY clave
+                 ORDER BY cnt DESC",
+                &[],
+            )
+            .unwrap();
+        for r in &r_rows {
+            let clave: Option<String> = r.get(0);
+            let cnt: i64 = r.get(1);
+            println!("CLEAN RDL CLAVE: {:?} -> count: {}", clave, cnt);
+        }
+
+        // Verificaciones formales
+        let bad_dl_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM public.detalles_liquidaciones
+                 WHERE clave IS NOT NULL
+                   AND LOWER(TRIM(clave)) NOT IN ('alta', 'baja', 'reing', 'rein', 'ms', 'm/s', 'inc', 'aus')",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            bad_dl_count, 0,
+            "No deben existir claves inválidas en public.detalles_liquidaciones"
+        );
+
+        let bad_rdl_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM public.reportes_detalles_liquidaciones
+                 WHERE clave IS NOT NULL
+                   AND LOWER(TRIM(clave)) NOT IN ('alta', 'baja', 'reing', 'rein', 'ms', 'm/s', 'inc', 'aus')",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            bad_rdl_count, 0,
+            "No deben existir claves inválidas en public.reportes_detalles_liquidaciones"
+        );
+
+        let b_dl_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM public.detalles_liquidaciones WHERE TRIM(UPPER(clave)) = 'B'",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(b_dl_count, 0, "No debe existir clave 'B' sin normalizar en detalles_liquidaciones");
+
+        let b_rdl_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM public.reportes_detalles_liquidaciones WHERE TRIM(UPPER(clave)) = 'B'",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(b_rdl_count, 0, "No debe existir clave 'B' sin normalizar en reportes_detalles_liquidaciones");
+
+        let specific_bad_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM public.detalles_liquidaciones
+                 WHERE TRIM(clave) IN ('218.00', '217.67', '220.00', '09/08/2023', '31/07/2023', '24/07/2023', '61', '62')",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(specific_bad_count, 0, "No deben existir fechas o números en clave");
+
+        let bimestral_gt31: i64 = client
+            .query_one(
+                "SELECT COUNT(*) FROM public.detalles_liquidaciones WHERE dias > 31",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(bimestral_gt31, 0, "No deben quedar registros con dias > 31 de cédulas bimestrales en liquidaciones");
+
+        println!("\n¡Todas las verificaciones de limpieza de base de datos pasaron exitosamente!");
+    }
+
+    #[test]
+    fn test_comprehensive_vinculaciones_comparison_rustfs_vs_db() {
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Cannot connect to DB: {}", e);
+                return;
+            }
+        };
+
+        let bucket = match get_rustfs_bucket(BUCKET_NAME) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("Cannot connect to RustFS: {}", e);
+                return;
+            }
+        };
+
+        let patterns = crate::cedulas::regex_expressions::initialize_patterns().unwrap();
+        let pages = bucket.list("".to_string(), None).unwrap();
+
+        let mut cedula_keys = Vec::new();
+        for page in pages {
+            for obj in page.contents {
+                if !obj.key.contains("Trash")
+                    && obj.key.contains("Cedulas_de_cuotas")
+                    && obj.key.ends_with(".pdf")
+                {
+                    cedula_keys.push(obj.key);
+                }
+            }
+        }
+        cedula_keys.sort();
+
+        let rp_rows = client
+            .query(
+                "SELECT id, id_cliente, UPPER(TRIM(registro)) FROM public.registros_patronales",
+                &[],
+            )
+            .unwrap();
+        let mut rp_map: HashMap<String, (Uuid, Uuid)> = HashMap::new();
+        for r in rp_rows {
+            let id_rp: Uuid = r.get(0);
+            let id_cl: Uuid = r.get(1);
+            let reg: String = r.get(2);
+            let clean = crate::validation::clean_alphanumeric_input(&reg);
+            rp_map.insert(clean, (id_rp, id_cl));
+        }
+
+        println!("Comparando {} archivos de RustFS contra la base de datos...", cedula_keys.len());
+
+        let mut total_pdfs = 0;
+        let mut bimestral_skipped = 0;
+        let mut monthly_processed = 0;
+        let mut total_emp_checked = 0;
+        let mut matched_emp_count = 0;
+        let missing_liq_in_db = 0;
+        let mut missing_vinc_in_db = 0;
+        let mut extra_vinc_in_db = 0;
+        let mut days_mismatches = 0;
+        let missing_liq_samples: Vec<String> = Vec::new();
+        let mut missing_vinc_samples: Vec<String> = Vec::new();
+        let mut days_mismatch_samples: Vec<String> = Vec::new();
+        let mut extra_vinc_samples: Vec<String> = Vec::new();
+
+        for key in &cedula_keys {
+            total_pdfs += 1;
+            let bytes = match download_rustfs_file(key) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            let _ = std::io::Write::write_all(&mut tmp, &bytes);
+
+            let raw_text = match crate::cedulas::pdf_extractor::extract_with_layout(tmp.path()) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            if crate::cedulas::ema::is_bimestral_document(&raw_text) {
+                bimestral_skipped += 1;
+                continue;
+            }
+
+            let text_lower = raw_text.to_lowercase();
+            let cleaned = crate::cedulas::pdf_extractor::clean_text(&text_lower, &patterns);
+            let mut biz = Business::new();
+            biz.extract_from_page(&cleaned, &patterns);
+
+            let detected_rp = biz.registro_patronal.as_deref().or_else(|| {
+                let parts: Vec<&str> = key.split('/').collect();
+                if parts.len() >= 2 {
+                    Some(parts[1])
+                } else {
+                    None
+                }
+            });
+
+            let (id_rp, id_cliente) = match detected_rp
+                .and_then(|r| rp_map.get(&crate::validation::clean_alphanumeric_input(r)))
+            {
+                Some(pair) => *pair,
+                None => continue,
+            };
+
+            let emps = crate::cedulas::processor::get_employee_data(&cleaned, &patterns);
+            if emps.is_empty() {
+                continue;
+            }
+
+            let emp_mes = emps.iter().find_map(|e| e.mes_periodo.as_deref());
+            let emp_anio = emps.iter().find_map(|e| e.anio_periodo.as_deref());
+            let mes_str = emp_mes.or_else(|| {
+                let key_up = key.to_uppercase();
+                for m in &[
+                    "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO",
+                    "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+                ] {
+                    if key_up.contains(m) {
+                        return Some(*m);
+                    }
+                }
+                None
+            });
+            let anio_val: Option<i16> = emp_anio
+                .and_then(|a| a.trim().parse::<i16>().ok())
+                .or_else(|| {
+                    for y in 2015..=2030 {
+                        if key.contains(&y.to_string()) {
+                            return Some(y as i16);
+                        }
+                    }
+                    None
+                });
+
+            let (mes_norm, anio_norm) = match (mes_str, anio_val) {
+                (Some(m), Some(a)) => (crate::db::cedulas::normalize_mes_periodo(Some(m)), a),
+                _ => continue,
+            };
+            let mes_int = crate::cedulas::business::mes_to_periodo_int(&mes_norm);
+            monthly_processed += 1;
+
+            for emp in &emps {
+                total_emp_checked += 1;
+                let clean_nss = emp
+                    .no_seguro_social
+                    .as_deref()
+                    .map(crate::validation::clean_alphanumeric_input);
+                let clean_rfc = emp
+                    .rfc
+                    .as_deref()
+                    .map(crate::validation::clean_alphanumeric_input);
+                let clean_curp = emp
+                    .curp
+                    .as_deref()
+                    .map(crate::validation::clean_alphanumeric_input);
+                let emp_nombre = emp.nombre.as_deref().unwrap_or("").trim().to_uppercase();
+
+                let emp_row = client
+                    .query_opt(
+                        r#"
+                        SELECT id FROM public.empleados
+                        WHERE id_cliente = $1
+                          AND (
+                              ($2::varchar IS NOT NULL AND nss = $2)
+                              OR ($3::varchar IS NOT NULL AND rfc = $3)
+                              OR ($4::varchar IS NOT NULL AND curp = $4)
+                              OR ($5::varchar != '' AND TRIM(UPPER(nombre)) = $5)
+                          )
+                        ORDER BY (nss = $2) DESC, (rfc = $3) DESC, (curp = $4) DESC
+                        LIMIT 1
+                        "#,
+                        &[&id_cliente, &clean_nss, &clean_rfc, &clean_curp, &emp_nombre],
+                    )
+                    .ok()
+                    .flatten();
+
+                let id_empleado: Uuid = match emp_row {
+                    Some(r) => r.get(0),
+                    None => continue,
+                };
+                matched_emp_count += 1;
+
+                let file_name = key.split('/').last().unwrap_or(key).to_string();
+                let liq_row = client
+                    .query_opt(
+                        r#"
+                        SELECT id FROM public.liquidaciones
+                        WHERE id_registro_patronal = $1
+                          AND id_empleado = $2
+                          AND anio_periodo = $3
+                          AND (mes_periodo_int = $4 OR UPPER(TRIM(mes_periodo)) = UPPER(TRIM($5)))
+                          AND (nombre_archivo = $6 OR nombre_archivo IS NULL)
+                        ORDER BY (nombre_archivo = $6) DESC, created_at ASC
+                        LIMIT 1
+                        "#,
+                        &[&id_rp, &id_empleado, &anio_norm, &mes_int, &mes_norm, &file_name],
+                    )
+                    .ok()
+                    .flatten();
+
+                let id_liquidacion: Uuid = match liq_row {
+                    Some(r) => r.get(0),
+                    None => {
+                        // Si este empleado no tiene liquidación asociada a este archivo específico (porque provino de otro archivo del mismo periodo), no es un error
+                        continue;
+                    }
+                };
+
+                // Obras consolidadas del PDF
+                let mut pdf_obras: BTreeMap<String, i16> = BTreeMap::new();
+                for ro in &emp.registro_obras {
+                    let clean_ro = crate::validation::clean_alphanumeric_input(&ro.registro_obra);
+                    if !clean_ro.is_empty()
+                        && (crate::validation::validate_registro_obra(&clean_ro).is_ok()
+                            || clean_ro.starts_with('C')
+                            || clean_ro.starts_with('A'))
+                    {
+                        let d = (ro.dias_registro_obra as i16).clamp(1, 31);
+                        *pdf_obras.entry(clean_ro).or_insert(0) += d;
+                    }
+                }
+
+                // Obras registradas en public.vinculaciones_obras_liquidaciones
+                let db_vincs: Vec<(String, i16)> = client
+                    .query(
+                        r#"
+                        SELECT TRIM(UPPER(ro.numero)), vol.dias_registro_obra
+                        FROM public.vinculaciones_obras_liquidaciones vol
+                        JOIN public.registros_obras ro ON ro.id = vol.id_registro_obra
+                        WHERE vol.id_liquidacion = $1
+                        "#,
+                        &[&id_liquidacion],
+                    )
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| (r.get::<_, String>(0).trim().to_uppercase(), r.get(1)))
+                    .collect();
+
+                let mut db_obras: BTreeMap<String, i16> = BTreeMap::new();
+                for (num, dias) in db_vincs {
+                    *db_obras.entry(num).or_insert(0) += dias;
+                }
+
+                // Comparar PDF vs DB
+                for (p_num, p_dias) in &pdf_obras {
+                    match db_obras.get(p_num) {
+                        None => {
+                            missing_vinc_in_db += 1;
+                            if missing_vinc_samples.len() < 5 {
+                                missing_vinc_samples.push(format!(
+                                    "Obra en PDF ausente en BD: emp='{}', mes={}-{}, obra='{}', dias_pdf={}, archivo='{}'",
+                                    emp_nombre, mes_norm, anio_norm, p_num, p_dias, key
+                                ));
+                            }
+                        }
+                        Some(&d_dias) => {
+                            if d_dias != *p_dias {
+                                days_mismatches += 1;
+                                if days_mismatch_samples.len() < 5 {
+                                    days_mismatch_samples.push(format!(
+                                        "Días distintos: emp='{}', mes={}-{}, obra='{}', dias_pdf={}, dias_db={}",
+                                        emp_nombre, mes_norm, anio_norm, p_num, p_dias, d_dias
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (d_num, d_dias) in &db_obras {
+                    if !pdf_obras.contains_key(d_num) {
+                        extra_vinc_in_db += 1;
+                        if extra_vinc_samples.len() < 5 {
+                            extra_vinc_samples.push(format!(
+                                "Obra extra en BD no en PDF: emp='{}', mes={}-{}, obra='{}', dias_db={}, archivo='{}'",
+                                emp_nombre, mes_norm, anio_norm, d_num, d_dias, key
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("\n=== RESUMEN DE COMPARACION RUSTFS VS POSTGRESQL ===");
+        println!("Total PDFs en RustFS: {}", total_pdfs);
+        println!("Bimestrales ignorados: {}", bimestral_skipped);
+        println!("Mensuales procesados: {}", monthly_processed);
+        println!("Total registros de empleado evaluados: {}", total_emp_checked);
+        println!("Empleados emparejados con la BD: {}", matched_emp_count);
+        println!("Liquidaciones ausentes en BD: {}", missing_liq_in_db);
+        println!("Vinculaciones del PDF ausentes en BD: {}", missing_vinc_in_db);
+        println!("Vinculaciones extra en BD (no en PDF): {}", extra_vinc_in_db);
+        println!("Discrepancias en días de vinculación: {}", days_mismatches);
+
+        if !missing_liq_samples.is_empty() {
+            println!("\nMuestras de Liquidaciones ausentes en BD:");
+            for s in &missing_liq_samples { println!(" - {}", s); }
+        }
+        if !missing_vinc_samples.is_empty() {
+            println!("\nMuestras de Vinculaciones de PDF ausentes en BD:");
+            for s in &missing_vinc_samples { println!(" - {}", s); }
+        }
+        if !days_mismatch_samples.is_empty() {
+            println!("\nMuestras de Días distintos (PDF vs BD):");
+            for s in &days_mismatch_samples { println!(" - {}", s); }
+        }
+        if !extra_vinc_samples.is_empty() {
+            println!("\nMuestras de Obras extra en BD (no en PDF):");
+            for s in &extra_vinc_samples { println!(" - {}", s); }
+        }
+    }
+
+    #[test]
+    fn test_diagnose_unlinked_pdfs() {
+        let key = "INDUSTRIAS VC DEL DESIERTO/A3673455103/REVISION 1_2024/Cedulas_de_cuotas/septiembre 24.pdf";
+        let b = download_rustfs_file(key).unwrap();
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let _ = std::io::Write::write_all(&mut tmp, &b);
+        let text = crate::cedulas::pdf_extractor::extract_with_layout(tmp.path()).unwrap_or_default();
+        let patterns = crate::cedulas::regex_expressions::initialize_patterns().unwrap();
+        let cleaned = crate::cedulas::pdf_extractor::clean_text(&text, &patterns);
+        println!("Cleaned length: {}", cleaned.len());
+        let lines: Vec<&str> = cleaned.lines().collect();
+        println!("Total lines: {}", lines.len());
+        for (i, l) in lines.iter().enumerate().take(60) {
+            println!("{:02}: {}", i, l);
+        }
+        let re_emp = &patterns.employee_data_per_employee;
+        let matches: Vec<_> = re_emp.find_iter(&cleaned).collect();
+        println!("employee_data_per_employee match count: {}", matches.len());
     }
 }

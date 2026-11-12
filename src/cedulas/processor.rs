@@ -218,11 +218,13 @@ pub fn process_cedulas(
                 }
 
                 let text_lower = raw_text.to_lowercase();
-                let is_sua_cedula = text_lower.contains("cédula de determinación de cuotas")
-                    || text_lower.contains("cedula de determinacion de cuotas")
-                    || text_lower.contains("sistema único de autodeterminación")
-                    || text_lower.contains("sistema unico de autodeterminacion")
-                    || (text_lower.contains("registro patronal") && text_lower.contains("delegación imss"));
+                let is_bimestral = crate::cedulas::ema::is_bimestral_document(&raw_text);
+                let is_sua_cedula = !is_bimestral
+                    && (text_lower.contains("cédula de determinación de cuotas")
+                        || text_lower.contains("cedula de determinacion de cuotas")
+                        || text_lower.contains("sistema único de autodeterminación")
+                        || text_lower.contains("sistema unico de autodeterminacion")
+                        || (text_lower.contains("registro patronal") && text_lower.contains("delegación imss")));
 
                 if !is_sua_cedula {
                     invalid_counter.fetch_add(1, Ordering::Relaxed);
@@ -400,6 +402,27 @@ pub fn process_cedulas(
 
                         if seen_workers.contains(&(key.clone(), dedupe_key.clone())) {
                             duplicate_count += 1;
+                            let new_is_better = !emp.registro_obras.is_empty() || emp.rfc.is_some() || emp.curp.is_some();
+                            if new_is_better {
+                                if let Some(existing_emp) = entry.employees.iter_mut().find(|e| {
+                                    let wid = e
+                                        .no_seguro_social
+                                        .as_deref()
+                                        .filter(|s| !s.trim().is_empty())
+                                        .or(e.curp.as_deref())
+                                        .or(e.nombre.as_deref())
+                                        .unwrap_or("UNKNOWN")
+                                        .trim()
+                                        .to_uppercase();
+                                    let m = e.mes_periodo.as_deref().unwrap_or("");
+                                    let a = e.anio_periodo.as_deref().unwrap_or("");
+                                    format!("{}_{}_{}", wid, m, a) == dedupe_key
+                                }) {
+                                    if existing_emp.registro_obras.is_empty() && (!emp.registro_obras.is_empty() || existing_emp.rfc.is_none()) {
+                                        *existing_emp = emp.clone();
+                                    }
+                                }
+                            }
                             invalid_items.push(UnprocessedCedula {
                                 filename: file_display_name.clone(),
                                 registro_patronal: biz.registro_patronal.clone().unwrap_or_else(|| "N/D".to_string()),

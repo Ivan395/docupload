@@ -589,6 +589,24 @@ pub fn sync_reportes_nominas_for_target(
         AND NOT EXISTS (
             SELECT 1 FROM public.reportes_nominas rn WHERE rn.id_nomina = n.id
         )
+        AND (
+            -- Si no hay obras creadas por el usuario en la revisión correspondiente, incluir todas las nóminas
+            NOT EXISTS (
+                SELECT 1 FROM public.registros_obras ro
+                WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
+                  AND COALESCE(ro.creado_usuario, false) = true
+            )
+            -- Si existen obras creadas por el usuario, incluir sólo las nóminas cuyas fechas se traslapan con el periodo de las obras
+            OR EXISTS (
+                SELECT 1 FROM public.registros_obras ro
+                WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
+                  AND COALESCE(ro.creado_usuario, false) = true
+                  AND (
+                      (n.fecha_final_pago IS NOT NULL AND n.fecha_inicial_pago IS NOT NULL AND n.fecha_final_pago >= ro.fecha_inicio AND n.fecha_inicial_pago <= ro.fecha_fin)
+                      OR (n.fecha_pago IS NOT NULL AND n.fecha_pago BETWEEN ro.fecha_inicio AND ro.fecha_fin)
+                  )
+            )
+        )
     "#;
 
     let inserted_nom = client

@@ -226,12 +226,14 @@ pub fn inspect_cedula_file(path: &Path) -> CedulaFileCardInfo {
             Ok(raw_text) => {
                 let trimmed = raw_text.trim();
                 let lower = raw_text.to_lowercase();
+                let is_bimestral = crate::cedulas::ema::is_bimestral_document(&raw_text);
                 let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
-                let is_sua = lower.contains("cédula de determinación de cuotas")
-                    || lower.contains("cedula de determinacion de cuotas")
-                    || lower.contains("sistema único de autodeterminación")
-                    || lower.contains("sistema unico de autodeterminacion")
-                    || (lower.contains("registro patronal") && lower.contains("delegación imss"));
+                let is_sua = !is_bimestral
+                    && (lower.contains("cédula de determinación de cuotas")
+                        || lower.contains("cedula de determinacion de cuotas")
+                        || lower.contains("sistema único de autodeterminación")
+                        || lower.contains("sistema unico de autodeterminacion")
+                        || (lower.contains("registro patronal") && lower.contains("delegación imss")));
 
                 let pages_count = raw_text.split('\x0c').filter(|p| !p.trim().is_empty()).count();
                 let pages_label = if pages_count > 1 {
@@ -513,7 +515,7 @@ pub fn inspect_cedula_upload_naming(
     let mut cliente_found = None;
     let mut has_workers = false;
 
-    if raw_text.trim().len() >= 50 {
+    if raw_text.trim().len() >= 50 && !crate::cedulas::ema::is_bimestral_document(&raw_text) {
         let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
         if is_ema {
             if let Some(r) = crate::cedulas::ema::extract_ema_rp(&raw_text) {
@@ -714,19 +716,19 @@ pub fn process_and_audit_cedulas(
             }
         };
 
+        let is_bimestral = crate::cedulas::ema::is_bimestral_document(&raw_text);
         let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
         let lower = raw_text.to_lowercase();
-        let is_sua = lower.contains("cédula de determinación de cuotas")
-            || lower.contains("cedula de determinacion de cuotas")
-            || lower.contains("sistema único de autodeterminación")
-            || lower.contains("sistema unico de autodeterminacion")
-            || lower.contains("resumen de liquidación")
-            || lower.contains("resumen de liquidacion")
-            || lower.contains("emisión bimestral")
-            || lower.contains("emision bimestral")
-            || lower.contains("emisión mensual")
-            || lower.contains("emision mensual")
-            || (lower.contains("registro patronal") && (lower.contains("delegación imss") || lower.contains("delegacion imss")));
+        let is_sua = !is_bimestral
+            && (lower.contains("cédula de determinación de cuotas")
+                || lower.contains("cedula de determinacion de cuotas")
+                || lower.contains("sistema único de autodeterminación")
+                || lower.contains("sistema unico de autodeterminacion")
+                || lower.contains("resumen de liquidación")
+                || lower.contains("resumen de liquidacion")
+                || lower.contains("emisión mensual")
+                || lower.contains("emision mensual")
+                || (lower.contains("registro patronal") && (lower.contains("delegación imss") || lower.contains("delegacion imss"))));
 
         if (!is_sua && !is_ema) || raw_text.trim().len() < 50 {
             no_procesados += 1;
@@ -991,6 +993,51 @@ pub fn process_and_audit_cedulas(
         } else {
             return Err(("No se encontraron cédulas SUA válidas con datos de trabajadores para procesar.".to_string(), mismatch_report));
         }
+    }
+
+    // Consolidar trabajadores duplicados en el mismo lote (por ejemplo cuando se sube EMA y SUA del mismo mes),
+    // priorizando siempre el registro SUA que contiene vinculaciones de obra y RFC/CURP.
+    {
+        let mut best_by_key: HashMap<(String, String, u32, String), (usize, usize, bool, bool)> = HashMap::new();
+        for (b_idx, biz) in valid_businesses.iter().enumerate() {
+            let rp_k = biz.registro_patronal.as_deref().map(canonical_reg).unwrap_or_default();
+            for (e_idx, emp) in biz.employees.iter().enumerate() {
+                let wid = emp
+                    .no_seguro_social
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .or(emp.curp.as_deref())
+                    .or(emp.nombre.as_deref())
+                    .unwrap_or("UNKNOWN")
+                    .trim()
+                    .to_uppercase();
+                let m_num = month_to_num(emp.mes_periodo.as_deref().unwrap_or("ENERO"));
+                let anio_s = emp.anio_periodo.as_deref().unwrap_or("2024").trim().to_string();
+                let k = (rp_k.clone(), wid, m_num, anio_s);
+                let has_obras = !emp.registro_obras.is_empty();
+                let has_rfc_curp = emp.rfc.is_some() || emp.curp.is_some();
+                match best_by_key.get(&k) {
+                    None => {
+                        best_by_key.insert(k, (b_idx, e_idx, has_obras, has_rfc_curp));
+                    }
+                    Some(&(_, _, prev_obras, prev_rfc)) => {
+                        if (has_obras && !prev_obras) || (!prev_obras && !prev_rfc && has_rfc_curp) {
+                            best_by_key.insert(k, (b_idx, e_idx, has_obras, has_rfc_curp));
+                        }
+                    }
+                }
+            }
+        }
+        let winners: HashSet<(usize, usize)> = best_by_key.into_values().map(|(b, e, _, _)| (b, e)).collect();
+        for (b_idx, biz) in valid_businesses.iter_mut().enumerate() {
+            let mut e_idx = 0;
+            biz.employees.retain(|_| {
+                let keep = winners.contains(&(b_idx, e_idx));
+                e_idx += 1;
+                keep
+            });
+        }
+        valid_businesses.retain(|b| !b.employees.is_empty());
     }
 
     let mut audit_res = build_cedulas_audit_from_businesses(
@@ -1434,7 +1481,7 @@ pub fn load_cedulas_from_db(
         return Ok(None);
     }
 
-    // 1. Obras registradas por el usuario en el registro patronal / revisión con sus periodos de vigencia (fecha_inicio - fecha_fin)
+    // 1. Obras registradas por el usuario en la revisión con sus periodos de vigencia (fecha_inicio - fecha_fin)
     let obra_rows = client
         .query(
             r#"
@@ -1444,15 +1491,14 @@ pub fn load_cedulas_from_db(
                 fecha_fin,
                 COALESCE(creado_usuario, false) AS creado_usuario
             FROM public.registros_obras 
-            WHERE (id_revision = $1 OR id_registro_patronal = $2)
+            WHERE id_revision = $1
             ORDER BY fecha_inicio ASC;
             "#,
-            &[&target_uuid, &rp_uuid],
+            &[&target_uuid],
         )
         .map_err(|e| format!("Error consultando obras de la revisión: {}", crate::db::schema::format_pg_error(&e)))?;
 
     let mut revision_obras = HashSet::new();
-    let mut active_obra_ranges: Vec<(String, NaiveDate, NaiveDate)> = Vec::new();
     let mut required_periods: std::collections::BTreeSet<(i32, i16)> = std::collections::BTreeSet::new();
     for r in &obra_rows {
         let num: String = r.get(0);
@@ -1466,9 +1512,6 @@ pub fn load_cedulas_from_db(
         if creado_usuario {
             if let Some(ini) = f_ini {
                 let fin = f_fin.unwrap_or(ini).max(ini);
-                if !t.is_empty() {
-                    active_obra_ranges.push((t, ini, fin));
-                }
                 let mut curr_y = ini.year();
                 let mut curr_m = ini.month() as i16;
                 let end_y = fin.year();
@@ -1662,33 +1705,6 @@ pub fn load_cedulas_from_db(
             emp.anio_periodo = anio_per.map(|a| a.to_string());
             if let Some(obras) = vinc_map.remove(&id_liq) {
                 emp.registro_obras = obras;
-            } else if !active_obra_ranges.is_empty() {
-                let anio_val: i32 = anio_per.unwrap_or(2024) as i32;
-                let valid_m = if (1..=12).contains(&resolved_mes_int) {
-                    resolved_mes_int as u32
-                } else {
-                    1
-                };
-                let p_start = NaiveDate::from_ymd_opt(anio_val, valid_m, 1).unwrap_or_default();
-                let p_end = if valid_m == 12 {
-                    NaiveDate::from_ymd_opt(anio_val, 12, 31).unwrap_or_default()
-                } else {
-                    NaiveDate::from_ymd_opt(anio_val, valid_m + 1, 1).and_then(|d| d.pred_opt()).unwrap_or_default()
-                };
-
-                let matching_nums: Vec<String> = active_obra_ranges
-                    .iter()
-                    .filter(|(_, ini, fin)| p_start <= *fin && p_end >= *ini)
-                    .map(|(num, _, _)| num.clone())
-                    .collect();
-
-                if !matching_nums.is_empty() {
-                    let d_str = "30".to_string();
-                    emp.registro_obras = matching_nums
-                        .iter()
-                        .map(|num| RegistroObra::new(num, &d_str))
-                        .collect();
-                }
             }
 
             current_liq_id = Some(id_liq);

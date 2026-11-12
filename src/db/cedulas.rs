@@ -33,14 +33,14 @@ fn truncate_str(s: Option<&str>, max_len: usize) -> Option<String> {
     })
 }
 
-fn normalize_mes_periodo(mes_opt: Option<&str>) -> String {
+pub fn normalize_mes_periodo(mes_opt: Option<&str>) -> String {
     let raw = mes_opt.unwrap_or("ENERO").trim();
     let num = month_to_num(raw);
     let valid_num = if (1..=12).contains(&num) { num } else { 1 };
     month_num_to_name(valid_num).to_string()
 }
 
-fn normalize_anio_periodo(anio_opt: Option<&str>) -> i16 {
+pub fn normalize_anio_periodo(anio_opt: Option<&str>) -> i16 {
     let curr_year = Utc::now().year() as i16;
     if let Some(s) = anio_opt {
         if let Ok(y) = s.trim().parse::<i16>() {
@@ -130,7 +130,16 @@ fn update_cliente_and_rp_from_biz(
     })?;
 
     // 2. Actualizar Cliente
-    let rz_upper = biz.razon_social.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let rz_upper = biz
+        .razon_social
+        .as_deref()
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| {
+            !s.is_empty()
+                && !s.contains("BIMESTRE DE PROCESO")
+                && !s.contains("FECHA DE PROCESO")
+                && !s.contains("PERIODO DE PROCESO")
+        });
 
     // RFC: si se extrajo de la cédula, validar si no entra en conflicto con otro cliente
     let rfc_c = biz.rfc.as_deref().map(|s| {
@@ -1074,14 +1083,64 @@ pub fn save_single_cedula_employee_tx(
     let default_nombre_arch = format!("Cédula SUA {} - {}.pdf", ctx.reg_11, mes_norm);
     let nombre_arch = emp.file_name.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&default_nombre_arch);
 
+    // Pre-calcular Registros de Obra de la cédula antes de deduplicar liquidación (SUA vs EMA)
+    let mut obras_to_process: Vec<(String, i16)> = Vec::new();
+    for ro in &emp.registro_obras {
+        let num_obra = truncate_str(Some(&ro.registro_obra), 15).unwrap_or_default();
+        let clean_num = num_obra.trim();
+        if !clean_num.is_empty() {
+            match crate::validation::validate_registro_obra(clean_num) {
+                Ok(info) => {
+                    obras_to_process.push((info.clean, (ro.dias_registro_obra as i16).clamp(1, 31)));
+                }
+                Err(err) => {
+                    let existing_db_ro = tx.query_opt(
+                        "SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND TRIM(numero) = TRIM($3) LIMIT 1",
+                        &[&ctx.id_revision, &ctx.id_registro_patronal, &clean_num],
+                    ).inspect_err(|e| {
+                        let err_str = crate::db::schema::format_pg_error(e);
+                        crate::app_logger::log_db_error(
+                            "SELECT public.registros_obras fallback check",
+                            &["public.registros_obras"],
+                            "SELECT numero FROM public.registros_obras WHERE ...",
+                            &err_str,
+                        );
+                    })?;
+                    if let Some(row) = existing_db_ro {
+                        let existing_num: String = row.get(0);
+                        obras_to_process.push((existing_num, (ro.dias_registro_obra as i16).clamp(1, 31)));
+                    } else {
+                        log::debug!("Ignorando registro de obra no válido desde cédula '{}': {}", clean_num, err);
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicar obras por número consolidando días
+    let mut dedup_map: std::collections::BTreeMap<String, i16> = std::collections::BTreeMap::new();
+    for (num, dias) in obras_to_process {
+        let entry = dedup_map.entry(num).or_insert(0);
+        *entry = (*entry + dias).clamp(1, 31);
+    }
+    let obras_to_process: Vec<(String, i16)> = dedup_map.into_iter().collect();
+
+    let is_authoritative_sua = !obras_to_process.is_empty() || emp.rfc.is_some() || emp.curp.is_some();
+
     // Evitar duplicados: consultar todas las liquidaciones existentes para este empleado, registro patronal y período
     let existing_liqs = tx.query(
         r#"
-        SELECT id FROM public.liquidaciones
-        WHERE id_registro_patronal = $1
-          AND id_empleado = $2
-          AND (UPPER(TRIM(mes_periodo)) = $3 OR mes_periodo_int = $5)
-          AND anio_periodo = $4
+        SELECT l.id,
+               EXISTS(
+                   SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol
+                   WHERE vol.id_liquidacion = l.id
+               ) AS has_vinc
+        FROM public.liquidaciones l
+        WHERE l.id_registro_patronal = $1
+          AND l.id_empleado = $2
+          AND (UPPER(TRIM(l.mes_periodo)) = $3 OR l.mes_periodo_int = $5)
+          AND l.anio_periodo = $4
+        ORDER BY has_vinc DESC, l.id ASC
         "#,
         &[&ctx.id_registro_patronal, &id_empleado, &mes_norm, &anio_norm, &mes_int],
     ).inspect_err(|e| {
@@ -1089,13 +1148,14 @@ pub fn save_single_cedula_employee_tx(
         crate::app_logger::log_db_error(
             "SELECT existing_liquidaciones",
             &["public.liquidaciones"],
-            "SELECT id FROM public.liquidaciones WHERE id_registro_patronal = $1 AND id_empleado = $2 AND (UPPER(TRIM(mes_periodo)) = $3 OR mes_periodo_int = $5) AND anio_periodo = $4",
+            "SELECT l.id, EXISTS(...) FROM public.liquidaciones l WHERE ...",
             &err_str,
         );
     })?;
 
     // Verificar si alguna liquidación existente coincide 100% de manera idéntica en todos sus renglones de detalle
     let mut matched_liq_id: Option<Uuid> = None;
+    let mut replace_liq_id: Option<Uuid> = None;
     for row in &existing_liqs {
         let ex_id: Uuid = row.get(0);
         let det_rows = tx.query(
@@ -1123,39 +1183,76 @@ pub fn save_single_cedula_employee_tx(
         }
     }
 
-    // Si ya existe la liquidación con detalles idénticos, reutilizar su ID para asegurar vinculaciones maestras
+    if matched_liq_id.is_none() && !existing_liqs.is_empty() {
+        let first_ex_id: Uuid = existing_liqs[0].get(0);
+        if is_authoritative_sua {
+            // Reemplazar liquidación previa (ej. EMA sin obras) por los datos de la cédula SUA
+            replace_liq_id = Some(first_ex_id);
+        } else {
+            // Si el registro entrante es EMA (sin RFC/CURP ni obras) y ya existe liquidación en ese mes, reutilizar sin duplicar
+            matched_liq_id = Some(first_ex_id);
+        }
+    }
+
+    // Si ya existe la liquidación con detalles idénticos (o EMA redundante), reutilizar su ID;
+    // si es una actualización SUA sobre EMA previa, actualizar detalles en el mismo ID;
+    // de lo contrario, insertar nueva liquidación.
     let id_liquidacion = if let Some(ex_id) = matched_liq_id {
+        if !obras_to_process.is_empty() {
+            let _ = tx.execute(
+                "UPDATE public.liquidaciones SET nombre_archivo = COALESCE($2, nombre_archivo) WHERE id = $1",
+                &[&ex_id, &truncate_str(Some(nombre_arch), 350)],
+            );
+        }
         ex_id
     } else {
-        // Si no existe o algo cambió, guardarlo (100% histórico crudo en tablas maestras)
-        let new_id = Uuid::now_v7();
-        tx.execute(
-            r#"
-            INSERT INTO public.liquidaciones (
-                id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7
-            )
-            "#,
-            &[
-                &new_id,
-                &ctx.id_registro_patronal,
-                &id_empleado,
-                &mes_norm,
-                &mes_int,
-                &anio_norm,
-                &truncate_str(Some(nombre_arch), 350),
-            ],
-        ).inspect_err(|e| {
-            let err_str = crate::db::schema::format_pg_error(e);
-            crate::app_logger::log_db_error(
-                "INSERT public.liquidaciones",
-                &["public.liquidaciones"],
-                "INSERT INTO public.liquidaciones (id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                &err_str,
-            );
-        })?;
-        liquidaciones_count += 1;
+        let target_liq_id = if let Some(rep_id) = replace_liq_id {
+            tx.execute(
+                "UPDATE public.liquidaciones SET mes_periodo = $2, mes_periodo_int = $3, nombre_archivo = COALESCE($4, nombre_archivo) WHERE id = $1",
+                &[&rep_id, &mes_norm, &mes_int, &truncate_str(Some(nombre_arch), 350)],
+            )?;
+            tx.execute(
+                "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion = $1",
+                &[&rep_id],
+            )?;
+            if !obras_to_process.is_empty() {
+                tx.execute(
+                    "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
+                    &[&rep_id],
+                )?;
+            }
+            rep_id
+        } else {
+            let new_id = Uuid::now_v7();
+            tx.execute(
+                r#"
+                INSERT INTO public.liquidaciones (
+                    id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7
+                )
+                "#,
+                &[
+                    &new_id,
+                    &ctx.id_registro_patronal,
+                    &id_empleado,
+                    &mes_norm,
+                    &mes_int,
+                    &anio_norm,
+                    &truncate_str(Some(nombre_arch), 350),
+                ],
+            ).inspect_err(|e| {
+                let err_str = crate::db::schema::format_pg_error(e);
+                crate::app_logger::log_db_error(
+                    "INSERT public.liquidaciones",
+                    &["public.liquidaciones"],
+                    "INSERT INTO public.liquidaciones (id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    &err_str,
+                );
+            })?;
+            liquidaciones_count += 1;
+            new_id
+        };
 
         // Detalles Liquidación (100% información cruda sin filtrar en tablas maestras)
         if emp.data_employee.is_empty() {
@@ -1172,7 +1269,7 @@ pub fn save_single_cedula_employee_tx(
                 "#,
                 &[
                     &id_det,
-                    &new_id,
+                    &target_liq_id,
                     &Option::<String>::None,
                     &Option::<NaiveDate>::None,
                     &Some(30i16),
@@ -1222,7 +1319,7 @@ pub fn save_single_cedula_employee_tx(
                     "#,
                     &[
                         &id_det,
-                        &new_id,
+                        &target_liq_id,
                         &truncate_str(de.clave.as_deref(), 17),
                         &de.fecha,
                         &dias_det,
@@ -1259,74 +1356,21 @@ pub fn save_single_cedula_employee_tx(
             }
         }
 
-        new_id
+        target_liq_id
     };
 
-    // Registros de Obra y Vinculaciones Maestras (100% información cruda sin filtrar)
-    let mut obras_to_process: Vec<(String, i16)> = Vec::new();
-    for ro in &emp.registro_obras {
-        let num_obra = truncate_str(Some(&ro.registro_obra), 15).unwrap_or_default();
-        let clean_num = num_obra.trim();
-        if !clean_num.is_empty() {
-            match crate::validation::validate_registro_obra(clean_num) {
-                Ok(info) => {
-                    obras_to_process.push((info.clean, (ro.dias_registro_obra as i16).clamp(1, 31)));
-                }
-                Err(err) => {
-                    let existing_db_ro = tx.query_opt(
-                        "SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND TRIM(numero) = TRIM($3) LIMIT 1",
-                        &[&ctx.id_revision, &ctx.id_registro_patronal, &clean_num],
-                    ).inspect_err(|e| {
-                        let err_str = crate::db::schema::format_pg_error(e);
-                        crate::app_logger::log_db_error(
-                            "SELECT public.registros_obras fallback check",
-                            &["public.registros_obras"],
-                            "SELECT numero FROM public.registros_obras WHERE ...",
-                            &err_str,
-                        );
-                    })?;
-                    if let Some(row) = existing_db_ro {
-                        let existing_num: String = row.get(0);
-                        obras_to_process.push((existing_num, (ro.dias_registro_obra as i16).clamp(1, 31)));
-                    } else {
-                        log::debug!("Ignorando registro de obra no válido desde cédula '{}': {}", clean_num, err);
-                    }
-                }
-            }
-        }
-    }
-    if obras_to_process.is_empty() {
-        if let Some(ref ub) = emp.clave_ubicacion {
-            let num_obra = truncate_str(Some(ub), 15).unwrap_or_default();
-            let clean_num = num_obra.trim();
-            if !clean_num.is_empty() && clean_num != "—" && clean_num != "-" {
-                match crate::validation::validate_registro_obra(clean_num) {
-                    Ok(info) => {
-                        obras_to_process.push((info.clean, 30));
-                    }
-                    Err(err) => {
-                        let existing_db_ro = tx.query_opt(
-                            "SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND TRIM(numero) = TRIM($3) LIMIT 1",
-                            &[&ctx.id_revision, &ctx.id_registro_patronal, &clean_num],
-                        ).inspect_err(|e| {
-                            let err_str = crate::db::schema::format_pg_error(e);
-                            crate::app_logger::log_db_error(
-                                "SELECT public.registros_obras fallback check ub",
-                                &["public.registros_obras"],
-                                "SELECT numero FROM public.registros_obras WHERE ...",
-                                &err_str,
-                            );
-                        })?;
-                        if let Some(row) = existing_db_ro {
-                            let existing_num: String = row.get(0);
-                            obras_to_process.push((existing_num, 30));
-                        } else {
-                            log::debug!("Ignorando clave_ubicacion como registro de obra porque no cumple verificación '{}': {}", clean_num, err);
-                        }
-                    }
-                }
-            }
-        }
+    if !obras_to_process.is_empty() {
+        let valid_ro_numbers: Vec<String> = obras_to_process.iter().map(|(num, _)| num.clone()).collect();
+        let _ = tx.execute(
+            r#"
+            DELETE FROM public.vinculaciones_obras_liquidaciones vol
+            USING public.registros_obras ro
+            WHERE vol.id_registro_obra = ro.id
+              AND vol.id_liquidacion = $1
+              AND TRIM(UPPER(ro.numero)) != ALL($2)
+            "#,
+            &[&id_liquidacion, &valid_ro_numbers],
+        );
     }
 
     for (num_obra, dias_vinc) in obras_to_process {
@@ -1352,8 +1396,14 @@ pub fn save_single_cedula_employee_tx(
                 uuidv7(), $1, $2, $3, 'REGISTRO DE OBRA CÉDULA', $4, $5, false
             )
             ON CONFLICT (id_revision, numero) DO UPDATE SET
-                fecha_inicio = LEAST(public.registros_obras.fecha_inicio, EXCLUDED.fecha_inicio),
-                fecha_fin = GREATEST(public.registros_obras.fecha_fin, EXCLUDED.fecha_fin)
+                fecha_inicio = CASE
+                    WHEN COALESCE(public.registros_obras.creado_usuario, false) THEN public.registros_obras.fecha_inicio
+                    ELSE LEAST(public.registros_obras.fecha_inicio, EXCLUDED.fecha_inicio)
+                END,
+                fecha_fin = CASE
+                    WHEN COALESCE(public.registros_obras.creado_usuario, false) THEN public.registros_obras.fecha_fin
+                    ELSE GREATEST(public.registros_obras.fecha_fin, EXCLUDED.fecha_fin)
+                END
             RETURNING id, (xmax = 0) AS is_inserted
             "#,
             &[&ctx.id_revision, &ctx.id_registro_patronal, &num_obra, &fecha_inicio, &fecha_fin],
@@ -1373,21 +1423,33 @@ pub fn save_single_cedula_employee_tx(
             registros_obras_count += 1;
         }
 
-        // Evitar duplicar vinculación maestra obra - liquidación
+        // Evitar duplicar vinculación maestra obra - liquidación; actualizar días exactos si ya existía
         let existing_vinc = tx.query_opt(
-            "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE id_registro_obra = $1 AND id_liquidacion = $2 LIMIT 1",
-            &[&id_registro_obra, &id_liquidacion],
+            r#"
+            SELECT vol.id 
+            FROM public.vinculaciones_obras_liquidaciones vol
+            JOIN public.registros_obras ro ON ro.id = vol.id_registro_obra
+            WHERE vol.id_liquidacion = $1 AND TRIM(UPPER(ro.numero)) = TRIM(UPPER($2))
+            LIMIT 1
+            "#,
+            &[&id_liquidacion, &num_obra],
         ).inspect_err(|e| {
             let err_str = crate::db::schema::format_pg_error(e);
             crate::app_logger::log_db_error(
                 "SELECT public.vinculaciones_obras_liquidaciones",
                 &["public.vinculaciones_obras_liquidaciones"],
-                "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE id_registro_obra = $1 AND id_liquidacion = $2",
+                "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE vol.id_liquidacion = $1 AND ro.numero = $2",
                 &err_str,
             );
         })?;
 
-        if existing_vinc.is_none() {
+        if let Some(v_row) = existing_vinc {
+            let id_vinc_existing: Uuid = v_row.get(0);
+            tx.execute(
+                "UPDATE public.vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
+                &[&id_vinc_existing, &id_registro_obra, &dias_vinc],
+            )?;
+        } else {
             let id_vinc = Uuid::now_v7();
             tx.execute(
                 r#"

@@ -2,20 +2,38 @@ use chrono::NaiveDate;
 use crate::cedulas::business::{clean_actividad, clean_domicilio, clean_entidad, month_num_to_name, Business};
 use crate::cedulas::employees::{is_curp_candidate, DataEmployee, Employee};
 
-/// Determina si el texto extraído de un PDF corresponde al formato oficial IMSS
-/// de Propuesta de Cédula de Determinación de Cuotas (EMA / EMI-01 o EBA / EBI-01).
-pub fn is_ema_document(text: &str) -> bool {
+/// Determina si el texto extraído de un PDF corresponde a una cédula bimestral
+/// (SUA Bimestral o EBA / EBI-01 de RCV e Infonavit), la cual no debe mezclarse
+/// con las liquidaciones mensuales de cuotas IMSS.
+pub fn is_bimestral_document(text: &str) -> bool {
     let lower = text.to_lowercase();
+    lower.contains("bimestre de proceso")
+        || lower.contains("aportaciones y amortizaciones")
+        || lower.contains("emisión bimestral anticipada")
+        || lower.contains("emision bimestral anticipada")
+        || lower.contains("ebi - 01")
+        || lower.contains("ebi-01")
+        || lower.contains("cuotas rcv")
+}
+
+/// Determina si el texto extraído de un PDF corresponde al formato oficial IMSS
+/// de Propuesta de Cédula de Determinación de Cuotas Mensual (EMA / EMI-01).
+pub fn is_ema_document(text: &str) -> bool {
+    if is_bimestral_document(text) {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    if lower.contains("sistema único de autodeterminación")
+        || lower.contains("sistema unico de autodeterminacion")
+    {
+        return false;
+    }
     lower.contains("propuesta de cédula de determinación de cuotas")
         || lower.contains("propuesta de cedula de determinacion de cuotas")
         || lower.contains("propuesta de cédula de determinacion")
         || lower.contains("propuesta de cedula de determinacion")
         || lower.contains("emi - 01")
         || lower.contains("emi-01")
-        || lower.contains("ebi - 01")
-        || lower.contains("ebi-01")
-        || lower.contains("emisión bimestral anticipada")
-        || lower.contains("emision bimestral anticipada")
         || lower.contains("emisión mensual anticipada")
         || lower.contains("emision mensual anticipada")
         || (lower.contains("propuesta") && lower.contains("imss") && lower.contains("cuotas"))
@@ -23,8 +41,6 @@ pub fn is_ema_document(text: &str) -> bool {
             lower.contains("enfermedades y maternidad")
             || lower.contains("retiro, cesantía")
             || lower.contains("retiro, cesantia")
-            || lower.contains("retiro")
-            || lower.contains("rcv")
         ))
 }
 
@@ -223,21 +239,18 @@ fn parse_ema_movement_line(line: &str, mes: &str, anio: &str) -> Option<DataEmpl
     let num_tokens = &tokens[num_start_idx..];
     let prefix_tokens = &tokens[..num_start_idx];
 
-    let mut clave: Option<String> = None;
-    let mut fecha: Option<NaiveDate> = None;
-
-    if prefix_tokens.len() == 1 {
-        let t0 = prefix_tokens[0].trim().to_uppercase();
-        if t0.chars().all(|c| c.is_alphabetic()) {
-            clave = Some(t0);
-        }
+    let (raw_clave, raw_fecha) = if prefix_tokens.len() == 1 {
+        (Some(prefix_tokens[0]), None)
     } else if prefix_tokens.len() == 2 {
-        clave = Some(prefix_tokens[0].trim().to_uppercase());
-        fecha = parse_ema_date(prefix_tokens[1]);
+        (Some(prefix_tokens[0]), parse_ema_date(prefix_tokens[1]))
     } else if prefix_tokens.len() >= 3 {
-        clave = Some(prefix_tokens[1].trim().to_uppercase());
-        fecha = parse_ema_date(prefix_tokens[2]);
-    }
+        (Some(prefix_tokens[1]), parse_ema_date(prefix_tokens[2]))
+    } else {
+        (None, None)
+    };
+
+    let clave = raw_clave.and_then(crate::cedulas::employees::normalize_movement_clave);
+    let fecha = if clave.is_some() { raw_fecha } else { None };
 
     let (dias, sdi, cf, exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr, gps, patronal, obrera, subtotal) = match n_nums {
         14 => {
@@ -695,7 +708,7 @@ MOVIMIENTOS CUOTAS ENFERMEDADES Y MATERNIDAD
         let w2 = &emps[1];
         assert_eq!(w2.nombre.as_deref(), Some("ALVARADO RODRIGUEZ ANA DANIELA"));
         assert_eq!(w2.data_employee.len(), 2);
-        assert_eq!(w2.data_employee[0].clave.as_deref(), Some("MS"));
+        assert_eq!(w2.data_employee[0].clave.as_deref(), Some("m/s"));
         assert_eq!(w2.data_employee[0].dias, Some(30.0));
         assert_eq!(w2.data_employee[0].subtotal, Some(1835.07));
         assert_eq!(w2.data_employee[1].dias, Some(1.0));
@@ -705,7 +718,7 @@ MOVIMIENTOS CUOTAS ENFERMEDADES Y MATERNIDAD
         let w3 = &emps[2];
         assert_eq!(w3.nombre.as_deref(), Some("MERCADO GARCIA ZEFERINO"));
         assert_eq!(w3.data_employee.len(), 1);
-        assert_eq!(w3.data_employee[0].clave.as_deref(), Some("B"));
+        assert_eq!(w3.data_employee[0].clave.as_deref(), Some("baja"));
         assert_eq!(w3.data_employee[0].dias, Some(0.0));
     }
 }

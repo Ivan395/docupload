@@ -7057,6 +7057,28 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Reconciliación en segundo plano de vinculaciones y limpieza de liquidaciones desde RustFS
+    if let Some(pool_rec) = db_pool.clone() {
+        std::thread::Builder::new()
+            .name("rustfs_reconcile".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if let Ok(mut client) = pool_rec.get() {
+                    log::info!("Iniciando limpieza y normalización de claves en liquidaciones...");
+                    match crate::rustfs::clean_and_repair_detalles_liquidaciones_database(&mut client) {
+                        Ok(stats) => log::info!("Limpieza de claves en liquidaciones completada: {:?}", stats),
+                        Err(e) => log::warn!("Limpieza de claves en liquidaciones en segundo plano: {}", e),
+                    }
+                    log::info!("Iniciando reconciliación de vinculaciones de liquidaciones desde RustFS...");
+                    match crate::rustfs::reconcile_all_liquidaciones_vinculaciones_from_rustfs(&mut client) {
+                        Ok(stats) => log::info!("Reconciliación de liquidaciones completada con éxito: {:?}", stats),
+                        Err(e) => log::warn!("Reconciliación de liquidaciones en segundo plano: {}", e),
+                    }
+                }
+            })
+            .ok();
+    }
+
     // ==========================================
     // SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS
     // ==========================================

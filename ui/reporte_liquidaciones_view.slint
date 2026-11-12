@@ -1976,7 +1976,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                     Rectangle {
                         x: table_scroll.content-x;
-                        width: 3445px;
+                        width: 3405px;
                         height: 40px;
 
                         HorizontalLayout {
@@ -4581,21 +4581,21 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                 padding-right: 10px;
                                 spacing: 8px;
                                 cross-axis-alignment: center;
-                                Text { text: "Trabajador (Nombre / NSS)"; font-size: 11px; font-weight: 800; color: #334155; horizontal-stretch: 3; overflow: elide; }
-                                Text { text: "Incidencias"; font-size: 11px; font-weight: 800; color: #b45309; width: 135px; horizontal-alignment: center; }
-                                Text { text: "Periodo"; font-size: 11px; font-weight: 800; color: #334155; horizontal-stretch: 1; horizontal-alignment: center; }
-                                Text { text: "Obra Actual"; font-size: 11px; font-weight: 800; color: #334155; horizontal-stretch: 2; overflow: elide; }
-                                Text { text: "D. Cédula"; font-size: 11px; font-weight: 800; color: #334155; width: 58px; horizontal-alignment: center; }
-                                Text { text: "D. Obra (Editable)"; font-size: 11px; font-weight: 800; color: #1e40af; width: 80px; horizontal-alignment: center; }
-                                Text { text: "Tope Máx"; font-size: 11px; font-weight: 800; color: #047857; width: 66px; horizontal-alignment: center; }
+                                Text { text: "Trabajador (Nombre / NSS)"; font-size: 11px; font-weight: 800; color: #334155; width: 240px; overflow: elide; }
+                                Text { text: "Incidencias"; font-size: 11px; font-weight: 800; color: #b45309; width: 120px; horizontal-alignment: center; }
+                                Text { text: "Periodo"; font-size: 11px; font-weight: 800; color: #334155; width: 105px; horizontal-alignment: center; }
+                                Text { text: "Obra Actual"; font-size: 11px; font-weight: 800; color: #334155; width: 175px; overflow: elide; }
+                                Text { text: "D. Cédula"; font-size: 11px; font-weight: 800; color: #334155; width: 65px; horizontal-alignment: center; }
+                                Text { text: "D. Obra (Edit.)"; font-size: 11px; font-weight: 800; color: #1e40af; width: 90px; horizontal-alignment: center; }
+                                Text { text: "Tope Máx"; font-size: 11px; font-weight: 800; color: #047857; width: 63px; horizontal-alignment: center; }
                             }
                         }
 
                         // Filas scrolleables con Padding Inferior Generoso (evita corte en el fondo)
                         ScrollView {
                             VerticalLayout {
-                                padding-left: 4px;
-                                padding-right: 4px;
+                                padding-left: 0px;
+                                padding-right: 0px;
                                 padding-top: 4px;
                                 padding-bottom: 50px;
                                 spacing: 3px;
@@ -4606,26 +4606,27 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                     background: Math.mod(idx, 2) == 0 ? #ffffff : #f1f5f9;
 
                                     HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
+                                        padding-left: 10px;
+                                        padding-right: 10px;
                                         spacing: 8px;
                                         cross-axis-alignment: center;
 
                                         // Nombre y NSS
                                         HorizontalLayout {
-                                            horizontal-stretch: 3;
-                                            spacing: 6px;
+                                            width: 240px;
+                                            spacing: 4px;
                                             cross-axis-alignment: center;
                                             Text {
                                                 text: worker.nombre;
-                                                font-size: 11.5px;
+                                                font-size: 11px;
                                                 font-weight: 700;
                                                 color: #0f172a;
                                                 overflow: elide;
+                                                horizontal-stretch: 1;
                                             }
                                             if worker.nss != "" : Text {
                                                 text: "(" + worker.nss + ")";
-                                                font-size: 10.5px;
+                                                font-size: 10px;
                                                 color: #64748b;
                                                 overflow: elide;
                                             }
@@ -4633,7 +4634,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                                         // Incidencias (LIC, INC, AUS)
                                         Rectangle {
-                                            width: 135px;
+                                            width: 120px;
                                             height: 22px;
                                             border-radius: 4px;
                                             background: worker.incidencias_str != "Sin incidencias" ? #fffbeb : #f8fafc;
@@ -4641,8 +4642,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             border-color: worker.incidencias_str != "Sin incidencias" ? #fde68a : #e2e8f0;
 
                                             HorizontalLayout {
-                                                padding-left: 6px;
-                                                padding-right: 6px;
+                                                padding-left: 4px;
+                                                padding-right: 4px;
                                                 alignment: center;
                                                 cross-axis-alignment: center;
                                                 Text {
@@ -4662,7 +4663,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             font-size: 11px;
                                             font-weight: 600;
                                             color: #475569;
-                                            horizontal-stretch: 1;
+                                            width: 105px;
                                             horizontal-alignment: center;
                                         }
 
@@ -4672,7 +4673,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             font-size: 11px;
                                             font-weight: 600;
                                             color: #1e40af;
-                                            horizontal-stretch: 2;
+                                            width: 175px;
                                             overflow: elide;
                                         }
 
@@ -4682,13 +4683,13 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             font-size: 11.5px;
                                             font-weight: 700;
                                             color: #334155;
-                                            width: 58px;
+                                            width: 65px;
                                             horizontal-alignment: center;
                                         }
 
                                         // Días Obra (Editable Inline)
                                         Rectangle {
-                                            width: 80px;
+                                            width: 90px;
                                             height: 25px;
                                             border-radius: 4px;
                                             background: worker.has_error ? #fef2f2 : #ffffff;
@@ -4696,8 +4697,8 @@ export component ReporteLiquidacionesView inherits Rectangle {
                                             border-color: worker.has_error ? #ef4444 : #93c5fd;
 
                                             HorizontalLayout {
-                                                padding-left: 4px;
-                                                padding-right: 4px;
+                                                padding-left: 2px;
+                                                padding-right: 2px;
                                                 alignment: center;
                                                 cross-axis-alignment: center;
 
@@ -4714,7 +4715,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
 
                                         // Tope Máx Dinámico
                                         Rectangle {
-                                            width: 66px;
+                                            width: 63px;
                                             height: 22px;
                                             border-radius: 4px;
                                             background: worker.tope_max == 0 ? #fef2f2 : #ecfdf5;

@@ -41,6 +41,19 @@ pub struct DataEmployee {
     pub subtotal: Option<f64>,
 }
 
+pub fn normalize_movement_clave(raw: &str) -> Option<String> {
+    let s = raw.trim().to_lowercase();
+    match s.as_str() {
+        "baja" | "b" => Some("baja".to_string()),
+        "alta" | "a" => Some("alta".to_string()),
+        "reing" | "rein" | "reingreso" | "r" => Some("reing".to_string()),
+        "ms" | "m/s" | "m.s" | "ism" | "mod" | "mod.sal" => Some("m/s".to_string()),
+        "inc" | "incap" | "incapacidad" => Some("inc".to_string()),
+        "aus" | "ausentismo" => Some("aus".to_string()),
+        _ => None,
+    }
+}
+
 impl DataEmployee {
     pub fn set_field(&mut self, field_name: &str, raw_value: &str) {
         let trimmed = raw_value.trim();
@@ -54,7 +67,7 @@ impl DataEmployee {
                 self.mes_periodo = Some(trimmed.to_string());
             }
             "anio_periodo" => self.anio_periodo = Some(trimmed.to_string()),
-            "clave" => self.clave = Some(trimmed.to_string()),
+            "clave" => self.clave = normalize_movement_clave(trimmed),
             "fecha" => self.fecha = parse_date(trimmed),
             "dias" => self.dias = parse_float(trimmed),
             "sdi" => self.sdi = parse_float(trimmed),
@@ -697,19 +710,28 @@ impl Employee {
             if let Some(m) = caps.name("fecha") {
                 de.set_field("fecha", m.as_str());
             }
+            if de.clave.is_none() {
+                de.fecha = None;
+            }
 
             self.data_employee.push(de);
         }
 
         for caps in patterns.employee_fechas.captures_iter(data).flatten() {
-            let mut de = get_base_de();
-            if let Some(m) = caps.name("clave") {
-                de.set_field("clave", m.as_str());
+            let m_clave = caps.name("clave").and_then(|m| normalize_movement_clave(m.as_str()));
+            let m_fecha = caps.name("fecha").and_then(|m| parse_date(m.as_str()));
+            if m_clave.is_some() {
+                let already_exists = self.data_employee.iter().any(|de| {
+                    (de.fecha.is_some() && de.fecha == m_fecha)
+                        || (de.clave.is_some() && de.clave == m_clave && de.fecha == m_fecha)
+                });
+                if !already_exists {
+                    let mut de = get_base_de();
+                    de.clave = m_clave;
+                    de.fecha = m_fecha;
+                    self.data_employee.push(de);
+                }
             }
-            if let Some(m) = caps.name("fecha") {
-                de.set_field("fecha", m.as_str());
-            }
-            self.data_employee.push(de);
         }
 
         for caps in patterns
@@ -729,6 +751,24 @@ impl Employee {
                 }
             } else {
                 self.registro_obras.push(ro);
+            }
+        }
+
+        if !self.registro_obras.is_empty() {
+            let total_dias_emp: f64 = self
+                .data_employee
+                .iter()
+                .filter_map(|de| de.dias)
+                .sum();
+            let fallback_dias: i32 = if total_dias_emp > 0.0 {
+                (total_dias_emp.round() as i32).clamp(1, 31)
+            } else {
+                30
+            };
+            for ro in &mut self.registro_obras {
+                if ro.dias_registro_obra <= 0 {
+                    ro.dias_registro_obra = fallback_dias;
+                }
             }
         }
     }

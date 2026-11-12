@@ -2182,13 +2182,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                         // Vincular por UUID o por número de registro patronal de obra
                         let maybe_sib = sibling_rows.iter().find(|s| {
-                            if let Some(s_oid) = s.id_registro_obra {
-                                s_oid == o.id
-                            } else if !s.obra_numero.trim().is_empty() {
-                                s.obra_numero.trim().eq_ignore_ascii_case(o.numero.trim())
-                            } else {
-                                false
-                            }
+                            s.id_registro_obra == Some(o.id)
+                                || (!s.obra_numero.trim().is_empty() && s.obra_numero.trim().eq_ignore_ascii_case(o.numero.trim()))
                         });
                         let selected = maybe_sib.is_some();
                         let d_obra = maybe_sib.map(|s| s.dias_obra as i32).unwrap_or(0);
@@ -4164,6 +4159,31 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                 let batch_workers = compute_batch_workers_list(&state, "__KEEP__", None);
                 let count = batch_workers.len() as i32;
+
+                // Identificar qué obras ya tienen asignadas los empleados/filas seleccionadas (incluyendo hermanos del mismo mes)
+                let mut currently_assigned_obra_ids: HashSet<Uuid> = HashSet::new();
+                let mut currently_assigned_obra_nums: HashSet<String> = HashSet::new();
+
+                for sel_id in &state.selected_ids {
+                    if let Some(r) = state.all_rows.iter().find(|x| x.id_reporte_liq == *sel_id) {
+                        if let Some(oid) = r.id_registro_obra {
+                            currently_assigned_obra_ids.insert(oid);
+                        }
+                        if !r.obra_numero.trim().is_empty() {
+                            currently_assigned_obra_nums.insert(r.obra_numero.trim().to_uppercase());
+                        }
+                        // Filas hermanas del mismo trabajador en este periodo
+                        for sib in state.all_rows.iter().filter(|x| x.id_parent_reporte_liq == r.id_parent_reporte_liq) {
+                            if let Some(oid) = sib.id_registro_obra {
+                                currently_assigned_obra_ids.insert(oid);
+                            }
+                            if !sib.obra_numero.trim().is_empty() {
+                                currently_assigned_obra_nums.insert(sib.obra_numero.trim().to_uppercase());
+                            }
+                        }
+                    }
+                }
+
                 let mut obras_vec = Vec::with_capacity(state.obras_options.len());
                 let mut multi_obras_vec = Vec::with_capacity(state.obras_options.len());
                 for o in &state.obras_options {
@@ -4190,29 +4210,35 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     } else {
                         30
                     };
+
+                    let is_assigned = currently_assigned_obra_ids.contains(&o.id)
+                        || currently_assigned_obra_nums.contains(&o.numero.trim().to_uppercase());
+
                     multi_obras_vec.push(ReporteBatchObraItem {
                         id: o.id.to_string().into(),
                         numero: o.numero.clone().into(),
                         label: o.label.clone().into(),
                         vigencia_str: vigencia_str.into(),
                         dias_tope_est: tope_est as i32,
-                        selected: false,
+                        selected: is_assigned,
                     });
                 }
+
+                let sel_count = multi_obras_vec.iter().filter(|x| x.selected).count() as i32;
 
                 let app_data = ui.global::<AppData>();
                 app_data.set_reporte_batch_edit_worker_count(count);
                 app_data.set_reporte_batch_edit_workers(ModelRc::new(VecModel::from(batch_workers)));
                 app_data.set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
                 app_data.set_reporte_batch_edit_obras_multiselect(ModelRc::new(VecModel::from(multi_obras_vec)));
-                app_data.set_reporte_batch_edit_selected_obras_count(0);
-                app_data.set_reporte_batch_edit_multi_obra_enabled(false);
+                app_data.set_reporte_batch_edit_selected_obras_count(sel_count);
+                app_data.set_reporte_batch_edit_multi_obra_enabled(sel_count > 1);
                 app_data.set_reporte_batch_edit_selected_obra_id("__KEEP__".into());
                 app_data.set_reporte_batch_edit_selected_obra_label("🔄 Mantener Obras Actuales (Sin Cambios)".into());
                 app_data.set_reporte_batch_edit_search_query("🔄 Mantener Obras Actuales (Sin Cambios)".into());
                 app_data.set_reporte_batch_edit_dias_cedula_val("".into());
                 app_data.set_reporte_batch_edit_dias_obra_val("".into());
-                app_data.set_reporte_batch_edit_change_obra(false);
+                app_data.set_reporte_batch_edit_change_obra(sel_count > 0);
                 app_data.set_reporte_batch_edit_change_dias_cedula(false);
                 app_data.set_reporte_batch_edit_change_dias_obra(false);
                 app_data.set_reporte_batch_edit_dropdown_open(false);
@@ -6985,6 +7011,167 @@ mod tests {
         assert_eq!(workers_in_modal.len(), 1, "Solo la fila activa debe ser modificable en el modal masivo");
         assert_eq!(workers_in_modal[0].id_reporte_liq, active_id);
         assert_eq!(workers_in_modal[0].dias_cedula, 17);
+    }
+
+    #[test]
+    fn test_batch_modal_preselects_assigned_obras() {
+        let parent_id = Uuid::now_v7();
+        let row1_id = Uuid::now_v7();
+        let row2_id = Uuid::now_v7();
+        let obra1_id = Uuid::now_v7();
+        let obra2_id = Uuid::now_v7();
+        let obra3_id = Uuid::now_v7();
+
+        let obra1 = crate::db::reporte_liquidaciones::ObraOptionDb {
+            id: obra1_id,
+            numero: "C0995849".to_string(),
+            tipo_obra: "CONSTRUCCION".to_string(),
+            fecha_inicio: chrono::NaiveDate::from_ymd_opt(2024, 10, 14),
+            fecha_fin: chrono::NaiveDate::from_ymd_opt(2024, 11, 15),
+            label: "C0995849 - CONSTRUCCION".to_string(),
+            creado_usuario: true,
+            monto: 350114.0,
+        };
+        let obra2 = crate::db::reporte_liquidaciones::ObraOptionDb {
+            id: obra2_id,
+            numero: "C0995853".to_string(),
+            tipo_obra: "REGISTRO DE OBRA CÉDULA".to_string(),
+            fecha_inicio: chrono::NaiveDate::from_ymd_opt(2024, 10, 1),
+            fecha_fin: chrono::NaiveDate::from_ymd_opt(2024, 11, 30),
+            label: "C0995853 - REGISTRO DE OBRA CÉDULA".to_string(),
+            creado_usuario: false,
+            monto: 0.0,
+        };
+        let obra3 = crate::db::reporte_liquidaciones::ObraOptionDb {
+            id: obra3_id,
+            numero: "C0995860".to_string(),
+            tipo_obra: "REGISTRO DE OBRA CÉDULA".to_string(),
+            fecha_inicio: chrono::NaiveDate::from_ymd_opt(2024, 10, 1),
+            fecha_fin: chrono::NaiveDate::from_ymd_opt(2024, 12, 31),
+            label: "C0995860 - REGISTRO DE OBRA CÉDULA".to_string(),
+            creado_usuario: false,
+            monto: 0.0,
+        };
+
+        let obras_options = vec![obra1.clone(), obra2.clone(), obra3.clone()];
+
+        // Empleado con 2 registros desdoblados vinculados a obra1 y obra2
+        let row1 = ReporteLiquidacionRowDb {
+            id_reporte_liq: row1_id,
+            id_parent_reporte_liq: parent_id,
+            id_liquidacion: Uuid::now_v7(),
+            id_revision: Uuid::now_v7(),
+            id_empleado: Uuid::now_v7(),
+            nombre_trabajador: "BERMUDEZ RAMIREZ MIGUEL ANGEL".to_string(),
+            rfc: "BERM790127CH1".to_string(),
+            curp: "BERM790127HNLRMG08".to_string(),
+            nss: "43947909248".to_string(),
+            pensionado: String::new(),
+            registro_patronal: "A3415636101".to_string(),
+            mes_periodo: "OCTUBRE".to_string(),
+            mes_periodo_int: 10,
+            anio_periodo: 2024,
+            periodo_str: "OCTUBRE / 2024".to_string(),
+            dias_cedula: 31,
+            id_registro_obra: Some(obra1_id),
+            obra_numero: "C0995849".to_string(),
+            obra_label: "C0995849 - CONSTRUCCION".to_string(),
+            dias_obra: 18,
+            obra_creado_usuario: true,
+            clave: String::new(),
+            fecha: None,
+            fecha_str: String::new(),
+            sdi: 261.20,
+            lic: 0.0,
+            inc: 0.0,
+            aus: 0.0,
+            cf: 350.0,
+            exc_pat: 0.0,
+            exc_obr: 0.0,
+            pd_pat: 0.0,
+            pd_obr: 0.0,
+            gmp_pat: 0.0,
+            gmp_obr: 0.0,
+            rt: 0.0,
+            iv_pat: 0.0,
+            iv_obr: 0.0,
+            gps: 0.0,
+            patronal: 0.0,
+            obrera: 0.0,
+            subtotal: 931.77,
+            cf_orig: 350.0,
+            exc_pat_orig: 0.0,
+            exc_obr_orig: 0.0,
+            pd_pat_orig: 0.0,
+            pd_obr_orig: 0.0,
+            gmp_pat_orig: 0.0,
+            gmp_obr_orig: 0.0,
+            rt_orig: 0.0,
+            iv_pat_orig: 0.0,
+            iv_obr_orig: 0.0,
+            gps_orig: 0.0,
+            patronal_orig: 0.0,
+            obrera_orig: 0.0,
+            subtotal_orig: 1604.71,
+            tiene_inconsistencia: false,
+            observacion_validacion: String::new(),
+        };
+
+        let mut row2 = row1.clone();
+        row2.id_reporte_liq = row2_id;
+        row2.id_registro_obra = Some(obra2_id);
+        row2.obra_numero = "C0995853".to_string();
+        row2.obra_label = "C0995853 - REGISTRO DE OBRA CÉDULA".to_string();
+        row2.dias_obra = 13;
+        row2.obra_creado_usuario = false;
+        row2.subtotal = 672.94;
+
+        let all_rows = vec![row1, row2];
+        let selected_ids: HashSet<Uuid> = [row1_id, row2_id].into_iter().collect();
+
+        // Lógica de detección de obras asignadas
+        let mut currently_assigned_obra_ids: HashSet<Uuid> = HashSet::new();
+        let mut currently_assigned_obra_nums: HashSet<String> = HashSet::new();
+
+        for sel_id in &selected_ids {
+            if let Some(r) = all_rows.iter().find(|x| x.id_reporte_liq == *sel_id) {
+                if let Some(oid) = r.id_registro_obra {
+                    currently_assigned_obra_ids.insert(oid);
+                }
+                if !r.obra_numero.trim().is_empty() {
+                    currently_assigned_obra_nums.insert(r.obra_numero.trim().to_uppercase());
+                }
+                for sib in all_rows.iter().filter(|x| x.id_parent_reporte_liq == r.id_parent_reporte_liq) {
+                    if let Some(oid) = sib.id_registro_obra {
+                        currently_assigned_obra_ids.insert(oid);
+                    }
+                    if !sib.obra_numero.trim().is_empty() {
+                        currently_assigned_obra_nums.insert(sib.obra_numero.trim().to_uppercase());
+                    }
+                }
+            }
+        }
+
+        let mut preselected_count = 0;
+        let mut is_obra1_selected = false;
+        let mut is_obra2_selected = false;
+        let mut is_obra3_selected = false;
+
+        for o in &obras_options {
+            let is_assigned = currently_assigned_obra_ids.contains(&o.id)
+                || currently_assigned_obra_nums.contains(&o.numero.trim().to_uppercase());
+            if is_assigned {
+                preselected_count += 1;
+            }
+            if o.id == obra1_id { is_obra1_selected = is_assigned; }
+            if o.id == obra2_id { is_obra2_selected = is_assigned; }
+            if o.id == obra3_id { is_obra3_selected = is_assigned; }
+        }
+
+        assert_eq!(preselected_count, 2, "Deben preseleccionarse exactamente las 2 obras vinculadas");
+        assert!(is_obra1_selected, "C0995849 debe estar seleccionada");
+        assert!(is_obra2_selected, "C0995853 debe estar seleccionada");
+        assert!(!is_obra3_selected, "C0995860 NO debe estar seleccionada");
     }
 }
 
