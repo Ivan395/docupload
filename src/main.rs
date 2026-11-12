@@ -2271,8 +2271,15 @@ fn handle_cedulas_upload_and_inspect(
                     app_data.set_cedulas_view_progress_text("".into());
                     app_data.set_progress_percentage(0.0);
                 } else if overwritten_count > 0 {
-                    // Sin confirmación no se procesa nada: el worker se lanza desde el modal
+                    // Sin confirmación no se procesa nada: el worker se lanza desde el modal.
+                    // Se apaga el indicador de "Procesando" (su capa z:9999 taparía el modal);
+                    // spawn_cedulas_view_worker lo vuelve a encender al elegir Fusionar/Reemplazar.
                     let app_data = ui.global::<AppData>();
+                    app_data.set_cedulas_view_is_processing(false);
+                    app_data.set_is_processing(false);
+                    app_data.set_cedulas_view_progress_fraction(0.0);
+                    app_data.set_cedulas_view_progress_text("".into());
+                    app_data.set_progress_percentage(0.0);
                     app_data.set_cedulas_overwrite_confirm_msg(overwrite_summary.into());
                     app_data.set_show_cedulas_overwrite_confirm_modal(true);
                 } else {

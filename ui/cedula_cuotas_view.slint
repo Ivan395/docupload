@@ -2324,6 +2324,8 @@ export component CedulaCuotasView inherits Rectangle {
 
     // Modal de Alerta: Archivos duplicados que ya contienen su información en la BD y RustFS
     if AppData.show_cedulas_duplicate_modal : Rectangle {
+        // Por encima de la capa "Procesando" (z: 9999): este modal requiere acción del usuario
+        z: 10000;
         background: #00000088;
         width: 100%;
         height: 100%;
@@ -2435,6 +2437,8 @@ export component CedulaCuotasView inherits Rectangle {
 
     // Modal de confirmación: meses ya cargados. Opción principal: fusionar; secundaria: reemplazar (borra)
     if AppData.show_cedulas_overwrite_confirm_modal : Rectangle {
+        // Por encima de la capa "Procesando" (z: 9999): este modal requiere acción del usuario
+        z: 10000;
         background: #00000088;
         width: 100%;
         height: 100%;
