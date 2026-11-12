@@ -13,6 +13,8 @@ categories = ["office-software", "gui"]
 [dependencies]
 # Aritmética decimal exacta para el prorrateo de cuotas IMSS (redondeo igual a ROUND(numeric, 2) de PostgreSQL)
 rust_decimal = "1.36"
+# Lectura de Excel (.xlsx) para importar asignaciones de obra desde la plantilla del analista
+calamine = "0.26"
 slint = "1.18.1"
 chrono = "0.4"
 fancy-regex = "0.18"

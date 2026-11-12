@@ -1,0 +1,561 @@
+import { ScrollView, ComboBox } from "std-widgets.slint";
+import { AppData, AppLogic } from "models.slint";
+
+// Botón compacto (mismo estilo que los botones de asignacion_empleados_view.slint).
+// variante: 0 neutro, 1 primario
+component AstBoton inherits Rectangle {
+    in property <string> texto;
+    in property <int> variante: 0;
+    in property <bool> habilitado: true;
+    callback clicked();
+
+    property <bool> activo: root.habilitado && !AppData.asig_procesando;
+
+    height: 32px;
+    min-width: 110px;
+    border-radius: 6px;
+    background: root.variante == 1
+        ? (boton_touch.has-hover ? #1e40af : #1d4ed8)
+        : (boton_touch.has-hover && root.activo ? #e2e8f0 : #ffffff);
+    border-width: 1px;
+    border-color: root.variante == 1 ? #1d4ed8 : #cbd5e1;
+    opacity: root.activo ? 1 : 0.5;
+
+    Text {
+        text: root.texto;
+        font-size: 12px;
+        font-weight: 700;
+        color: root.variante == 1 ? #ffffff : #475569;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    boton_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if (root.activo) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+// Opción de regla o alcance con indicador de selección.
+component AstOpcion inherits Rectangle {
+    in property <string> titulo;
+    in property <string> descripcion: "";
+    in property <bool> seleccionada: false;
+    callback elegida();
+
+    height: root.descripcion == "" ? 30px : 46px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.seleccionada ? #1d4ed8 : #e2e8f0;
+    background: root.seleccionada ? #eff6ff : (opcion_touch.has-hover ? #f8fafc : #ffffff);
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        Text {
+            text: root.seleccionada ? "●" : "○";
+            font-size: 13px;
+            color: #1d4ed8;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: root.titulo;
+                font-size: 12px;
+                font-weight: 700;
+                color: #0f172a;
+                overflow: elide;
+            }
+
+            if root.descripcion != "" : Text {
+                text: root.descripcion;
+                font-size: 10.5px;
+                color: #64748b;
+                overflow: elide;
+            }
+        }
+    }
+
+    opcion_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.elegida();
+        }
+    }
+}
+
+// Asistente en dos pasos: 1) regla y parámetros, 2) vista previa y aplicación.
+// Se coloca con width/height iguales a la vista que lo contiene.
+export component AsistenteAsignacionModal inherits Rectangle {
+    background: #00000088;
+
+    // Bloquea clics hacia la vista de fondo.
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+
+    tarjeta := Rectangle {
+        width: Math.min(760px, parent.width - 32px);
+        height: Math.min(560px, parent.height - 32px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: #ffffff;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: #cbd5e1;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+
+            // Encabezado
+            HorizontalLayout {
+                height: 28px;
+                spacing: 8px;
+
+                Text {
+                    text: "🪄 Asistente de asignación masiva";
+                    font-size: 15px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Text {
+                    text: AppData.asig_asistente_paso == 1 ? "Paso 1 de 2 · Regla" : "Paso 2 de 2 · Vista previa";
+                    font-size: 11px;
+                    color: #64748b;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Paso 1: regla, alcance y parámetros de la regla
+            if AppData.asig_asistente_paso == 1 : VerticalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: "Regla de asignación";
+                    font-size: 12px;
+                    font-weight: 700;
+                    color: #334155;
+                }
+
+                AstOpcion {
+                    titulo: "Por vigencia de cada obra";
+                    descripcion: "Usa todas las obras de la revisión; cada día se reparte entre las vigentes.";
+                    seleccionada: AppData.asig_asistente_regla == 0;
+                    elegida => { AppData.asig_asistente_regla = 0; }
+                }
+
+                AstOpcion {
+                    titulo: "Todos a una obra";
+                    descripcion: "Asigna una obra a todos los empleado-mes del rango de meses elegido.";
+                    seleccionada: AppData.asig_asistente_regla == 1;
+                    elegida => { AppData.asig_asistente_regla = 1; }
+                }
+
+                AstOpcion {
+                    titulo: "Importar archivo";
+                    descripcion: "CSV o XLSX con NSS, AÑO, MES, OBRA y DÍAS (opcional).";
+                    seleccionada: AppData.asig_asistente_regla == 2;
+                    elegida => { AppData.asig_asistente_regla = 2; }
+                }
+
+                AstOpcion {
+                    titulo: "Copiar de otra revisión";
+                    descripcion: "Copia las obras de cada empleado-mes de otra revisión del mismo registro patronal.";
+                    seleccionada: AppData.asig_asistente_regla == 3;
+                    elegida => { AppData.asig_asistente_regla = 3; }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    height: 32px;
+
+                    Text {
+                        text: "Alcance:";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #334155;
+                        vertical-alignment: center;
+                    }
+
+                    AstBoton {
+                        texto: "Solo sin obra";
+                        variante: AppData.asig_asistente_alcance == 0 ? 1 : 0;
+                        clicked => { AppData.asig_asistente_alcance = 0; }
+                    }
+
+                    AstBoton {
+                        texto: "Todos (reemplaza)";
+                        variante: AppData.asig_asistente_alcance == 1 ? 1 : 0;
+                        clicked => { AppData.asig_asistente_alcance = 1; }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                // Obra y rango de meses (regla 1)
+                if AppData.asig_asistente_regla == 1 : VerticalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: "Obra";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: #334155;
+                    }
+
+                    Rectangle {
+                        height: 110px;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: #cbd5e1;
+                        clip: true;
+
+                        ScrollView {
+                            width: parent.width;
+                            height: parent.height;
+                            content-width: self.width;
+
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 2px;
+
+                                for o[i] in AppData.asig_obras : Rectangle {
+                                    height: 26px;
+                                    border-radius: 4px;
+                                    background: AppData.asig_asistente_obra_idx == i
+                                        ? #dbeafe
+                                        : (obra_touch.has-hover ? #f1f5f9 : transparent);
+
+                                    Text {
+                                        x: 8px;
+                                        width: parent.width - 16px;
+                                        height: parent.height;
+                                        text: o.label;
+                                        font-size: 11.5px;
+                                        font-weight: 600;
+                                        color: #1e293b;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+
+                                    obra_touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { AppData.asig_asistente_obra_idx = i; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+
+                            Text {
+                                text: "Mes desde";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #334155;
+                            }
+
+                            ComboBox {
+                                model: AppData.asig_meses;
+                                current-index <=> AppData.asig_asistente_mes_desde_idx;
+                            }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+
+                            Text {
+                                text: "Mes hasta";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #334155;
+                            }
+
+                            ComboBox {
+                                model: AppData.asig_meses;
+                                current-index <=> AppData.asig_asistente_mes_hasta_idx;
+                            }
+                        }
+                    }
+                }
+
+                // Archivo (regla 2)
+                if AppData.asig_asistente_regla == 2 : VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        height: 32px;
+
+                        AstBoton {
+                            texto: "Elegir archivo…";
+                            clicked => { AppLogic.asig_asistente_elegir_archivo(); }
+                        }
+
+                        Text {
+                            text: AppData.asig_asistente_archivo == "" ? "Ningún archivo elegido" : AppData.asig_asistente_archivo;
+                            font-size: 11px;
+                            color: #334155;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    Text {
+                        text: "Columnas: NSS, AÑO, MES, OBRA, DÍAS (opcional). MES acepta número o nombre. Varias filas del mismo empleado-mes suman obras.";
+                        font-size: 10.5px;
+                        color: #64748b;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // Revisión de origen (regla 3)
+                if AppData.asig_asistente_regla == 3 : VerticalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: "Revisión de origen (mismo registro patronal)";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: #334155;
+                    }
+
+                    ComboBox {
+                        model: AppData.asig_asistente_revisiones;
+                        current-index <=> AppData.asig_asistente_revision_idx;
+                    }
+
+                    if AppData.asig_asistente_revisiones.length == 0 : Text {
+                        text: "No hay otras revisiones de este registro patronal.";
+                        font-size: 11px;
+                        color: #92400e;
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    height: 34px;
+                    spacing: 8px;
+                    alignment: end;
+
+                    AstBoton {
+                        texto: "Cancelar";
+                        clicked => { AppLogic.asig_asistente_cerrar(); }
+                    }
+
+                    AstBoton {
+                        texto: "Vista previa →";
+                        variante: 1;
+                        clicked => { AppLogic.asig_asistente_vista_previa(); }
+                    }
+                }
+            }
+
+            // Paso 2: resumen y tabla de vista previa
+            if AppData.asig_asistente_paso == 2 : VerticalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: AppData.asig_asistente_resumen;
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: #0f172a;
+                    overflow: elide;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+                    background: #ffffff;
+                    clip: true;
+
+                    VerticalLayout {
+                        // Encabezado de la tabla
+                        Rectangle {
+                            height: 26px;
+                            background: #f1f5f9;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
+
+                                Text {
+                                    text: "Empleado";
+                                    horizontal-stretch: 3;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: "NSS";
+                                    horizontal-stretch: 2;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: "Mes";
+                                    horizontal-stretch: 2;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: "Obras";
+                                    horizontal-stretch: 2;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: "Resultado";
+                                    horizontal-stretch: 4;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #475569;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+
+                        ScrollView {
+                            vertical-stretch: 1;
+                            width: parent.width;
+                            content-width: self.width;
+
+                            VerticalLayout {
+                                for f[i] in AppData.asig_asistente_previa : Rectangle {
+                                    height: 24px;
+                                    background: f.omitido ? #f8fafc : #ffffff;
+
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 6px;
+
+                                        Text {
+                                            text: f.nombre;
+                                            horizontal-stretch: 3;
+                                            font-size: 11px;
+                                            color: f.omitido ? #94a3b8 : #0f172a;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: f.nss;
+                                            horizontal-stretch: 2;
+                                            font-size: 11px;
+                                            color: f.omitido ? #94a3b8 : #334155;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: f.etiqueta_mes;
+                                            horizontal-stretch: 2;
+                                            font-size: 11px;
+                                            color: f.omitido ? #94a3b8 : #334155;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: f.obras;
+                                            horizontal-stretch: 2;
+                                            font-size: 11px;
+                                            color: f.omitido ? #94a3b8 : #334155;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: f.resultado;
+                                            horizontal-stretch: 4;
+                                            font-size: 11px;
+                                            font-weight: f.omitido ? 400 : 600;
+                                            color: f.omitido ? #b45309 : #166534;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 34px;
+                    spacing: 8px;
+                    alignment: end;
+
+                    AstBoton {
+                        texto: "← Atrás";
+                        clicked => { AppLogic.asig_asistente_atras(); }
+                    }
+
+                    AstBoton {
+                        texto: "Aplicar";
+                        variante: 1;
+                        habilitado: AppData.asig_asistente_puede_aplicar;
+                        clicked => { AppLogic.asig_asistente_aplicar(); }
+                    }
+                }
+            }
+        }
+
+        // Capa de espera mientras se escribe en la BD
+        if AppData.asig_procesando : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: #ffffffcc;
+            border-radius: 10px;
+
+            Text {
+                text: "Guardando…";
+                font-size: 14px;
+                font-weight: 700;
+                color: #1e40af;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

@@ -1,0 +1,551 @@
+import { ScrollView, LineEdit } from "std-widgets.slint";
+import { AppData, AppLogic, AsigObraTarjeta, AsigObraRenglon } from "models.slint";
+
+// Botón compacto de la pestaña (mismo estilo que los botones de asignación por empleado).
+component ObraBoton inherits Rectangle {
+    in property <string> texto;
+    in property <bool> primario: false;
+    in property <bool> habilitado: true;
+    callback clicked();
+
+    property <bool> activo: root.habilitado && !AppData.asig_procesando;
+
+    height: 30px;
+    border-radius: 6px;
+    background: root.primario
+        ? (boton_touch.has-hover ? #1e40af : #1d4ed8)
+        : (boton_touch.has-hover && root.activo ? #e2e8f0 : #ffffff);
+    border-width: 1px;
+    border-color: root.primario ? #1d4ed8 : #cbd5e1;
+    opacity: root.activo ? 1 : 0.5;
+
+    HorizontalLayout {
+        alignment: center;
+        padding-left: 10px;
+        padding-right: 10px;
+
+        Text {
+            text: root.texto;
+            font-size: 12px;
+            font-weight: 700;
+            color: root.primario ? #ffffff : #475569;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    boton_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if (root.activo) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+// Casilla de selección de una fila o candidato.
+component ObraCasilla inherits Rectangle {
+    in property <bool> marcado: false;
+    callback clicked();
+
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.marcado ? #1d4ed8 : #94a3b8;
+    background: root.marcado ? #1d4ed8 : #ffffff;
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        visible: root.marcado;
+        text: "✓";
+        color: #ffffff;
+        font-size: 12px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    casilla_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Tarjeta de una obra: totales de asignación y semáforo del 18% de guarderías.
+component TarjetaObraItem inherits Rectangle {
+    in property <AsigObraTarjeta> t;
+    in property <bool> activa: false;
+    callback clicked();
+
+    height: 138px;
+    border-radius: 8px;
+    border-width: root.activa ? 2px : 1px;
+    border-color: root.activa ? #1d4ed8 : #cbd5e1;
+    background: root.activa ? #eff6ff : (tarjeta_touch.has-hover ? #f8fafc : #ffffff);
+    clip: true;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 3px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: root.t.numero;
+                font-size: 13px;
+                font-weight: 800;
+                color: #0f172a;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.t.label;
+                font-size: 12px;
+                font-weight: 600;
+                color: #334155;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+
+        Text {
+            text: "Vigencia: " + root.t.vigencia;
+            font-size: 11px;
+            color: #64748b;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.t.sin_monto ? "⚠ Sin monto" : "Monto: $" + root.t.monto;
+            font-size: 11px;
+            font-weight: 600;
+            color: root.t.sin_monto ? #b45309 : #334155;
+        }
+
+        Text {
+            text: root.t.empleados + " empleados · " + root.t.empleado_mes + " empleado-mes · " + root.t.dias + " días";
+            font-size: 11px;
+            color: #334155;
+            overflow: elide;
+        }
+
+        // Semáforo del 18%: solo para obras con KPIs de guarderías.
+        if root.t.gps != "" : Rectangle {
+            height: 22px;
+            border-radius: 5px;
+            background: root.t.supera_18 ? #fee2e2 : #dcfce7;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.t.supera_18 ? "⚠ Supera 18%" : "✓ Dentro del 18%";
+                font-size: 11px;
+                font-weight: 700;
+                color: root.t.supera_18 ? #991b1b : #166534;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.t.gps != "" : Text {
+            text: "GPS $" + root.t.gps + " · Guardería $" + root.t.valor_guarderia + " · Límite $" + root.t.limite_18;
+            font-size: 10px;
+            color: #64748b;
+            overflow: elide;
+        }
+    }
+
+    tarjeta_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Fila de la tabla de empleado-mes de la obra seleccionada.
+component RenglonObraItem inherits Rectangle {
+    in property <AsigObraRenglon> r;
+    callback alternar();
+
+    height: 36px;
+    background: r.seleccionado ? #eff6ff : #ffffff;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        ObraCasilla {
+            marcado: root.r.seleccionado;
+            clicked => { root.alternar(); }
+        }
+        Text {
+            text: root.r.nombre;
+            font-size: 12px;
+            font-weight: 600;
+            color: #1e293b;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 3;
+        }
+        Text {
+            text: root.r.nss;
+            font-size: 11px;
+            color: #64748b;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 2;
+        }
+        Text {
+            text: root.r.etiqueta_mes;
+            font-size: 11px;
+            color: #334155;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.r.dias + " d. obra";
+            font-size: 11px;
+            font-weight: 700;
+            color: #1d4ed8;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.r.dias_cedula + " d. cédula";
+            font-size: 11px;
+            color: #64748b;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// Fila de un candidato del modal "Agregar empleados…".
+component CandidatoItem inherits Rectangle {
+    in property <AsigObraRenglon> r;
+    callback alternar();
+
+    height: 34px;
+    background: r.seleccionado ? #eff6ff : #ffffff;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        ObraCasilla {
+            marcado: root.r.seleccionado;
+            clicked => { root.alternar(); }
+        }
+        Text {
+            text: root.r.nombre;
+            font-size: 12px;
+            font-weight: 600;
+            color: #1e293b;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 3;
+        }
+        Text {
+            text: root.r.nss;
+            font-size: 11px;
+            color: #64748b;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 2;
+        }
+        Text {
+            text: root.r.etiqueta_mes;
+            font-size: 11px;
+            color: #334155;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.r.dias + " días libres";
+            font-size: 11px;
+            font-weight: 700;
+            color: root.r.dias > 0 ? #166534 : #b45309;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+// Pestaña 2 de Reporte de Liquidaciones: "¿quién trabajó en la obra X?"
+export component AsignacionObraView inherits Rectangle {
+    background: #f8fafc;
+
+    HorizontalLayout {
+        padding: 16px;
+        spacing: 16px;
+
+        // Izquierda: tarjetas por obra
+        Rectangle {
+            width: 340px;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #e2e8f0;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+
+                Text {
+                    text: "Obras (" + AppData.asig_obra_tarjetas.length + ")";
+                    font-size: 13px;
+                    font-weight: 800;
+                    color: #0f172a;
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.width;
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        padding-right: 6px;
+
+                        for tarjeta[i] in AppData.asig_obra_tarjetas : TarjetaObraItem {
+                            t: tarjeta;
+                            activa: tarjeta.id_obra == AppData.asig_obra_sel_id;
+                            clicked => { AppLogic.asig_obra_seleccionar(tarjeta.id_obra); }
+                        }
+                    }
+                }
+
+                if AppData.asig_obra_tarjetas.length == 0 : Text {
+                    text: "No hay obras en el catálogo.";
+                    font-size: 12px;
+                    color: #64748b;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Derecha: empleado-mes de la obra seleccionada
+        Rectangle {
+            horizontal-stretch: 1;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #e2e8f0;
+            clip: true;
+
+            if AppData.asig_obra_sel_id == "" : Rectangle {
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Elija una obra para ver a los empleados que trabajaron en ella.";
+                    font-size: 14px;
+                    color: #64748b;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            if AppData.asig_obra_sel_id != "" : VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    Text {
+                        text: AppData.asig_obra_sel_titulo;
+                        font-size: 15px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+
+                    ObraBoton {
+                        texto: "Quitar seleccionados";
+                        clicked => { AppLogic.asig_obra_quitar_seleccionados(); }
+                    }
+
+                    ObraBoton {
+                        texto: "Agregar empleados…";
+                        primario: true;
+                        clicked => { AppLogic.asig_obra_abrir_agregar(); }
+                    }
+                }
+
+                // Encabezados de la tabla
+                Rectangle {
+                    height: 26px;
+                    background: #f1f5f9;
+                    border-radius: 4px;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        Rectangle { width: 18px; }
+                        Text { text: "Empleado"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 3; }
+                        Text { text: "NSS"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 2; }
+                        Text { text: "Mes"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 1; }
+                        Text { text: "Días obra"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 1; }
+                        Text { text: "Días cédula"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.width;
+
+                    VerticalLayout {
+                        spacing: 2px;
+
+                        for renglon[i] in AppData.asig_obra_renglones : RenglonObraItem {
+                            r: renglon;
+                            alternar => { AppLogic.asig_obra_toggle_renglon(renglon.id_reporte); }
+                        }
+                    }
+                }
+
+                if AppData.asig_obra_renglones.length == 0 : Text {
+                    text: "Ningún empleado-mes tiene asignada esta obra.";
+                    font-size: 12px;
+                    color: #64748b;
+                }
+            }
+        }
+    }
+
+    // Modal: agregar empleados a la obra seleccionada
+    if AppData.show_asig_obra_agregar_modal : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000088;
+
+        modal_bloqueo := TouchArea {}
+
+        Rectangle {
+            width: 640px;
+            height: 540px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 10px;
+            background: #ffffff;
+            clip: true;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: "Agregar empleados a " + AppData.asig_obra_sel_titulo;
+                    font-size: 15px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: "Solo se muestran meses activos que aún no tienen esta obra. Los días se reparten según los días libres del mes.";
+                    font-size: 11px;
+                    color: #64748b;
+                    wrap: word-wrap;
+                }
+
+                LineEdit {
+                    placeholder-text: "Buscar por nombre o NSS…";
+                    text: AppData.asig_obra_candidatos_busqueda;
+                    edited(texto) => { AppLogic.asig_obra_buscar_candidatos(texto); }
+                }
+
+                Rectangle {
+                    height: 26px;
+                    background: #f1f5f9;
+                    border-radius: 4px;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        Rectangle { width: 18px; }
+                        Text { text: "Empleado"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 3; }
+                        Text { text: "NSS"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 2; }
+                        Text { text: "Mes"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 1; }
+                        Text { text: "Disponibles"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.width;
+
+                    VerticalLayout {
+                        spacing: 2px;
+
+                        for candidato[i] in AppData.asig_obra_candidatos : CandidatoItem {
+                            r: candidato;
+                            alternar => { AppLogic.asig_obra_toggle_candidato(candidato.id_reporte); }
+                        }
+                    }
+                }
+
+                if AppData.asig_obra_candidatos.length == 0 : Text {
+                    text: "No hay meses que coincidan con la búsqueda.";
+                    font-size: 12px;
+                    color: #64748b;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    ObraBoton {
+                        texto: "Cancelar";
+                        clicked => { AppLogic.asig_obra_cerrar_agregar(); }
+                    }
+
+                    ObraBoton {
+                        texto: "Agregar";
+                        primario: true;
+                        clicked => { AppLogic.asig_obra_agregar_seleccionados(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // Capa de procesamiento: bloquea la pestaña mientras se guarda
+    if AppData.asig_procesando : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #ffffffb3;
+
+        capa_bloqueo := TouchArea {}
+
+        Rectangle {
+            x: (parent.width - 200px) / 2;
+            y: (parent.height - 52px) / 2;
+            width: 200px;
+            height: 52px;
+            border-radius: 8px;
+            background: #1e293b;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "Guardando…";
+                font-size: 14px;
+                font-weight: 700;
+                color: #ffffff;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

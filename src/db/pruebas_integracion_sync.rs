@@ -130,6 +130,25 @@ fn sync_incremental_no_destructiva_bd() {
             }
         }
     }
+    // Invariante de dinero tras sincronizar: suma de tramos hermanos <= importe de la cédula (+ 5 centavos)
+    let sql_dup = "SELECT g.id_reporte_liquidacion::text, g.c, COALESCE(g.fecha::text,''), g.suma::float8, COALESCE(g.original,0)::float8, g.dias_obra::int, g.dias_ced::int \
+        FROM (SELECT r.id_reporte_liquidacion, COALESCE(BTRIM(LOWER(r.clave)),'') AS c, r.fecha, SUM(COALESCE(r.subtotal,0)) AS suma, \
+                     MAX(dl.subtotal) AS original, SUM(COALESCE(r.dias_registro_obra,0)) AS dias_obra, MAX(COALESCE(r.dias,0)) AS dias_ced \
+              FROM public.reportes_detalles_liquidaciones r \
+              JOIN public.reportes_liquidaciones rl ON rl.id = r.id_reporte_liquidacion AND rl.estado = 'ACTIVO' \
+              JOIN LATERAL (SELECT d.subtotal FROM public.detalles_liquidaciones d WHERE d.id_liquidacion = rl.id_liquidacion \
+                  AND COALESCE(BTRIM(LOWER(d.clave)),'') = COALESCE(BTRIM(LOWER(r.clave)),'') AND d.fecha IS NOT DISTINCT FROM r.fecha \
+                  ORDER BY d.id LIMIT 1) dl ON true \
+              GROUP BY 1, 2, 3) g WHERE g.suma > COALESCE(g.original,0) + 0.05";
+    let duplicados = tx.query(sql_dup, &[]).expect("invariante");
+    println!("SYNC invariante: movimientos con cuota duplicada tras sincronizar = {}", duplicados.len());
+    for d in duplicados.iter().take(10) {
+        println!(
+            "DUP reporte={} clave='{}' fecha={} suma={} original={} dias_obra_sumados={} dias_cedula={}",
+            d.get::<_, String>(0), d.get::<_, String>(1), d.get::<_, String>(2),
+            d.get::<_, f64>(3), d.get::<_, f64>(4), d.get::<_, i32>(5), d.get::<_, i32>(6)
+        );
+    }
     tx.rollback().expect("rollback");
 
     println!("SYNC tramos comparados: {total_tramos}, diferencias: {}", diferencias.len());

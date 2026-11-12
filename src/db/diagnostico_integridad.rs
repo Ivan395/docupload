@@ -182,6 +182,28 @@ const CONSULTAS: &[(&str, &str)] = &[
            AND COALESCE(rdl.dias_registro_obra, 0) < rdl.dias AND COALESCE(rdl.subtotal, 0) > 0 \
            AND ABS(rdl.subtotal - dl.subtotal) < 0.01",
     ),
+    (
+        // Invariante de dinero: movimientos (reporte, clave, fecha) cuya suma de tramos supera la cédula
+        "movimientos_con_cuota_duplicada",
+        "SELECT COUNT(*)::bigint FROM ( \
+            SELECT r.id_reporte_liquidacion, COALESCE(BTRIM(LOWER(r.clave)),'') AS c, r.fecha, SUM(COALESCE(r.subtotal,0)) AS suma, \
+                   MAX(dl.subtotal) AS original \
+            FROM public.reportes_detalles_liquidaciones r \
+            JOIN public.reportes_liquidaciones rl ON rl.id = r.id_reporte_liquidacion AND rl.estado = 'ACTIVO' \
+            JOIN LATERAL (SELECT d.subtotal FROM public.detalles_liquidaciones d WHERE d.id_liquidacion = rl.id_liquidacion \
+                AND COALESCE(BTRIM(LOWER(d.clave)),'') = COALESCE(BTRIM(LOWER(r.clave)),'') AND d.fecha IS NOT DISTINCT FROM r.fecha \
+                ORDER BY d.id LIMIT 1) dl ON true \
+            GROUP BY 1, 2, 3) g WHERE g.suma > COALESCE(g.original,0) + 0.05",
+    ),
+    (
+        // Movimientos con un tramo SIN obra (factor 1) y otro CON obra a la vez (origen típico del doble conteo)
+        "movimientos_sin_obra_y_con_obra_mezclados",
+        "SELECT COUNT(*)::bigint FROM ( \
+            SELECT r.id_reporte_liquidacion, COALESCE(BTRIM(LOWER(r.clave)),''), r.fecha \
+            FROM public.reportes_detalles_liquidaciones r \
+            JOIN public.reportes_liquidaciones rl ON rl.id = r.id_reporte_liquidacion AND rl.estado = 'ACTIVO' \
+            GROUP BY 1, 2, 3 HAVING bool_or(r.id_registro_obra IS NULL) AND bool_or(r.id_registro_obra IS NOT NULL)) g",
+    ),
     ("postgres_version_num", "SELECT current_setting('server_version_num')::bigint"),
 ];
 

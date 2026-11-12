@@ -1407,6 +1407,11 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
 
     // Sincronizar estado del filtro multi-selección de empleados únicos
     sync_unique_empleados_to_ui(state, &app_data);
+
+    // Pestaña "Asignación por empleado"
+    crate::asignacion_view_logic::render_asignacion_ui(ui, state);
+    // Pestaña "Asignación por obra"
+    crate::asignacion_obra_logic::render_asignacion_obra_ui(ui, state);
 }
 
 /// Separa las filas por estado: `ACTIVO` (primer elemento) y `FUERA_PERIODO`/`EXCLUIDO` (segundo).

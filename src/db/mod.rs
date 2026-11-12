@@ -1,3 +1,4 @@
+pub mod asignacion_ops;
 pub mod bitacora_reportes;
 pub mod calendario;
 pub mod catalogos;
@@ -35,6 +36,8 @@ pub use schema::{ensure_schema, format_boxed_pg_error, format_pg_error};
 mod pruebas_integracion_ingesta;
 #[cfg(test)]
 mod pruebas_integracion_sync;
+#[cfg(test)]
+mod pruebas_integracion_asignacion;
 
 #[cfg(test)]
 mod tests {

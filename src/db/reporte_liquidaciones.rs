@@ -2171,23 +2171,8 @@ pub fn batch_save_reporte_row_updates(
             &[&parent_id],
         ).map_err(|e| format!("Error actualizando vinculaciones en reporte: {}", e))?;
 
-        // 6. Sincronizar vinculaciones_obras_liquidaciones (tabla base de liquidaciones)
-        tx.execute(
-            "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
-            &[&id_liq],
-        ).map_err(|e| format!("Error eliminando vinculaciones maestras: {}", e))?;
-        tx.execute(
-            r#"
-            INSERT INTO public.vinculaciones_obras_liquidaciones (
-                id, id_registro_obra, id_liquidacion, dias_registro_obra
-            )
-            SELECT uuidv7(), id_registro_obra, $2, SUM(COALESCE(dias_registro_obra, 0))::smallint
-            FROM public.reportes_detalles_liquidaciones
-            WHERE id_reporte_liquidacion = $1 AND id_registro_obra IS NOT NULL
-            GROUP BY id_registro_obra
-            "#,
-            &[&parent_id, &id_liq],
-        ).map_err(|e| format!("Error actualizando vinculaciones maestras: {}", e))?;
+        // La tabla MAESTRA vinculaciones_obras_liquidaciones refleja solo el PDF de la cédula:
+        // las ediciones del analista viven únicamente en las tablas de reporte (rdl/rvol).
 
         updated_count += 1;
     }
@@ -2572,7 +2557,7 @@ pub fn add_obra_vinculacion_for_employee(
     let id_liq: Uuid = base_info.get(0);
     let id_rev: Uuid = base_info.get(1);
     let id_emp: Uuid = base_info.get(2);
-    let mes_periodo: String = base_info.get(3);
+    let mes_periodo: String = base_info.get::<_, Option<String>>(3).unwrap_or_default(); // puede ser NULL
     let anio_periodo: i16 = base_info.get(4);
     let dias_cedula: i16 = base_info.get(5);
     let clave: Option<String> = base_info.try_get(6).ok().flatten();
@@ -2581,11 +2566,11 @@ pub fn add_obra_vinculacion_for_employee(
     let lic: f64 = base_info.get(9);
     let inc: f64 = base_info.get(10);
     let aus: f64 = base_info.get(11);
-    let emp_nombre: String = base_info.get(12);
-    let emp_rfc: String = base_info.get(13);
-    let emp_curp: String = base_info.get(14);
-    let emp_nss: String = base_info.get(15);
-    let reg_pat: String = base_info.get(16);
+    let emp_nombre: String = base_info.get::<_, Option<String>>(12).unwrap_or_default(); // puede ser NULL
+    let emp_rfc: String = base_info.get::<_, Option<String>>(13).unwrap_or_default(); // puede ser NULL
+    let emp_curp: String = base_info.get::<_, Option<String>>(14).unwrap_or_default(); // puede ser NULL
+    let emp_nss: String = base_info.get::<_, Option<String>>(15).unwrap_or_default(); // puede ser NULL
+    let reg_pat: String = base_info.get::<_, Option<String>>(16).unwrap_or_default(); // puede ser NULL
 
     let cf_orig: f64 = base_info.get(17);
     let exc_pat_orig: f64 = base_info.get(18);
@@ -2729,23 +2714,8 @@ pub fn add_obra_vinculacion_for_employee(
         &[&id_parent_reporte_liq],
     ).map_err(|e| format!("Error actualizando vinculaciones en reporte: {}", e))?;
 
-    // 7. Sincronizar vinculaciones_obras_liquidaciones
-    tx.execute(
-        "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
-        &[&id_liq],
-    ).map_err(|e| format!("Error eliminando vinculaciones maestras: {}", e))?;
-    tx.execute(
-        r#"
-        INSERT INTO public.vinculaciones_obras_liquidaciones (
-            id, id_registro_obra, id_liquidacion, dias_registro_obra
-        )
-        SELECT uuidv7(), id_registro_obra, $2, SUM(COALESCE(dias_registro_obra, 0))::smallint
-        FROM public.reportes_detalles_liquidaciones
-        WHERE id_reporte_liquidacion = $1 AND id_registro_obra IS NOT NULL
-        GROUP BY id_registro_obra
-        "#,
-        &[&id_parent_reporte_liq, &id_liq],
-    ).map_err(|e| format!("Error actualizando vinculaciones maestras: {}", e))?;
+    // La tabla MAESTRA vinculaciones_obras_liquidaciones refleja solo el PDF de la cédula:
+    // las ediciones del analista viven únicamente en las tablas de reporte (rdl/rvol).
 
     // Bitácora: prorrateo canónico y foto "después" antes del commit
     bitacora_reportes::cerrar_edicion(&mut tx, lote, true)
@@ -2910,23 +2880,8 @@ pub fn delete_obra_vinculacion_detail(
         &[&parent_id],
     ).map_err(|e| format!("Error actualizando vinculaciones en reporte: {}", e))?;
 
-    // Sincronizar vinculaciones_obras_liquidaciones
-    tx.execute(
-        "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
-        &[&id_liq],
-    ).map_err(|e| format!("Error eliminando vinculaciones maestras: {}", e))?;
-    tx.execute(
-        r#"
-        INSERT INTO public.vinculaciones_obras_liquidaciones (
-            id, id_registro_obra, id_liquidacion, dias_registro_obra
-        )
-        SELECT uuidv7(), id_registro_obra, $2, SUM(COALESCE(dias_registro_obra, 0))::smallint
-        FROM public.reportes_detalles_liquidaciones
-        WHERE id_reporte_liquidacion = $1 AND id_registro_obra IS NOT NULL
-        GROUP BY id_registro_obra
-        "#,
-        &[&parent_id, &id_liq],
-    ).map_err(|e| format!("Error actualizando vinculaciones maestras: {}", e))?;
+    // La tabla MAESTRA vinculaciones_obras_liquidaciones refleja solo el PDF de la cédula:
+    // las ediciones del analista viven únicamente en las tablas de reporte (rdl/rvol).
 
     // Bitácora: foto "después" y prorrateo canónico antes del commit
     bitacora_reportes::cerrar_edicion(&mut tx, lote, true)
@@ -3697,23 +3652,8 @@ pub fn batch_assign_multiple_obras_to_employees(
             &[&parent_id],
         ).map_err(|e| format!("Error actualizando vinculaciones en reporte: {}", crate::db::schema::format_pg_error(&e)))?;
 
-        // Sincronizar vinculaciones_obras_liquidaciones
-        tx.execute(
-            "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
-            &[&id_liq],
-        ).map_err(|e| format!("Error eliminando vinculaciones maestras: {}", crate::db::schema::format_pg_error(&e)))?;
-        tx.execute(
-            r#"
-            INSERT INTO public.vinculaciones_obras_liquidaciones (
-                id, id_registro_obra, id_liquidacion, dias_registro_obra
-            )
-            SELECT uuidv7(), id_registro_obra, $2, SUM(COALESCE(dias_registro_obra, 0))::smallint
-            FROM public.reportes_detalles_liquidaciones
-            WHERE id_reporte_liquidacion = $1 AND id_registro_obra IS NOT NULL
-            GROUP BY id_registro_obra
-            "#,
-            &[&parent_id, &id_liq],
-        ).map_err(|e| format!("Error actualizando vinculaciones maestras: {}", crate::db::schema::format_pg_error(&e)))?;
+        // La tabla MAESTRA vinculaciones_obras_liquidaciones refleja solo el PDF de la cédula:
+        // las ediciones del analista viven únicamente en las tablas de reporte (rdl/rvol).
 
         employees_updated += 1;
     }
@@ -3776,7 +3716,7 @@ pub fn batch_update_reporte_rows(
             let curr_obra: Option<Uuid> = r.try_get(1).ok().flatten();
             let curr_dias_obra: i16 = row_get_i16(&r, 2, 0);
             let _sum_inc: f64 = row_get_f64(&r, 3, 0.0);
-            let id_liq_opt: Option<Uuid> = r.try_get(4).ok().flatten();
+            let _id_liq_opt: Option<Uuid> = r.try_get(4).ok().flatten();
 
             let new_obra = if set_obra_id.is_some() {
                 set_obra_id
@@ -3829,39 +3769,7 @@ pub fn batch_update_reporte_rows(
                     );
                 }
 
-                // Sincronizar vinculaciones_obras_liquidaciones si id_liq existe
-                if let Some(lid) = id_liq_opt {
-                    let base_vinc = tx.query_opt(
-                        "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1 LIMIT 1",
-                        &[&lid],
-                    ).map_err(|e| format!("Error consultando vinculación base: {}", e))?;
-
-                    if let Some(bvr) = base_vinc {
-                        let bvid: Uuid = bvr.get(0);
-                        tx.execute(
-                            "UPDATE public.vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
-                            &[&bvid, &obra_id, &Some(dias_obra_val)],
-                        ).map_err(|e| format!("Error actualizando vinculación base: {}", e))?;
-                        crate::app_logger::log_db_write(
-                            "public.vinculaciones_obras_liquidaciones",
-                            "UPDATE",
-                            &format!("id={}, id_registro_obra={}, dias_registro_obra={}", bvid, obra_id, dias_obra_val),
-                            "UPDATE public.vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
-                        );
-                    } else {
-                        let new_bvid = Uuid::now_v7();
-                        tx.execute(
-                            "INSERT INTO public.vinculaciones_obras_liquidaciones (id, id_registro_obra, id_liquidacion, dias_registro_obra) VALUES ($1, $2, $3, $4)",
-                            &[&new_bvid, &obra_id, &lid, &Some(dias_obra_val)],
-                        ).map_err(|e| format!("Error creando vinculación base: {}", e))?;
-                        crate::app_logger::log_db_write(
-                            "public.vinculaciones_obras_liquidaciones",
-                            "INSERT",
-                            &format!("id={}, id_registro_obra={}, id_liquidacion={}, dias={}", new_bvid, obra_id, lid, dias_obra_val),
-                            "INSERT INTO public.vinculaciones_obras_liquidaciones (id, id_registro_obra, id_liquidacion, dias_registro_obra) VALUES ($1, $2, $3, $4)",
-                        );
-                    }
-                }
+                // La tabla MAESTRA vinculaciones_obras_liquidaciones no se modifica desde ediciones del reporte.
             } else {
                 tx.execute(
                     "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1",
@@ -3874,18 +3782,7 @@ pub fn batch_update_reporte_rows(
                     "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1",
                 );
 
-                if let Some(lid) = id_liq_opt {
-                    tx.execute(
-                        "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
-                        &[&lid],
-                    ).map_err(|e| format!("Error eliminando vinculaciones maestras: {}", e))?;
-                    crate::app_logger::log_db_write(
-                        "public.vinculaciones_obras_liquidaciones",
-                        "DELETE",
-                        &format!("id_liquidacion={}", lid),
-                        "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
-                    );
-                }
+                // La tabla MAESTRA vinculaciones_obras_liquidaciones no se modifica desde ediciones del reporte.
             }
 
             // Recalcular prorrateo: (Valor_Original / Días_Cédula) * Días_Obra

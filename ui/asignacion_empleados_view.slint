@@ -1,0 +1,773 @@
+import { ScrollView, LineEdit, ComboBox, SpinBox } from "std-widgets.slint";
+import { AppData, AppLogic, AsigObraOpcion, AsigCelda, AsigObraChip } from "models.slint";
+import { AsistenteAsignacionModal } from "asistente_asignacion_modal.slint";
+
+// Chip de obra con color de paleta (10 tonos). Con sin_obra usa estilo neutro.
+// El contenido extra (controles) se pasa como @children.
+component AsigChip inherits Rectangle {
+    in property <string> texto: "";
+    in property <int> color_idx: 0;
+    in property <bool> sin_obra: false;
+
+    property <[color]> pal_fondo: [#dbeafe, #dcfce7, #fef9c3, #fce7f3, #ede9fe, #ffedd5, #cffafe, #ecfccb, #fae8ff, #e0e7ff];
+    property <[color]> pal_texto: [#1e40af, #166534, #854d0e, #9d174d, #5b21b6, #9a3412, #155e75, #3f6212, #86198f, #3730a3];
+    property <[color]> pal_borde: [#93c5fd, #86efac, #fde047, #f9a8d4, #c4b5fd, #fdba74, #67e8f9, #bef264, #f0abfc, #a5b4fc];
+    // Índice ciclico dentro de la paleta
+    property <int> idx: Math.mod(root.color_idx, 10);
+
+    height: 22px;
+    border-radius: 5px;
+    background: root.sin_obra ? #ffffff : root.pal_fondo[root.idx];
+    border-width: 1px;
+    border-color: root.sin_obra ? #94a3b8 : root.pal_borde[root.idx];
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 4px;
+        spacing: 4px;
+
+        Text {
+            text: root.texto;
+            font-size: 10.5px;
+            font-weight: 700;
+            color: root.sin_obra ? #64748b : root.pal_texto[root.idx];
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        @children
+    }
+}
+
+// Botón compacto de la vista (estilo de los botones del reporte).
+// variante: 0 neutro, 1 primario, 2 ámbar (destacado)
+component AsigBoton inherits Rectangle {
+    in property <string> texto;
+    in property <string> icono: "";
+    in property <int> variante: 0;
+    in property <bool> pequeno: false;
+    in property <bool> habilitado: true;
+    callback clicked();
+
+    property <bool> activo: root.habilitado && !AppData.asig_procesando;
+
+    height: root.pequeno ? 26px : 34px;
+    border-radius: 6px;
+    background: root.variante == 1
+        ? (boton_touch.has-hover ? #1e40af : #1d4ed8)
+        : (root.variante == 2
+            ? (boton_touch.has-hover ? #fde68a : #fef3c7)
+            : (boton_touch.has-hover && root.activo ? #e2e8f0 : #ffffff));
+    border-width: 1px;
+    border-color: root.variante == 1 ? #1d4ed8 : (root.variante == 2 ? #fcd34d : #cbd5e1);
+    opacity: root.activo ? 1 : 0.5;
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 5px;
+        padding-left: 8px;
+        padding-right: 8px;
+
+        if root.icono != "" : Text {
+            text: root.icono;
+            font-size: 12px;
+            color: root.variante == 1 ? #ffffff : #475569;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.texto;
+            font-size: root.pequeno ? 11px : 12px;
+            font-weight: 700;
+            color: root.variante == 1 ? #ffffff : (root.variante == 2 ? #92400e : #475569);
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    boton_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if (root.activo) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+// Selector de obra: despliega una lista propia con AppData.asig_obras.
+// fijo = true: la acción se dispara al elegir y no conserva la selección.
+component AsigObraPicker inherits Rectangle {
+    in property <[AsigObraOpcion]> opciones: [];
+    in-out property <int> seleccion: -1;
+    in property <string> placeholder: "Elegir obra";
+    in property <bool> fijo: false;
+    in property <bool> mostrar_numero: false;
+    in property <bool> habilitado: true;
+    in property <length> ancho_lista: 260px;
+    callback elegido(int);
+
+    property <bool> activo: root.habilitado && !AppData.asig_procesando;
+    property <bool> tiene_sel: !root.fijo && root.seleccion >= 0 && root.seleccion < root.opciones.length;
+
+    height: 26px;
+    border-radius: 5px;
+    background: root.activo ? (picker_touch.has-hover ? #f1f5f9 : #ffffff) : #f1f5f9;
+    border-width: 1px;
+    border-color: #cbd5e1;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 4px;
+
+        Text {
+            text: root.tiene_sel
+                ? (root.mostrar_numero ? root.opciones[root.seleccion].numero : root.opciones[root.seleccion].label)
+                : root.placeholder;
+            font-size: 11px;
+            font-weight: 600;
+            color: root.tiene_sel ? #1e293b : #64748b;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: "▾";
+            font-size: 10px;
+            color: #64748b;
+            vertical-alignment: center;
+        }
+    }
+
+    picker_touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if (root.activo) {
+                popup.show();
+            }
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + 2px;
+        width: root.ancho_lista;
+        height: 220px;
+
+        Rectangle {
+            background: #ffffff;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #cbd5e1;
+
+            ScrollView {
+                width: 100%;
+                height: 100%;
+                content-width: self.width;
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 2px;
+
+                    for o[i] in root.opciones : Rectangle {
+                        height: 28px;
+                        border-radius: 4px;
+                        background: opcion_touch.has-hover ? #eff6ff : transparent;
+
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            height: parent.height;
+                            text: root.mostrar_numero ? o.numero : o.label;
+                            font-size: 11.5px;
+                            font-weight: 600;
+                            color: #1e293b;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        opcion_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if (!root.fijo) {
+                                    root.seleccion = i;
+                                }
+                                popup.close();
+                                root.elegido(i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component AsignacionEmpleadosView inherits Rectangle {
+    background: #f8fafc;
+
+    init => { atajos.focus(); }
+
+    // Fondo: un clic en zona vacía devuelve el foco a los atajos (no consume clics de hijos)
+    fondo_touch := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { atajos.focus(); }
+    }
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        // 1. Panel de avance
+        Rectangle {
+            height: 112px;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #e2e8f0;
+
+            HorizontalLayout {
+                padding: 14px;
+                spacing: 16px;
+
+                VerticalLayout {
+                    spacing: 6px;
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: AppData.asig_con_obra + " de " + AppData.asig_total + " empleado-mes con obra";
+                        font-size: 15px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        vertical-alignment: center;
+                    }
+
+                    barra_avance := Rectangle {
+                        height: 8px;
+                        border-radius: 4px;
+                        background: #e2e8f0;
+
+                        Rectangle {
+                            x: 0px;
+                            width: barra_avance.width * (Math.min(100, Math.max(0, AppData.asig_porcentaje)) / 100);
+                            height: parent.height;
+                            border-radius: 4px;
+                            background: #16a34a;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 8px;
+
+                        AsigBoton {
+                            texto: "Sin obra (" + AppData.asig_sin_obra + ")";
+                            pequeno: true;
+                            variante: 2;
+                            clicked => { AppLogic.asig_filtrar(1); }
+                        }
+                        AsigBoton {
+                            texto: "Inconsistencias (" + AppData.asig_inconsistencias + ")";
+                            pequeno: true;
+                            clicked => { AppLogic.asig_filtrar(4); }
+                        }
+                        AsigBoton {
+                            texto: "Cédula actualizada (" + AppData.asig_cedula_actualizada + ")";
+                            icono: "📄";
+                            pequeno: true;
+                            clicked => { AppLogic.asig_filtrar(5); }
+                        }
+                        AsigBoton {
+                            texto: "🪄 Asistente de asignación";
+                            pequeno: true;
+                            variante: 1;
+                            clicked => { AppLogic.asig_asistente_abrir(); }
+                        }
+                    }
+
+                    Text {
+                        text: AppData.asig_escenario_texto;
+                        font-size: 11px;
+                        color: #64748b;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    width: 190px;
+                    alignment: center;
+                    spacing: 4px;
+
+                    AsigBoton {
+                        texto: "Deshacer";
+                        icono: "↶";
+                        habilitado: AppData.asig_puede_deshacer;
+                        clicked => { AppLogic.asig_deshacer(); }
+                    }
+
+                    // Ayuda de atajos (los mismos que maneja el FocusScope "atajos")
+                    Text {
+                        text: "Ctrl+F buscar · Ctrl+Z deshacer · Ctrl+M asistente · Esc limpiar";
+                        font-size: 10px;
+                        color: #94a3b8;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: AppData.asig_ultimo_cambio;
+                        font-size: 10px;
+                        color: #64748b;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+
+        // 2. Barra de filtros
+        HorizontalLayout {
+            height: 38px;
+            spacing: 8px;
+
+            buscador := LineEdit {
+                horizontal-stretch: 1;
+                placeholder-text: "Buscar por nombre, NSS o RFC…";
+                text <=> AppData.asig_busqueda;
+                edited(texto) => { AppLogic.asig_buscar(texto); }
+            }
+
+            ComboBox {
+                width: 200px;
+                model: ["Todos", "Sin obra", "Una obra", "Dos o más", "Con inconsistencia", "Cédula actualizada"];
+                current-index <=> AppData.asig_filtro_idx;
+                selected(valor) => { AppLogic.asig_filtrar(self.current-index); }
+            }
+        }
+
+        // 3. Matriz empleado x mes
+        Rectangle {
+            vertical-stretch: 1;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #e2e8f0;
+            clip: true;
+
+            ScrollView {
+                width: 100%;
+                height: 100%;
+                content-width: 240px + AppData.asig_meses.length * 120px;
+
+                VerticalLayout {
+                    // Encabezado de meses
+                    HorizontalLayout {
+                        Rectangle {
+                            width: 240px;
+                            height: 36px;
+                            background: #f1f5f9;
+
+                            Text {
+                                x: 12px;
+                                height: parent.height;
+                                text: "Empleado";
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #334155;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        for mes in AppData.asig_meses : Rectangle {
+                            width: 120px;
+                            height: 36px;
+                            background: #f1f5f9;
+
+                            Text {
+                                text: mes;
+                                font-size: 12px;
+                                font-weight: 800;
+                                color: #334155;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Filas de empleados
+                    for f in AppData.asig_filas : HorizontalLayout {
+                        // Celda fija con nombre; clic selecciona al empleado
+                        Rectangle {
+                            width: 240px;
+                            min-height: 44px;
+                            background: f.id_empleado == AppData.asig_empleado_sel_id ? #dbeafe : #ffffff;
+                            border-width: 1px;
+                            border-color: #e2e8f0;
+
+                            nombre_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.asig_seleccionar_empleado(f.id_empleado); }
+                            }
+
+                            VerticalLayout {
+                                padding: 6px;
+                                padding-left: 10px;
+                                spacing: 2px;
+                                alignment: center;
+
+                                HorizontalLayout {
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: f.nombre;
+                                        font-size: 12px;
+                                        font-weight: 800;
+                                        color: #0f172a;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    if f.tiene_inconsistencia : Text {
+                                        text: "⚠";
+                                        font-size: 12px;
+                                        color: #dc2626;
+                                        vertical-alignment: center;
+                                    }
+
+                                    if f.cedula_actualizada : Text {
+                                        text: "📄";
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: "NSS " + f.nss;
+                                    font-size: 10px;
+                                    color: #64748b;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+
+                        // Celdas por mes; altura mínima según número de obras apiladas
+                        for c in f.celdas : Rectangle {
+                            width: 120px;
+                            min-height: Math.max(44px, c.obras.length * 24px + 10px);
+                            background: c.es_baja
+                                ? #f1f5f9
+                                : (f.id_empleado == AppData.asig_empleado_sel_id ? #eff6ff : #ffffff);
+                            border-width: c.inconsistente ? 2px : 1px;
+                            border-color: c.inconsistente ? #f87171 : #e2e8f0;
+
+                            celda_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.asig_seleccionar_empleado(f.id_empleado); }
+                            }
+
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 2px;
+                                alignment: center;
+
+                                if !c.existe : Text {
+                                    text: "—";
+                                    color: #cbd5e1;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                if c.es_baja : Text {
+                                    text: "🔒 Baja";
+                                    font-size: 11px;
+                                    color: #64748b;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                if c.sin_obra : AsigChip {
+                                    texto: "Sin obra " + c.dias_cedula + "d";
+                                    sin_obra: true;
+                                    horizontal-stretch: 1;
+                                }
+
+                                for ch in c.obras : AsigChip {
+                                    texto: ch.numero + " " + ch.dias + "d";
+                                    color_idx: ch.color_idx;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
+
+                    if AppData.asig_filas.length == 0 : Text {
+                        height: 48px;
+                        text: "Sin empleados para los filtros actuales";
+                        font-size: 12px;
+                        color: #64748b;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // 4. Panel de detalle del empleado seleccionado
+        if AppData.asig_empleado_sel_id != "" : Rectangle {
+            height: 300px;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #cbd5e1;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: AppData.asig_empleado_sel_nombre;
+                        font-size: 15px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    AsigBoton {
+                        width: 230px;
+                        texto: "Revertir empleado a cédula";
+                        icono: "↺";
+                        clicked => { AppLogic.asig_revertir_empleado(AppData.asig_empleado_sel_id); }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    width: 100%;
+                    content-width: self.width;
+
+                    VerticalLayout {
+                        spacing: 6px;
+
+                        for c in AppData.asig_detalle : Rectangle {
+                            min-height: c.es_baja ? 44px : 112px;
+                            background: #f8fafc;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: c.inconsistente ? #f87171 : #e2e8f0;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 6px;
+
+                                // Encabezado del mes
+                                HorizontalLayout {
+                                    spacing: 10px;
+
+                                    Text {
+                                        text: c.etiqueta_mes;
+                                        width: 110px;
+                                        font-size: 12.5px;
+                                        font-weight: 800;
+                                        color: #0f172a;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: "Céd. " + c.dias_cedula + "d · Disp. " + c.disponibles + "d · Asig. " + c.asignados + "d";
+                                        font-size: 11.5px;
+                                        font-weight: 600;
+                                        color: c.asignados > c.disponibles ? #dc2626 : #475569;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    if c.es_baja : Text {
+                                        text: "Baja: sin asignación";
+                                        font-size: 11.5px;
+                                        font-weight: 700;
+                                        color: #64748b;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Obras asignadas con días y acciones por obra
+                                if !c.es_baja : HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+
+                                    for ch in c.obras : AsigChip {
+                                        width: 300px;
+                                        height: 30px;
+                                        texto: ch.numero;
+                                        color_idx: ch.color_idx;
+
+                                        SpinBox {
+                                            width: 72px;
+                                            height: 24px;
+                                            minimum: 0;
+                                            maximum: 31;
+                                            value: ch.dias;
+                                            edited(v) => { AppLogic.asig_cambiar_dias(c.id_reporte, ch.id_obra, v); }
+                                        }
+
+                                        AsigObraPicker {
+                                            width: 100px;
+                                            opciones: AppData.asig_obras;
+                                            placeholder: "↔ Cambiar";
+                                            fijo: true;
+                                            mostrar_numero: true;
+                                            ancho_lista: 180px;
+                                            elegido(i) => {
+                                                AppLogic.asig_reemplazar(c.id_reporte, ch.id_obra, AppData.asig_obras[i].id_obra);
+                                            }
+                                        }
+
+                                        AsigBoton {
+                                            width: 26px;
+                                            pequeno: true;
+                                            texto: "✕";
+                                            clicked => { AppLogic.asig_quitar(c.id_reporte, ch.id_obra); }
+                                        }
+                                    }
+                                }
+
+                                // Vincular nueva obra y acciones del mes
+                                if !c.es_baja : HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+
+                                    obra_pick := AsigObraPicker {
+                                        width: 210px;
+                                        opciones: AppData.asig_obras;
+                                        placeholder: "+ Obra";
+                                        ancho_lista: 320px;
+                                    }
+
+                                    dias_nueva := SpinBox {
+                                        width: 72px;
+                                        height: 26px;
+                                        minimum: 0;
+                                        maximum: 31;
+                                        value: c.disponibles - c.asignados > 0 ? c.disponibles - c.asignados : 0;
+                                    }
+
+                                    AsigBoton {
+                                        texto: "Vincular";
+                                        pequeno: true;
+                                        variante: 1;
+                                        habilitado: obra_pick.seleccion >= 0;
+                                        clicked => {
+                                            AppLogic.asig_vincular(c.id_reporte, AppData.asig_obras[obra_pick.seleccion].id_obra, dias_nueva.value);
+                                        }
+                                    }
+
+                                    AsigBoton {
+                                        texto: "Sin obra";
+                                        pequeno: true;
+                                        clicked => { AppLogic.asig_dejar_sin_obra(c.id_reporte); }
+                                    }
+
+                                    AsigBoton {
+                                        texto: "Copiar mes anterior";
+                                        icono: "⇤";
+                                        pequeno: true;
+                                        clicked => { AppLogic.asig_copiar_mes_anterior(c.id_reporte); }
+                                    }
+
+                                    AsigBoton {
+                                        texto: "Aplicar a todos los meses";
+                                        pequeno: true;
+                                        clicked => { AppLogic.asig_aplicar_a_meses(c.id_reporte, false); }
+                                    }
+
+                                    AsigBoton {
+                                        texto: "Aplicar a meses sin obra";
+                                        pequeno: true;
+                                        clicked => { AppLogic.asig_aplicar_a_meses(c.id_reporte, true); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Capa de procesamiento: bloquea la vista mientras se guarda
+    if AppData.asig_procesando : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #ffffffb3;
+
+        capa_bloqueo := TouchArea {}
+
+        guardando_caja := Rectangle {
+            x: (parent.width - 200px) / 2;
+            y: (parent.height - 52px) / 2;
+            width: 200px;
+            height: 52px;
+            border-radius: 8px;
+            background: #1e293b;
+
+            Text {
+                text: "Guardando…";
+                font-size: 14px;
+                font-weight: 700;
+                color: #ffffff;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+    }
+
+    // Atajos de teclado de la pestaña. Solo acepta las combinaciones propias;
+    // el resto se rechaza para no robar teclas a los controles de edición.
+    atajos := FocusScope {
+        width: parent.width;
+        height: parent.height;
+
+        key-pressed(event) => {
+            if (event.modifiers.control && event.text == "f") {
+                buscador.focus();
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "z" && AppData.asig_puede_deshacer && !AppData.asig_procesando) {
+                AppLogic.asig_deshacer();
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "m") {
+                AppLogic.asig_asistente_abrir();
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                AppData.asig_empleado_sel_id = "";
+                AppData.asig_empleado_sel_nombre = "";
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // Asistente de asignación masiva (escenario C): último hijo para quedar encima de la vista,
+    // de la capa "Guardando…" y del FocusScope de atajos (antes estaba anidado en la capa de
+    // procesamiento y nunca se mostraba).
+    if AppData.show_asig_asistente : AsistenteAsignacionModal {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+    }
+}

@@ -628,7 +628,68 @@ export struct CalendarRevisionItem {
     has_entrega_con_prorroga: bool,
 }
 
+export struct AsigObraChip { id_obra: string, numero: string, dias: int, color_idx: int }
+export struct AsigCelda {
+    existe: bool, id_reporte: string, etiqueta_mes: string,
+    dias_cedula: int, disponibles: int, asignados: int,
+    obras: [AsigObraChip], es_baja: bool, sin_obra: bool, inconsistente: bool, cedula_actualizada: bool }
+export struct AsigEmpleadoFila {
+    id_empleado: string, nombre: string, nss: string, rfc: string,
+    num_obras: int, tiene_inconsistencia: bool, cedula_actualizada: bool, celdas: [AsigCelda] }
+export struct AsigObraOpcion { id_obra: string, numero: string, label: string, vigencia: string, color_idx: int }
+
+// Pestaña "Asignación por Obra"
+export struct AsigObraTarjeta { id_obra: string, numero: string, label: string, vigencia: string, monto: string,
+    empleados: int, empleado_mes: int, dias: int, gps: string, valor_guarderia: string, limite_18: string,
+    supera_18: bool, sin_monto: bool, color_idx: int }
+export struct AsigObraRenglon { id_reporte: string, id_empleado: string, nombre: string, nss: string,
+    etiqueta_mes: string, dias: int, dias_cedula: int, seleccionado: bool }
+// Asistente de asignación masiva (lo usa otro worker)
+export struct AsigAsistentePrevia { nombre: string, nss: string, etiqueta_mes: string, obras: string, resultado: string, omitido: bool }
+
 export global AppData {
+    // Asignación por empleado (pestañas de Reporte)
+    in-out property <int> reporte_tab_idx: 0; // 0 Detalle de cuotas, 1 Asignación por empleado, 2 Asignación por obra
+    in-out property <[string]> asig_meses: [];
+    in-out property <[AsigEmpleadoFila]> asig_filas: [];
+    in-out property <[AsigObraOpcion]> asig_obras: [];
+    in-out property <int> asig_filtro_idx: 0; // 0 Todos, 1 Sin obra, 2 Una obra, 3 Dos o más, 4 Con inconsistencia, 5 Cédula actualizada
+    in-out property <string> asig_busqueda: "";
+    in-out property <int> asig_total: 0;
+    in-out property <int> asig_con_obra: 0;
+    in-out property <int> asig_sin_obra: 0;
+    in-out property <int> asig_inconsistencias: 0;
+    in-out property <int> asig_cedula_actualizada: 0;
+    in-out property <float> asig_porcentaje: 0.0; // 0..100
+    in-out property <string> asig_escenario_texto: "";
+    in-out property <string> asig_empleado_sel_id: "";
+    in-out property <string> asig_empleado_sel_nombre: "";
+    in-out property <[AsigCelda]> asig_detalle: []; // celdas existentes del empleado seleccionado
+    in-out property <bool> asig_puede_deshacer: false;
+    in-out property <string> asig_ultimo_cambio: ""; // p. ej. "VINCULAR · 12:41"
+    in-out property <bool> asig_procesando: false;
+    // Pestaña "Asignación por Obra"
+    in-out property <[AsigObraTarjeta]> asig_obra_tarjetas: [];
+    in-out property <string> asig_obra_sel_id: "";
+    in-out property <string> asig_obra_sel_titulo: "";
+    in-out property <[AsigObraRenglon]> asig_obra_renglones: [];
+    in-out property <[AsigObraRenglon]> asig_obra_candidatos: [];
+    in-out property <string> asig_obra_candidatos_busqueda: "";
+    in-out property <bool> show_asig_obra_agregar_modal: false;
+    // Asistente
+    in-out property <bool> show_asig_asistente: false;
+    in-out property <int> asig_asistente_paso: 1;           // 1 = regla, 2 = vista previa
+    in-out property <int> asig_asistente_regla: 0;          // 0 vigencia, 1 todos a una obra, 2 importar archivo, 3 copiar de otra revisión
+    in-out property <int> asig_asistente_alcance: 0;        // 0 solo empleado-mes sin obra, 1 todos
+    in-out property <int> asig_asistente_obra_idx: 0;       // índice en asig_obras
+    in-out property <int> asig_asistente_mes_desde_idx: 0;  // índice en asig_meses
+    in-out property <int> asig_asistente_mes_hasta_idx: 0;
+    in-out property <string> asig_asistente_archivo: "";
+    in-out property <[string]> asig_asistente_revisiones: [];
+    in-out property <int> asig_asistente_revision_idx: 0;
+    in-out property <[AsigAsistentePrevia]> asig_asistente_previa: [];
+    in-out property <string> asig_asistente_resumen: "";
+    in-out property <bool> asig_asistente_puede_aplicar: false;
     // Vista actual: 0: Auditoría/Carga, 1: Clientes, 2: Registros Patronales, 3: Empleados
     in-out property <int> current_view: 1;
 
@@ -1441,6 +1502,35 @@ export global AppData {
 }
 
 export global AppLogic {
+    // Asignación por empleado
+    callback asig_buscar(string);
+    callback asig_filtrar(int);
+    callback asig_seleccionar_empleado(string);               // id_empleado
+    callback asig_vincular(string, string, int);               // id_reporte, id_obra, dias
+    callback asig_reemplazar(string, string, string);          // id_reporte, id_obra_actual, id_obra_nueva
+    callback asig_quitar(string, string);                      // id_reporte, id_obra
+    callback asig_dejar_sin_obra(string);                      // id_reporte
+    callback asig_cambiar_dias(string, string, int);           // id_reporte, id_obra, dias
+    callback asig_aplicar_a_meses(string, bool);               // id_reporte origen, solo_meses_sin_obra
+    callback asig_copiar_mes_anterior(string);                 // id_reporte destino
+    callback asig_revertir_empleado(string);                   // id_empleado
+    callback asig_deshacer();
+    // Pestaña "Asignación por Obra"
+    callback asig_obra_seleccionar(string);
+    callback asig_obra_toggle_renglon(string);
+    callback asig_obra_quitar_seleccionados();
+    callback asig_obra_abrir_agregar();
+    callback asig_obra_buscar_candidatos(string);
+    callback asig_obra_toggle_candidato(string);
+    callback asig_obra_agregar_seleccionados();
+    callback asig_obra_cerrar_agregar();
+    // Asistente de asignación masiva
+    callback asig_asistente_abrir();
+    callback asig_asistente_cerrar();
+    callback asig_asistente_elegir_archivo();
+    callback asig_asistente_vista_previa();
+    callback asig_asistente_aplicar();
+    callback asig_asistente_atras();
     // Navegación
     callback navigate_view(int);
     callback toggle_sidebar();

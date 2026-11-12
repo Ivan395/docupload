@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS public.reportes_cambios (
 );
 CREATE INDEX IF NOT EXISTS idx_reportes_cambios_rev ON public.reportes_cambios(id_revision, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reportes_cambios_lote ON public.reportes_cambios(lote_id);
+-- Pila de deshacer: lote DESHACER que revirtió este cambio (NULL = vigente)
+ALTER TABLE public.reportes_cambios ADD COLUMN IF NOT EXISTS deshecho_por uuid;
 
 CREATE TABLE IF NOT EXISTS public.exportaciones_reportes (
     id uuid PRIMARY KEY DEFAULT uuidv7(),
