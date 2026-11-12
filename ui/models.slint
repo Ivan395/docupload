@@ -647,6 +647,11 @@ export struct AsigObraRenglon { id_reporte: string, id_empleado: string, nombre:
 // Asistente de asignación masiva (lo usa otro worker)
 export struct AsigAsistentePrevia { nombre: string, nss: string, etiqueta_mes: string, obras: string, resultado: string, omitido: bool }
 
+// Verificación previa al entregable IMSS: severidad 0 bloqueante, 1 advertencia, 2 info
+export struct EntregablePunto { severidad: int, titulo: string, detalle: string }
+// Versión emitida del entregable IMSS con su huella de integridad
+export struct EntregableVersion { id: string, version: int, tipo: string, fecha: string, hash: string, resumen: string }
+
 export global AppData {
     // Asignación por empleado (pestañas de Reporte)
     in-out property <int> reporte_tab_idx: 0; // 0 Detalle de cuotas, 1 Asignación por empleado, 2 Asignación por obra
@@ -674,6 +679,14 @@ export global AppData {
     in-out property <string> operacion_detalle: "";
     in-out property <string> asig_atajos_texto: "Ctrl+F buscar · Ctrl+Z deshacer · Ctrl+Shift+A asistente · Esc limpiar";
     in-out property <bool> show_reporte_confirmar_revertir: false;
+    // Entregable IMSS: verificación previa y historial de versiones
+    in-out property <bool> show_entregable_modal: false;
+    in-out property <[EntregablePunto]> entregable_puntos: [];
+    in-out property <bool> entregable_puede_entregar: false;
+    in-out property <int> entregable_siguiente_version: 1;
+    in-out property <string> entregable_resumen: "";
+    in-out property <bool> show_entregable_historial: false;
+    in-out property <[EntregableVersion]> entregable_historial: [];
     // Pestaña "Asignación por Obra"
     in-out property <[AsigObraTarjeta]> asig_obra_tarjetas: [];
     in-out property <string> asig_obra_sel_id: "";
@@ -1772,6 +1785,13 @@ callback recargar_cedulas_view();
     // Confirmación explícita antes de revertir (la reversión borra las asignaciones del analista)
     callback reporte_confirmar_revertir();
     callback reporte_cancelar_revertir();
+    // Entregable IMSS: verificación, generación, historial y descarga
+    callback entregable_generar_borrador();
+    callback entregable_generar_definitivo();
+    callback entregable_cerrar();
+    callback entregable_abrir_historial();
+    callback entregable_cerrar_historial();
+    callback entregable_descargar(string);
 
     // Callbacks de ordenamiento multi-criterio
     callback reporte_open_sort_modal();

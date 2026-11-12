@@ -821,11 +821,16 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
               AND ($1::uuid IS NULL OR rl.id_revision = $1)
               AND rl.editado_usuario = false
         )
+        -- La obra se compara por NÚMERO, no por id: las liquidaciones son por registro patronal y se
+        -- comparten entre revisiones, y cada revisión tiene su propia fila de registros_obras para la misma
+        -- obra. Comparar ids marcaba como "fantasma" una obra válida de la cédula en otra revisión.
         AND NOT EXISTS (
             SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol
             JOIN public.reportes_liquidaciones rl ON rl.id_liquidacion = vol.id_liquidacion
+            JOIN public.registros_obras ro_m ON ro_m.id = vol.id_registro_obra
+            JOIN public.registros_obras ro_r ON ro_r.id = rvol.id_registro_obra
             WHERE rl.id = rvol.id_reporte_liquidacion
-              AND vol.id_registro_obra = rvol.id_registro_obra
+              AND BTRIM(UPPER(ro_m.numero)) = BTRIM(UPPER(ro_r.numero))
         )
         AND EXISTS (
             SELECT 1 FROM public.registros_obras ro
@@ -1213,6 +1218,9 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         USING public.reportes_liquidaciones rl
         WHERE rvol.id_reporte_liquidacion = rl.id
           AND rl.id_registro_patronal = ANY($2)
+          -- Solo la revisión que se sincroniza: sin este filtro se borraban las vinculaciones de las
+          -- demás revisiones del mismo registro patronal (sus obras son filas de OTRA revisión).
+          AND ($1::uuid IS NULL OR rl.id_revision = $1)
           AND rl.editado_usuario = false
           AND rvol.id_registro_obra IS NOT NULL
           AND rvol.id_registro_obra NOT IN (
@@ -3901,6 +3909,107 @@ pub struct ReporteFinalHeaderMeta {
     pub revision_folio: String,
 }
 
+/// Copia del encabezado con cada campo obligatorio vacío reemplazado por "[FALTA: <campo>]".
+/// Solo para borradores: deja visible qué falta capturar en lugar de inventar un valor.
+pub fn meta_con_marcadores_faltantes(meta: &ReporteFinalHeaderMeta) -> ReporteFinalHeaderMeta {
+    let marca = |valor: &str, etiqueta: &str| -> String {
+        if valor.trim().is_empty() { format!("[FALTA: {etiqueta}]") } else { valor.to_string() }
+    };
+    ReporteFinalHeaderMeta {
+        delegacion: marca(&meta.delegacion, "Delegación IMSS"),
+        subdelegacion: marca(&meta.subdelegacion, "Subdelegación IMSS"),
+        cliente_nombre: marca(&meta.cliente_nombre, "Razón social"),
+        rp_registro: marca(&meta.rp_registro, "Registro patronal"),
+        rfc: marca(&meta.rfc, "RFC"),
+        periodo_obra: marca(&meta.periodo_obra, "Periodo"),
+        representante_legal: marca(&meta.representante_legal, "Representante legal"),
+        revision_folio: marca(&meta.revision_folio, "Folio"),
+    }
+}
+
+/// Modo de exportación del Excel IMSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModoEntregable {
+    Borrador,
+    Entregable { version: i32 },
+}
+
+/// Escapa un texto para encabezado/pie de Excel (cada `&` literal se duplica)
+/// y lo recorta para que su salida no supere `max_chars` caracteres.
+fn escapar_texto_impresion(texto: &str, max_chars: usize) -> String {
+    let mut salida = String::new();
+    let mut usados = 0usize;
+    for c in texto.chars() {
+        let costo = if c == '&' { 2 } else { 1 };
+        if usados + costo > max_chars {
+            break;
+        }
+        if c == '&' {
+            salida.push_str("&&");
+        } else {
+            salida.push(c);
+        }
+        usados += costo;
+    }
+    salida
+}
+
+/// Configuración de impresión oficial: carta horizontal, 1 página de ancho,
+/// fila de encabezado de tabla repetida e inmovilizada, márgenes estándar.
+fn configurar_impresion(
+    ws: &mut rust_xlsxwriter::Worksheet,
+    fila_encabezado_tabla: u32,
+    ultima_columna: u16,
+) -> Result<(), String> {
+    // Límite de columnas de Excel (XFD = 16383)
+    if ultima_columna > 16_383 {
+        return Err(format!("Columna final fuera de rango para impresión: {}", ultima_columna));
+    }
+    ws.set_landscape();
+    ws.set_paper_size(1);
+    ws.set_print_fit_to_pages(1, 0);
+    ws.set_repeat_rows(fila_encabezado_tabla, fila_encabezado_tabla).map_err(|e| e.to_string())?;
+    ws.set_freeze_panes(fila_encabezado_tabla + 1, 0).map_err(|e| e.to_string())?;
+    ws.set_margins(0.4, 0.4, 0.75, 0.75, 0.3, 0.3);
+    Ok(())
+}
+
+/// Escribe un total como fórmula `SUMIF` sobre las filas de subtotal por mes
+/// (identificadas por el prefijo "TOTAL" en `clave_col`), con su valor en caché.
+/// Ignorar las filas de detalle evita el doble conteo. Sin filas, escribe el número.
+#[allow(clippy::too_many_arguments)]
+fn escribir_total_sumif(
+    ws: &mut rust_xlsxwriter::Worksheet,
+    fila_total: u32,
+    col: u16,
+    primera_fila: u32,
+    ultima_fila: u32,
+    clave_col: u16,
+    valor: f64,
+    formato: &rust_xlsxwriter::Format,
+) -> Result<(), String> {
+    if ultima_fila < primera_fila {
+        ws.write_number_with_format(fila_total, col, valor, formato).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    // Referencias A1 (base 1) del rango de filas
+    let r0 = primera_fila + 1;
+    let r1 = ultima_fila + 1;
+    let letra = rust_xlsxwriter::utility::column_number_to_name(col);
+    let letra_clave = rust_xlsxwriter::utility::column_number_to_name(clave_col);
+    let formula = format!(
+        "SUMIF(${letra_clave}${r0}:${letra_clave}${r1},\"TOTAL*\",{letra}{r0}:{letra}{r1})"
+    );
+    ws.write_formula_with_format(
+        fila_total,
+        col,
+        rust_xlsxwriter::Formula::new(formula).set_result(valor.to_string()),
+        formato,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Devuelve la lista de campos obligatorios vacíos del encabezado oficial (vacía = válido).
 pub fn missing_header_fields(meta: &ReporteFinalHeaderMeta) -> Vec<&'static str> {
     let campos: [(&str, &'static str); 8] = [
@@ -3975,17 +4084,25 @@ pub fn export_reporte_liquidaciones_to_excel(
     rp_registro: &str,
     revision_folio: &str,
     header_meta: &ReporteFinalHeaderMeta,
+    modo: ModoEntregable,
 ) -> Result<(), String> {
-    use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook};
+    use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, ProtectionOptions, Workbook};
 
     // Ningún dato fijo: el encabezado oficial exige todos los campos capturados
+    // Entregable: el encabezado oficial debe estar completo. Borrador: se permite con marcadores
+    // explícitos "[FALTA: ...]" (no son datos inventados y el documento lleva la marca BORRADOR).
     let faltantes = missing_header_fields(header_meta);
-    if !faltantes.is_empty() {
+    let meta_efectivo: ReporteFinalHeaderMeta = if faltantes.is_empty() {
+        header_meta.clone()
+    } else if matches!(modo, ModoEntregable::Entregable { .. }) {
         return Err(format!(
             "No se puede generar el entregable: faltan datos obligatorios: {}",
             faltantes.join(", ")
         ));
-    }
+    } else {
+        meta_con_marcadores_faltantes(header_meta)
+    };
+    let header_meta = &meta_efectivo;
 
     let mut workbook = Workbook::new();
 
@@ -4003,23 +4120,17 @@ pub fn export_reporte_liquidaciones_to_excel(
     // Superior derecho: Folio de la Revisión
     // Inferior izquierdo: Representante de la empresa
     // Inferior derecho: Número de páginas (Página &P de &N)
-    let clean_rz = if emp_nombre.chars().count() > 80 {
-        emp_nombre.chars().take(80).collect::<String>()
-    } else {
-        emp_nombre.to_string()
-    };
-    let clean_fol = if fol_rev.chars().count() > 40 {
-        fol_rev.chars().take(40).collect::<String>()
-    } else {
-        fol_rev.to_string()
-    };
-    let clean_rep = if rep_legal.chars().count() > 80 {
-        rep_legal.chars().take(80).collect::<String>()
-    } else {
-        rep_legal.to_string()
+    let clean_rz = escapar_texto_impresion(emp_nombre, 80);
+    let clean_fol = escapar_texto_impresion(fol_rev, 40);
+    let clean_rep = escapar_texto_impresion(rep_legal, 80);
+
+    // Marca central: borrador visible o versión del entregable (límite de Excel: 255 caracteres)
+    let centro_encabezado = match modo {
+        ModoEntregable::Borrador => "&\"-,Bold\"&KFF0000BORRADOR — NO VÁLIDO PARA ENTREGA".to_string(),
+        ModoEntregable::Entregable { version } => format!("ENTREGABLE IMSS v{}", version),
     };
 
-    let print_header_str = format!("&L{}&R{}", clean_rz, clean_fol);
+    let print_header_str = format!("&L{}&C{}&R{}", clean_rz, centro_encabezado, clean_fol);
     let print_footer_str = format!("&L{}&RPágina &P de &N", clean_rep);
 
     // =========================================================================
@@ -4232,6 +4343,19 @@ pub fn export_reporte_liquidaciones_to_excel(
             ws_final.merge_range(r, 9, r, 16, *val, &meta_val_fmt).map_err(|e| e.to_string())?;
         }
 
+        // Marca visible de borrador en la fila libre (índice 10) bajo los metadatos
+        if matches!(modo, ModoEntregable::Borrador) {
+            let borrador_fmt = Format::new()
+                .set_bold()
+                .set_font_size(12)
+                .set_font_color(Color::RGB(0xFF0000))
+                .set_align(FormatAlign::Center)
+                .set_align(FormatAlign::VerticalCenter);
+            ws_final
+                .merge_range(10, 0, 10, 18, "BORRADOR — NO VÁLIDO PARA ENTREGA AL IMSS", &borrador_fmt)
+                .map_err(|e| e.to_string())?;
+        }
+
         // Fila 11 (Índice 11 = fila 12 en Excel): Encabezados de Tabla
         let table_header_row = 11;
         let final_headers = [
@@ -4401,25 +4525,34 @@ pub fn export_reporte_liquidaciones_to_excel(
         ws_final.write_string_with_format(grand_total_row, 0, "RESUMEN / GRAND TOTAL", &grand_tot_lbl).map_err(|e| e.to_string())?;
         ws_final.write_string_with_format(grand_total_row, 1, "", &grand_tot_lbl).map_err(|e| e.to_string())?;
         ws_final.write_string_with_format(grand_total_row, 2, "", &grand_tot_lbl).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 3, grand_dias, &grand_tot_int).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 4, grand_sdi, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 5, grand_cf, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 6, grand_exc_pat, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 7, grand_exc_obr, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 8, grand_pd_pat, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 9, grand_pd_obr, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 10, grand_gmp_pat, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 11, grand_gmp_obr, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 12, grand_rt, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 13, grand_iv_pat, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 14, grand_iv_obr, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 15, grand_gps, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 16, grand_patronal, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 17, grand_obrera, &grand_tot_curr).map_err(|e| e.to_string())?;
-        ws_final.write_number_with_format(grand_total_row, 18, grand_subtotal, &grand_tot_curr).map_err(|e| e.to_string())?;
+        // Totales como fórmulas SUMIF sobre las filas de subtotal por mes (sin doble conteo)
+        let primera_det = table_header_row + 1;
+        let ultima_det = grand_total_row - 1;
+        let totales_final: [(u16, f64, &Format); 16] = [
+            (3, grand_dias, &grand_tot_int),
+            (4, grand_sdi, &grand_tot_curr),
+            (5, grand_cf, &grand_tot_curr),
+            (6, grand_exc_pat, &grand_tot_curr),
+            (7, grand_exc_obr, &grand_tot_curr),
+            (8, grand_pd_pat, &grand_tot_curr),
+            (9, grand_pd_obr, &grand_tot_curr),
+            (10, grand_gmp_pat, &grand_tot_curr),
+            (11, grand_gmp_obr, &grand_tot_curr),
+            (12, grand_rt, &grand_tot_curr),
+            (13, grand_iv_pat, &grand_tot_curr),
+            (14, grand_iv_obr, &grand_tot_curr),
+            (15, grand_gps, &grand_tot_curr),
+            (16, grand_patronal, &grand_tot_curr),
+            (17, grand_obrera, &grand_tot_curr),
+            (18, grand_subtotal, &grand_tot_curr),
+        ];
+        for (col, valor, fmt) in totales_final {
+            escribir_total_sumif(ws_final, grand_total_row, col, primera_det, ultima_det, 0, valor, fmt)?;
+        }
 
         // Activar autofiltro en la tabla
         let _ = ws_final.autofilter(table_header_row, 0, grand_total_row, 18);
+        configurar_impresion(ws_final, table_header_row, 18)?;
 
         // Bloque de Firma y Valor Guarderías (1%)
         let sig_r = grand_total_row + 5;
@@ -4762,39 +4895,38 @@ pub fn export_reporte_liquidaciones_to_excel(
         worksheet.write_string_with_format(current_r, c as u16, "", &grand_total_label_format).map_err(|e| e.to_string())?;
     }
 
-    worksheet.write_number_with_format(current_r, 11, g_dias_ced, &grand_total_int_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 12, g_dias_obr, &grand_total_int_format).map_err(|e| e.to_string())?;
-    if g_lic > 0.001 {
-        worksheet.write_number_with_format(current_r, 13, g_lic, &grand_total_int_format).map_err(|e| e.to_string())?;
-    } else {
-        worksheet.write_string_with_format(current_r, 13, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+    // Totales generales como fórmulas SUMIF sobre las filas de subtotal por mes
+    let primera_det_p = header_row + 1;
+    let ultima_det_p = current_r - 1;
+    escribir_total_sumif(worksheet, current_r, 11, primera_det_p, ultima_det_p, 5, g_dias_ced, &grand_total_int_format)?;
+    escribir_total_sumif(worksheet, current_r, 12, primera_det_p, ultima_det_p, 5, g_dias_obr, &grand_total_int_format)?;
+    for (col, valor) in [(13u16, g_lic), (14u16, g_inc), (15u16, g_aus)] {
+        if valor > 0.001 {
+            escribir_total_sumif(worksheet, current_r, col, primera_det_p, ultima_det_p, 5, valor, &grand_total_int_format)?;
+        } else {
+            worksheet.write_string_with_format(current_r, col, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+        }
     }
-    if g_inc > 0.001 {
-        worksheet.write_number_with_format(current_r, 14, g_inc, &grand_total_int_format).map_err(|e| e.to_string())?;
-    } else {
-        worksheet.write_string_with_format(current_r, 14, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
+    let totales_p: [(u16, f64); 15] = [
+        (16, g_cf),
+        (17, g_exc_pat),
+        (18, g_exc_obr),
+        (19, g_pd_pat),
+        (20, g_pd_obr),
+        (21, g_gmp_pat),
+        (22, g_gmp_obr),
+        (23, g_rt),
+        (24, g_iv_pat),
+        (25, g_iv_obr),
+        (26, g_gps),
+        (27, g_patronal),
+        (28, g_obrera),
+        (29, g_subtotal),
+        (30, g_subtotal_orig),
+    ];
+    for (col, valor) in totales_p {
+        escribir_total_sumif(worksheet, current_r, col, primera_det_p, ultima_det_p, 5, valor, &grand_total_curr_format)?;
     }
-    if g_aus > 0.001 {
-        worksheet.write_number_with_format(current_r, 15, g_aus, &grand_total_int_format).map_err(|e| e.to_string())?;
-    } else {
-        worksheet.write_string_with_format(current_r, 15, "-", &grand_total_label_format).map_err(|e| e.to_string())?;
-    }
-
-    worksheet.write_number_with_format(current_r, 16, g_cf, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 17, g_exc_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 18, g_exc_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 19, g_pd_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 20, g_pd_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 21, g_gmp_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 22, g_gmp_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 23, g_rt, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 24, g_iv_pat, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 25, g_iv_obr, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 26, g_gps, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 27, g_patronal, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 28, g_obrera, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 29, g_subtotal, &grand_total_curr_format).map_err(|e| e.to_string())?;
-    worksheet.write_number_with_format(current_r, 30, g_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
 
     // =========================================================================
     // SECCIÓN POST-TABLA: Análisis de Guarderías (Tope 18% por Registro de Obra)
@@ -5009,6 +5141,7 @@ pub fn export_reporte_liquidaciones_to_excel(
     }
 
     worksheet.autofit();
+    configurar_impresion(worksheet, header_row, 30)?;
 
     let is_valid_user_obra = |r: &ReporteLiquidacionRowDb| -> bool {
         if let Some(oid) = r.id_registro_obra {
@@ -5298,6 +5431,7 @@ pub fn export_reporte_liquidaciones_to_excel(
         ws_emp_obra.write_number_with_format(curr_r_s2, 26, s2_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
 
         ws_emp_obra.autofit();
+        configurar_impresion(ws_emp_obra, header_row_s2, 26)?;
     }
 
     // =========================================================================
@@ -5582,6 +5716,7 @@ pub fn export_reporte_liquidaciones_to_excel(
         ws_emp.write_number_with_format(curr_r_s3, 26, s3_subtotal_orig, &grand_total_curr_format).map_err(|e| e.to_string())?;
 
         ws_emp.autofit();
+        configurar_impresion(ws_emp, header_row_s3, 26)?;
     }
 
     // =========================================================================
@@ -5782,6 +5917,20 @@ pub fn export_reporte_liquidaciones_to_excel(
         }
 
         ws_guard.autofit();
+        configurar_impresion(ws_guard, header_row_s4, 7)?;
+    }
+
+    // Entregable: hojas protegidas sin contraseña; selección y autofiltro permitidos
+    if matches!(modo, ModoEntregable::Entregable { .. }) {
+        let opciones_proteccion = ProtectionOptions {
+            select_locked_cells: true,
+            select_unlocked_cells: true,
+            use_autofilter: true,
+            ..ProtectionOptions::new()
+        };
+        for ws in workbook.worksheets_mut() {
+            ws.protect_with_options(&opciones_proteccion);
+        }
     }
 
     workbook.save(file_path).map_err(|e| format!("Error guardando archivo Excel: {}", e))?;
@@ -6734,6 +6883,7 @@ mod tests {
                 representante_legal: "REPRESENTANTE DE PRUEBA".to_string(),
                 revision_folio: "REVISION 2024-01".to_string(),
             },
+            ModoEntregable::Entregable { version: 1 },
         );
 
         assert!(res.is_ok(), "El reporte en Excel debe generarse correctamente: {:?}", res.err());

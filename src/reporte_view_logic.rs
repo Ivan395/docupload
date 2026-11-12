@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use chrono::NaiveDate;
@@ -12,7 +12,7 @@ use crate::{
     ReporteFilterOptionItem, ReporteMesTotalItem, ReporteGuarderiaObraItem,
     ReporteObraUsuarioItem, ReporteSuaObraItem, ReporteBatchWorkerItem,
     ReporteSelectedItem, ReporteBatchObraItem, ReporteEditObraItem,
-    ReporteUniqueEmpleadoItem, InconsistenciaDetalle,
+    ReporteUniqueEmpleadoItem, InconsistenciaDetalle, EntregablePunto, EntregableVersion,
 };
 use crate::cedulas::business::month_to_num;
 use crate::db::DbPool;
@@ -26,8 +26,18 @@ use crate::db::reporte_liquidaciones::{
     extract_all_employee_movements, build_all_employee_movements_map,
     calculate_max_dias_obra_for_employee_movements, validate_obra_assignment_for_employee_movements,
     calculate_obra_days_in_month, missing_header_fields, parse_month_and_year, ReporteFinalHeaderMeta,
+    ModoEntregable,
 };
 use crate::sua_export;
+use crate::cedulas::almacen::sha256_hex;
+use crate::db::entregables::{
+    fetch_reporte_header_meta, listar_exportaciones, registrar_exportacion, siguiente_version,
+    ExportacionInfo,
+};
+use crate::entregable_logic::{
+    evaluar_lista_verificacion, resumen_json, ListaVerificacion, ResumenEntregable, Severidad,
+};
+use crate::rustfs::{download_rustfs_file, upload_file_to_rustfs};
 
 #[derive(Clone)]
 pub struct ReporteSessionState {
@@ -1720,6 +1730,329 @@ pub fn refresh_sua_modal_ui(app_data: &AppData, state: &ReporteSessionState) {
     app_data.set_reporte_sua_obras(ModelRc::new(VecModel::from(sua_obras_vec)));
     app_data.set_reporte_sua_selected_count(selected_count);
     app_data.set_reporte_sua_total_empleados_filtrados(filtered_workers.len() as i32);
+}
+
+/// Copia plana del estado que usan las exportaciones de Excel, sin tipos de UI, para poder
+/// generarlas en un hilo de fondo.
+#[derive(Clone)]
+struct ContextoEntregable {
+    revision_id: Option<Uuid>,
+    cliente_nombre: String,
+    rp_registro: String,
+    revision_nombre: String,
+    all_rows: Vec<ReporteLiquidacionRowDb>,
+    filtered_rows: Vec<ReporteLiquidacionRowDb>,
+    obras_options: Vec<ObraOptionDb>,
+    /// Obra elegida en el filtro de la vista; solo afecta a los KPIs del borrador.
+    filter_obra_id: Option<Uuid>,
+    /// `true` cuando la vista muestra menos filas que las activas.
+    hay_filtros: bool,
+}
+
+impl ContextoEntregable {
+    fn desde_estado(state: &ReporteSessionState) -> Self {
+        let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
+            Some(state.obras_options[state.filter_obra_idx - 1].id)
+        } else {
+            None
+        };
+        Self {
+            revision_id: revision_activa(state),
+            cliente_nombre: state.cliente_nombre.clone(),
+            rp_registro: state.rp_registro.clone(),
+            revision_nombre: state.revision_nombre.clone(),
+            all_rows: state.all_rows.clone(),
+            filtered_rows: state.filtered_rows.clone(),
+            obras_options: state.obras_options.clone(),
+            filter_obra_id,
+            hay_filtros: state.filtered_rows.len() != state.all_rows.len(),
+        }
+    }
+}
+
+/// Revisión seleccionada en la sesión, si su identificador es un UUID válido.
+fn revision_activa(state: &ReporteSessionState) -> Option<Uuid> {
+    state.current_revision_id.as_deref().and_then(|s| Uuid::parse_str(s).ok())
+}
+
+/// Carpeta de salida de los Excel: `./output`, con respaldo en Documentos o en la carpeta temporal.
+fn directorio_salida() -> PathBuf {
+    let default_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("output");
+    if std::fs::create_dir_all(&default_dir).is_ok() {
+        return default_dir;
+    }
+    let user_base = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let fallback_dir = user_base.join("Documents").join("FirmaFiscalACD_Output");
+    let _ = std::fs::create_dir_all(&fallback_dir);
+    if fallback_dir.exists() {
+        return fallback_dir;
+    }
+    let temp_out = std::env::temp_dir().join("FirmaFiscalACD_Output");
+    let _ = std::fs::create_dir_all(&temp_out);
+    temp_out
+}
+
+/// Convierte un texto en fragmento seguro para nombres de archivo; usa `vacio` si no queda nada.
+fn fragmento_nombre(texto: &str, vacio: &str) -> String {
+    let limpio: String = texto
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' => '_',
+            otro if otro.is_control() => '_',
+            otro => otro,
+        })
+        .collect();
+    let recortado = limpio.trim_matches('_');
+    if recortado.is_empty() {
+        vacio.to_string()
+    } else {
+        recortado.to_string()
+    }
+}
+
+/// Nombre del Excel: `<prefijo>Reporte_Liquidaciones_<folio>_<fecha>.xlsx`.
+fn nombre_archivo_excel(prefijo: &str, folio: &str, fecha: &str) -> String {
+    format!(
+        "{prefijo}Reporte_Liquidaciones_{}_{fecha}.xlsx",
+        fragmento_nombre(folio, "REVISION")
+    )
+}
+
+/// Marca de tiempo local para los nombres de archivo.
+fn marca_tiempo() -> String {
+    chrono::Local::now().format("%Y%m%d_%H%M%S").to_string()
+}
+
+/// Texto de resumen de la verificación previa al entregable.
+fn formato_resumen(r: &ResumenEntregable) -> String {
+    format!(
+        "{} filas activas · {} empleados · {} empleado-mes · Subtotal {}",
+        r.filas,
+        r.empleados,
+        r.empleado_mes,
+        format_curr(r.total_subtotal)
+    )
+}
+
+/// Resumen breve de una versión del historial, a partir del JSON guardado con la exportación.
+fn resumen_historial(resumen: Option<&serde_json::Value>) -> String {
+    let Some(j) = resumen else {
+        return String::new();
+    };
+    let filas = j.get("filas").and_then(|v| v.as_u64());
+    let subtotal = j.get("total_subtotal").and_then(|v| v.as_f64());
+    match (filas, subtotal) {
+        (Some(f), Some(s)) => format!("{f} filas · Subtotal {}", format_curr(s)),
+        (Some(f), None) => format!("{f} filas"),
+        (None, Some(s)) => format!("Subtotal {}", format_curr(s)),
+        (None, None) => String::new(),
+    }
+}
+
+/// Primeros 12 caracteres del hash SHA-256, para mostrar en pantalla.
+fn hash_corto(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// Código de severidad que consume la UI: 0 bloqueante, 1 advertencia, 2 informativo.
+fn codigo_severidad(s: &Severidad) -> i32 {
+    match s {
+        Severidad::Bloqueante => 0,
+        Severidad::Advertencia => 1,
+        Severidad::Info => 2,
+    }
+}
+
+/// Convierte la lista de verificación al modelo de la UI.
+fn modelo_puntos(lista: &ListaVerificacion) -> ModelRc<EntregablePunto> {
+    let puntos: Vec<EntregablePunto> = lista
+        .puntos
+        .iter()
+        .map(|p| EntregablePunto {
+            severidad: codigo_severidad(&p.severidad),
+            titulo: p.titulo.as_str().into(),
+            detalle: p.detalle.as_str().into(),
+        })
+        .collect();
+    ModelRc::new(VecModel::from(puntos))
+}
+
+/// Abre en el explorador la carpeta que contiene `ruta`.
+fn abrir_carpeta_de(ruta: &Path) {
+    if let Some(carpeta) = ruta.parent() {
+        crate::open_folder_in_os(carpeta);
+    }
+}
+
+/// Falla si el encabezado oficial tiene campos obligatorios vacíos.
+fn validar_encabezado(meta: &ReporteFinalHeaderMeta) -> Result<(), String> {
+    let faltantes = missing_header_fields(meta);
+    if faltantes.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "No se generó el Excel. Captura primero: {}",
+            faltantes.join(", ")
+        ))
+    }
+}
+
+/// Genera el Excel en `out_file`. El borrador usa la vista filtrada; el entregable, todas las filas activas.
+fn generar_excel(
+    ctx: &ContextoEntregable,
+    meta: &ReporteFinalHeaderMeta,
+    modo: ModoEntregable,
+    out_file: &Path,
+) -> Result<(), String> {
+    let valid_user_obra_ids: HashSet<Uuid> = ctx
+        .obras_options
+        .iter()
+        .filter(|o| o.creado_usuario)
+        .map(|o| o.id)
+        .collect();
+    let (filas, filtro_obra) = match modo {
+        ModoEntregable::Borrador => (ctx.filtered_rows.as_slice(), ctx.filter_obra_id),
+        ModoEntregable::Entregable { .. } => (ctx.all_rows.as_slice(), None),
+    };
+    let guarderias_kpis = compute_guarderias_kpis(filas, &ctx.obras_options, filtro_obra);
+    export_reporte_liquidaciones_to_excel(
+        filas,
+        &ctx.all_rows,
+        Some(&valid_user_obra_ids),
+        &guarderias_kpis,
+        out_file,
+        &meta.cliente_nombre,
+        &meta.rp_registro,
+        &meta.revision_folio,
+        meta,
+        modo,
+    )
+    .map_err(|e| format!("Error exportando Excel: {e}"))
+}
+
+/// Resultado de un entregable generado, subido a RustFS y registrado.
+struct EntregableGenerado {
+    ruta: PathBuf,
+    version: i32,
+    hash: String,
+}
+
+/// Obtiene la lista de verificación y la siguiente versión XLSX de la revisión activa.
+fn preparar_verificacion(
+    pool: &DbPool,
+    ctx: &ContextoEntregable,
+) -> Result<(ListaVerificacion, i32), String> {
+    let rev = ctx
+        .revision_id
+        .ok_or_else(|| "No hay una revisión activa seleccionada.".to_string())?;
+    let mut client = pool
+        .get()
+        .map_err(|e| format!("conexión a la base de datos: {e}"))?;
+    let meta = fetch_reporte_header_meta(&mut client, rev)?;
+    let lista = evaluar_lista_verificacion(&meta, &ctx.all_rows, &ctx.obras_options, ctx.hay_filtros);
+    let version = siguiente_version(&mut client, rev, "XLSX")?;
+    Ok((lista, version))
+}
+
+/// Genera el borrador (vista filtrada) en la carpeta de salida. No sube ni registra nada.
+fn generar_borrador(pool: &DbPool, ctx: &ContextoEntregable) -> Result<PathBuf, String> {
+    let rev = ctx
+        .revision_id
+        .ok_or_else(|| "No hay una revisión activa seleccionada.".to_string())?;
+    let mut client = pool
+        .get()
+        .map_err(|e| format!("conexión a la base de datos: {e}"))?;
+    // El borrador se permite con encabezado incompleto: el Excel muestra "[FALTA: ...]" en los huecos.
+    let meta = fetch_reporte_header_meta(&mut client, rev)?;
+    let ruta = directorio_salida().join(nombre_archivo_excel(
+        "BORRADOR_",
+        &meta.revision_folio,
+        &marca_tiempo(),
+    ));
+    generar_excel(ctx, &meta, ModoEntregable::Borrador, &ruta)?;
+    Ok(ruta)
+}
+
+/// Genera la versión `version_esperada` del entregable con todas las filas activas, la sube a RustFS
+/// y registra su hash. El registro solo ocurre si la subida fue correcta.
+fn generar_entregable(
+    pool: &DbPool,
+    ctx: &ContextoEntregable,
+    version_esperada: i32,
+) -> Result<EntregableGenerado, String> {
+    let rev = ctx
+        .revision_id
+        .ok_or_else(|| "No hay una revisión activa seleccionada.".to_string())?;
+    let mut client = pool
+        .get()
+        .map_err(|e| format!("conexión a la base de datos: {e}"))?;
+    let meta = fetch_reporte_header_meta(&mut client, rev)?;
+    validar_encabezado(&meta)?;
+    let lista = evaluar_lista_verificacion(&meta, &ctx.all_rows, &ctx.obras_options, ctx.hay_filtros);
+    if !lista.puede_entregar {
+        return Err("La verificación ya no permite entregar; revísala de nuevo.".to_string());
+    }
+    let version = siguiente_version(&mut client, rev, "XLSX")?;
+    if version != version_esperada {
+        return Err(format!(
+            "La versión cambió (ahora corresponde v{version}); revisa la verificación de nuevo."
+        ));
+    }
+
+    let nombre = nombre_archivo_excel(&format!("v{version}_"), &meta.revision_folio, &marca_tiempo());
+    let ruta = directorio_salida().join(&nombre);
+    generar_excel(ctx, &meta, ModoEntregable::Entregable { version }, &ruta)?;
+
+    let bytes = std::fs::read(&ruta)
+        .map_err(|e| format!("No se pudo leer el archivo generado: {e}"))?;
+    let hash = sha256_hex(&bytes);
+    let ubicacion = ruta.display().to_string();
+    let clave = upload_file_to_rustfs(
+        &ctx.cliente_nombre,
+        &ctx.rp_registro,
+        &ctx.revision_nombre,
+        "Entregables",
+        &nombre,
+        &bytes,
+    )
+    .map_err(|e| {
+        format!(
+            "El archivo se generó en {ubicacion}, pero no se pudo guardar en RustFS ({e}); la versión no quedó registrada."
+        )
+    })?;
+    registrar_exportacion(
+        &mut client,
+        rev,
+        "XLSX",
+        version,
+        &hash,
+        &clave,
+        &resumen_json(&lista),
+    )
+    .map_err(|e| {
+        format!(
+            "El archivo se generó en {ubicacion} y se guardó en RustFS, pero no se pudo registrar la versión: {e}"
+        )
+    })?;
+
+    Ok(EntregableGenerado { ruta, version, hash })
+}
+
+/// Descarga una versión desde RustFS, la guarda en la carpeta de salida y compara su hash
+/// con el registrado. Devuelve la ruta y si el hash coincide.
+fn descargar_version(info: &ExportacionInfo) -> Result<(PathBuf, bool), String> {
+    let bytes = download_rustfs_file(&info.rustfs_key)?;
+    let coincide = sha256_hex(&bytes).eq_ignore_ascii_case(&info.sha256);
+    let nombre = info.rustfs_key.rsplit('/').next().unwrap_or("entregable.xlsx");
+    let ruta = directorio_salida().join(nombre);
+    std::fs::write(&ruta, &bytes)
+        .map_err(|e| format!("No se pudo guardar el archivo descargado: {e}"))?;
+    Ok((ruta, coincide))
 }
 
 pub fn wire_reporte_liquidaciones_callbacks(
@@ -5161,194 +5494,254 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 19. Exportar a Excel
+    // 19. Exportar a Excel: abre la lista de verificación del entregable (no exporta directamente)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
         let pool_clone = db_pool.clone();
         app_logic.on_exportar_reporte_liquidaciones_excel(move || {
-            if let Some(ui) = ui_weak.upgrade() {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let ctx = {
                 let state = session_clone.lock().unwrap();
-                if state.filtered_rows.is_empty() {
-                    crate::show_toast_message(&ui, "No hay filas en el reporte para exportar.");
-                    return;
+                ContextoEntregable::desde_estado(&state)
+            };
+            let Some(pool) = pool_clone.clone() else {
+                crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                return;
+            };
+            match preparar_verificacion(&pool, &ctx) {
+                Ok((lista, version)) => {
+                    let app_data = ui.global::<AppData>();
+                    app_data.set_entregable_puntos(modelo_puntos(&lista));
+                    app_data.set_entregable_puede_entregar(lista.puede_entregar);
+                    app_data.set_entregable_siguiente_version(version);
+                    app_data.set_entregable_resumen(formato_resumen(&lista.resumen).into());
+                    app_data.set_show_entregable_modal(true);
                 }
-
-                let output_dir = {
-                    let default_dir = std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .join("output");
-                    if std::fs::create_dir_all(&default_dir).is_ok() {
-                        default_dir
-                    } else {
-                        let user_base = std::env::var("USERPROFILE")
-                            .or_else(|_| std::env::var("HOME"))
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|_| std::env::temp_dir());
-                        let fallback_dir = user_base.join("Documents").join("FirmaFiscalACD_Output");
-                        let _ = std::fs::create_dir_all(&fallback_dir);
-                        if fallback_dir.exists() {
-                            fallback_dir
-                        } else {
-                            let temp_out = std::env::temp_dir().join("FirmaFiscalACD_Output");
-                            let _ = std::fs::create_dir_all(&temp_out);
-                            temp_out
-                        }
-                    }
-                };
-
-                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                let clean_rev: String = state.revision_nombre
-                    .chars()
-                    .map(|c| match c {
-                        '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' => '_',
-                        other if other.is_control() => '_',
-                        other => other,
-                    })
-                    .collect();
-                let clean_rev_trimmed = clean_rev.trim_matches('_');
-                let final_rev_tag = if clean_rev_trimmed.is_empty() { "REVISION" } else { clean_rev_trimmed };
-                let filename = format!("Reporte_Liquidaciones_{}_{}.xlsx", final_rev_tag, timestamp);
-                let out_file = output_dir.join(&filename);
-
-                let valid_user_obra_ids: HashSet<Uuid> = state
-                    .obras_options
-                    .iter()
-                    .filter(|o| o.creado_usuario)
-                    .map(|o| o.id)
-                    .collect();
-
-                let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
-                    Some(state.obras_options[state.filter_obra_idx - 1].id)
-                } else {
-                    None
-                };
-
-                let guarderias_kpis = compute_guarderias_kpis(
-                    &state.filtered_rows,
-                    &state.obras_options,
-                    filter_obra_id,
-                );
-
-                let mut delegacion = String::new();
-                let mut subdelegacion = String::new();
-                let mut rfc = String::new();
-                let mut representante_legal = String::new();
-                let mut razon_social = String::new();
-
-                if let Some(ref pool) = pool_clone {
-                    if let Ok(mut client) = pool.get() {
-                        if let Some(ref rev_id_str) = state.current_revision_id {
-                            if let Ok(rev_uuid) = Uuid::parse_str(rev_id_str) {
-                                if let Ok(Some(row)) = client.query_opt(
-                                    r#"
-                                    SELECT c.rfc, rp.delegacion, rp.subdelegacion, c.representante_legal, c.razon_social
-                                    FROM public.revisiones r
-                                    JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal
-                                    JOIN public.clientes c ON c.id = rp.id_cliente
-                                    WHERE r.id = $1
-                                    "#,
-                                    &[&rev_uuid],
-                                ) {
-                                    if let Some(r) = row.get::<_, Option<String>>(0) {
-                                        if !r.trim().is_empty() { rfc = r.trim().to_string(); }
-                                    }
-                                    if let Some(d) = row.get::<_, Option<String>>(1) {
-                                        if !d.trim().is_empty() { delegacion = d.trim().to_string(); }
-                                    }
-                                    if let Some(sd) = row.get::<_, Option<String>>(2) {
-                                        if !sd.trim().is_empty() { subdelegacion = sd.trim().to_string(); }
-                                    }
-                                    if let Some(rl) = row.get::<_, Option<String>>(3) {
-                                        if !rl.trim().is_empty() { representante_legal = rl.trim().to_string(); }
-                                    }
-                                    if let Some(rz) = row.get::<_, Option<String>>(4) {
-                                        if !rz.trim().is_empty() { razon_social = rz.trim().to_string(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let periodo_obra = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
-                    let o = &state.obras_options[state.filter_obra_idx - 1];
-                    match (o.fecha_inicio, o.fecha_fin) {
-                        (Some(fi), Some(ff)) => format!("{} AL {}", fi.format("%d/%m/%Y"), ff.format("%d/%m/%Y")),
-                        (Some(fi), None) => format!("DESDE {}", fi.format("%d/%m/%Y")),
-                        (None, Some(ff)) => format!("HASTA {}", ff.format("%d/%m/%Y")),
-                        (None, None) => String::new(),
-                    }
-                } else {
-                    let mut min_fi: Option<chrono::NaiveDate> = None;
-                    let mut max_ff: Option<chrono::NaiveDate> = None;
-                    for o in &state.obras_options {
-                        if let Some(fi) = o.fecha_inicio {
-                            min_fi = Some(min_fi.map(|m| m.min(fi)).unwrap_or(fi));
-                        }
-                        if let Some(ff) = o.fecha_fin {
-                            max_ff = Some(max_ff.map(|m| m.max(ff)).unwrap_or(ff));
-                        }
-                    }
-                    match (min_fi, max_ff) {
-                        (Some(fi), Some(ff)) => format!("{} AL {}", fi.format("%d/%m/%Y"), ff.format("%d/%m/%Y")),
-                        (Some(fi), None) => format!("DESDE {}", fi.format("%d/%m/%Y")),
-                        (None, Some(ff)) => format!("HASTA {}", ff.format("%d/%m/%Y")),
-                        (None, None) => String::new(),
-                    }
-                };
-
-                let cliente_nombre = if razon_social.trim().is_empty() {
-                    state.cliente_nombre.clone()
-                } else {
-                    razon_social
-                };
-
-                let header_meta = ReporteFinalHeaderMeta {
-                    delegacion,
-                    subdelegacion,
-                    cliente_nombre,
-                    rp_registro: state.rp_registro.clone(),
-                    rfc,
-                    periodo_obra,
-                    representante_legal,
-                    revision_folio: state.revision_folio.clone(),
-                };
-
-                let faltantes = missing_header_fields(&header_meta);
-                if !faltantes.is_empty() {
-                    crate::show_toast_message(
-                        &ui,
-                        &format!("No se generó el Excel. Captura primero: {}", faltantes.join(", ")),
-                    );
-                    return;
-                }
-
-                match export_reporte_liquidaciones_to_excel(
-                    &state.filtered_rows,
-                    &state.all_rows,
-                    Some(&valid_user_obra_ids),
-                    &guarderias_kpis,
-                    &out_file,
-                    &state.cliente_nombre,
-                    &state.rp_registro,
-                    &state.revision_folio,
-                    &header_meta,
-                ) {
-                    Ok(_) => {
-                        crate::show_toast_message(
-                            &ui,
-                            &format!("Excel generado exitosamente: {}", filename),
-                        );
-                        crate::open_folder_in_os(&output_dir);
-                    }
-                    Err(e) => {
-                        log::error!("Error exportando excel de liquidaciones: {}", e);
-                        crate::show_toast_message(&ui, &format!("Error exportando Excel: {}", e));
-                    }
+                Err(e) => {
+                    log::error!("Error preparando la verificación del entregable: {}", e);
+                    crate::show_toast_message(&ui, &format!("No se pudo preparar el entregable: {e}"));
                 }
             }
         });
+    }
+
+    // 19b. Entregable IMSS: borrador, entregable versionado (segundo plano), historial y descarga
+    {
+        let historial: Arc<Mutex<Vec<ExportacionInfo>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Borrador: vista filtrada, sin subir ni registrar
+        {
+            let ui_weak = main_window.as_weak();
+            let session_clone = reporte_session.clone();
+            let pool_clone = db_pool.clone();
+            app_logic.on_entregable_generar_borrador(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                ui.global::<AppData>().set_show_entregable_modal(false);
+                let ctx = {
+                    let state = session_clone.lock().unwrap();
+                    ContextoEntregable::desde_estado(&state)
+                };
+                if ctx.filtered_rows.is_empty() {
+                    crate::show_toast_message(&ui, "No hay filas en la vista para generar el borrador.");
+                    return;
+                }
+                let Some(pool) = pool_clone.clone() else {
+                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    return;
+                };
+                crate::operacion_ui::ejecutar_con_avance(
+                    &ui,
+                    "Generando borrador…",
+                    "Generando el Excel con la vista filtrada. No se guarda en RustFS ni se registra versión.",
+                    move || generar_borrador(&pool, &ctx),
+                    move |ui, resultado| match resultado {
+                        Ok(ruta) => {
+                            let nombre = ruta
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            crate::show_toast_message(ui, &format!("Borrador generado: {nombre}"));
+                            abrir_carpeta_de(&ruta);
+                        }
+                        Err(e) => {
+                            log::error!("Error generando borrador de liquidaciones: {}", e);
+                            crate::show_toast_message(ui, &e);
+                        }
+                    },
+                );
+            });
+        }
+
+        // Entregable: todas las filas activas, subida a RustFS y registro de versión
+        {
+            let ui_weak = main_window.as_weak();
+            let session_clone = reporte_session.clone();
+            let pool_clone = db_pool.clone();
+            app_logic.on_entregable_generar_definitivo(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let app_data = ui.global::<AppData>();
+                if !app_data.get_entregable_puede_entregar() {
+                    crate::show_toast_message(
+                        &ui,
+                        "No se puede generar el entregable: resuelve los puntos bloqueantes.",
+                    );
+                    return;
+                }
+                let version = app_data.get_entregable_siguiente_version();
+                app_data.set_show_entregable_modal(false);
+                let ctx = {
+                    let state = session_clone.lock().unwrap();
+                    ContextoEntregable::desde_estado(&state)
+                };
+                let Some(pool) = pool_clone.clone() else {
+                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    return;
+                };
+                crate::operacion_ui::ejecutar_con_avance(
+                    &ui,
+                    &format!("Generando entregable IMSS v{version}…"),
+                    "Generando el Excel con todas las filas activas, guardándolo en RustFS y registrando la versión.",
+                    move || generar_entregable(&pool, &ctx, version),
+                    move |ui, resultado| match resultado {
+                        Ok(entregado) => {
+                            crate::show_toast_message(
+                                ui,
+                                &format!(
+                                    "Entregable v{} generado y registrado (hash {})",
+                                    entregado.version,
+                                    hash_corto(&entregado.hash)
+                                ),
+                            );
+                            abrir_carpeta_de(&entregado.ruta);
+                        }
+                        Err(e) => {
+                            log::error!("Error generando entregable de liquidaciones: {}", e);
+                            crate::show_toast_message(ui, &e);
+                        }
+                    },
+                );
+            });
+        }
+
+        // Cerrar modal de verificación
+        {
+            let ui_weak = main_window.as_weak();
+            app_logic.on_entregable_cerrar(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.global::<AppData>().set_show_entregable_modal(false);
+                }
+            });
+        }
+
+        // Cerrar historial
+        {
+            let ui_weak = main_window.as_weak();
+            app_logic.on_entregable_cerrar_historial(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.global::<AppData>().set_show_entregable_historial(false);
+                }
+            });
+        }
+
+        // Abrir historial de versiones registradas
+        {
+            let ui_weak = main_window.as_weak();
+            let session_clone = reporte_session.clone();
+            let pool_clone = db_pool.clone();
+            let historial = historial.clone();
+            app_logic.on_entregable_abrir_historial(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let rev = {
+                    let state = session_clone.lock().unwrap();
+                    revision_activa(&state)
+                };
+                let Some(rev) = rev else {
+                    crate::show_toast_message(&ui, "No hay una revisión activa seleccionada.");
+                    return;
+                };
+                let Some(pool) = pool_clone.clone() else {
+                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    return;
+                };
+                let consulta = pool
+                    .get()
+                    .map_err(|e| format!("conexión a la base de datos: {e}"))
+                    .and_then(|mut client| listar_exportaciones(&mut client, rev));
+                match consulta {
+                    Ok(versiones) => {
+                        let filas: Vec<EntregableVersion> = versiones
+                            .iter()
+                            .map(|v| EntregableVersion {
+                                id: v.id.to_string().into(),
+                                version: v.version,
+                                tipo: v.tipo.as_str().into(),
+                                fecha: v.creado.as_str().into(),
+                                hash: hash_corto(&v.sha256).into(),
+                                resumen: resumen_historial(v.resumen.as_ref()).into(),
+                            })
+                            .collect();
+                        *historial.lock().unwrap() = versiones;
+                        let app_data = ui.global::<AppData>();
+                        app_data.set_entregable_historial(ModelRc::new(VecModel::from(filas)));
+                        app_data.set_show_entregable_historial(true);
+                    }
+                    Err(e) => {
+                        log::error!("Error listando entregables de liquidaciones: {}", e);
+                        crate::show_toast_message(&ui, &format!("No se pudo cargar el historial: {e}"));
+                    }
+                }
+            });
+        }
+
+        // Descargar una versión registrada y verificar su hash
+        {
+            let ui_weak = main_window.as_weak();
+            let historial = historial.clone();
+            app_logic.on_entregable_descargar(move |id: SharedString| {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let info = historial
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|v| v.id.to_string() == id.as_str())
+                    .cloned();
+                let Some(info) = info else {
+                    crate::show_toast_message(
+                        &ui,
+                        "No se encontró esa versión; vuelve a abrir el historial.",
+                    );
+                    return;
+                };
+                crate::operacion_ui::ejecutar_con_avance(
+                    &ui,
+                    "Descargando entregable…",
+                    "Descargando la versión desde RustFS y verificando su hash registrado.",
+                    move || descargar_version(&info),
+                    move |ui, resultado| match resultado {
+                        Ok((ruta, true)) => {
+                            crate::show_toast_message(
+                                ui,
+                                &format!("Entregable descargado y verificado: {}", ruta.display()),
+                            );
+                            abrir_carpeta_de(&ruta);
+                        }
+                        Ok((ruta, false)) => {
+                            crate::show_toast_message(
+                                ui,
+                                "⚠ El archivo descargado no coincide con el hash registrado.",
+                            );
+                            log::error!("Hash distinto al registrado en {}", ruta.display());
+                            abrir_carpeta_de(&ruta);
+                        }
+                        Err(e) => {
+                            log::error!("Error descargando entregable de liquidaciones: {}", e);
+                            crate::show_toast_message(ui, &e);
+                        }
+                    },
+                );
+            });
+        }
     }
 
     // 20. Revertir cambios
@@ -6307,6 +6700,14 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             res.cred_filename,
                             res.incap_count
                         );
+                        let msg = if res.advertencias.is_empty() {
+                            msg
+                        } else {
+                            for advertencia in &res.advertencias {
+                                log::warn!("Advertencia SUA: {}", advertencia);
+                            }
+                            format!("{msg} · {} advertencia(s) (ver log)", res.advertencias.len())
+                        };
                         crate::show_toast_message(&ui, &msg);
                         crate::open_folder_in_os(&folder);
                         ui.global::<AppData>().set_show_reporte_export_sua_modal(false);
@@ -7400,5 +7801,68 @@ mod tests_separacion_estado {
         assert_eq!(fuera.len(), 1, "debe quedar 1 fila FUERA_PERIODO");
         assert!(activas.iter().all(|r| r.estado == "ACTIVO"));
         assert!(fuera.iter().all(|r| r.estado != "ACTIVO"));
+    }
+}
+
+#[cfg(test)]
+mod tests_entregable_flujo {
+    use super::*;
+
+    #[test]
+    fn nombre_archivo_excel_con_version_y_folio() {
+        assert_eq!(
+            nombre_archivo_excel("v3_", "R-001", "20260112_101010"),
+            "v3_Reporte_Liquidaciones_R-001_20260112_101010.xlsx"
+        );
+    }
+
+    #[test]
+    fn nombre_archivo_excel_sanea_folio_y_usa_respaldo() {
+        assert_eq!(
+            nombre_archivo_excel("BORRADOR_", "R 001/A", "F"),
+            "BORRADOR_Reporte_Liquidaciones_R_001_A_F.xlsx"
+        );
+        assert_eq!(
+            nombre_archivo_excel("BORRADOR_", "", "F"),
+            "BORRADOR_Reporte_Liquidaciones_REVISION_F.xlsx"
+        );
+    }
+
+    #[test]
+    fn formato_resumen_muestra_totales() {
+        let r = ResumenEntregable {
+            filas: 3,
+            empleados: 2,
+            empleado_mes: 2,
+            total_subtotal: 1234.5,
+            total_patronal: 0.0,
+            total_obrera: 0.0,
+            total_gps: 0.0,
+        };
+        assert_eq!(
+            formato_resumen(&r),
+            "3 filas activas · 2 empleados · 2 empleado-mes · Subtotal $1,234.50"
+        );
+    }
+
+    #[test]
+    fn resumen_historial_desde_json() {
+        assert_eq!(resumen_historial(None), "");
+        let completo = serde_json::json!({"filas": 3, "total_subtotal": 10.5});
+        assert_eq!(resumen_historial(Some(&completo)), "3 filas · Subtotal $10.50");
+        let vacio = serde_json::json!({});
+        assert_eq!(resumen_historial(Some(&vacio)), "");
+    }
+
+    #[test]
+    fn hash_corto_tiene_doce_caracteres() {
+        assert_eq!(hash_corto(&"a".repeat(64)).len(), 12);
+    }
+
+    #[test]
+    fn codigo_severidad_coincide_con_la_ui() {
+        assert_eq!(codigo_severidad(&Severidad::Bloqueante), 0);
+        assert_eq!(codigo_severidad(&Severidad::Advertencia), 1);
+        assert_eq!(codigo_severidad(&Severidad::Info), 2);
     }
 }

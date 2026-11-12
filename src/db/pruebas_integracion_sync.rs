@@ -86,10 +86,23 @@ fn sync_incremental_no_destructiva_bd() {
             tx.query_one(sql, &[rev]).expect("conteo").get(0)
         };
         let rl_antes = conteo(&mut tx, "SELECT COUNT(*)::bigint FROM public.reportes_liquidaciones WHERE id_revision = $1");
+        // Solo los reportes EDITADOS por el analista están protegidos; los no editados reflejan la cédula.
         let obra_antes = conteo(
             &mut tx,
             "SELECT COUNT(*)::bigint FROM public.reportes_detalles_liquidaciones r JOIN public.reportes_liquidaciones rl \
-             ON rl.id = r.id_reporte_liquidacion WHERE rl.id_revision = $1 AND r.id_registro_obra IS NOT NULL",
+             ON rl.id = r.id_reporte_liquidacion WHERE rl.id_revision = $1 AND r.id_registro_obra IS NOT NULL AND rl.editado_usuario",
+        );
+        let no_editados_obra_antes = conteo(
+            &mut tx,
+            "SELECT COUNT(*)::bigint FROM public.reportes_detalles_liquidaciones r JOIN public.reportes_liquidaciones rl \
+             ON rl.id = r.id_reporte_liquidacion WHERE rl.id_revision = $1 AND r.id_registro_obra IS NOT NULL AND NOT rl.editado_usuario",
+        );
+        let huerfanos_no_editados = conteo(
+            &mut tx,
+            "SELECT COUNT(*)::bigint FROM public.reportes_detalles_liquidaciones r JOIN public.reportes_liquidaciones rl \
+             ON rl.id = r.id_reporte_liquidacion WHERE rl.id_revision = $1 AND NOT rl.editado_usuario AND r.id_registro_obra IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM public.detalles_liquidaciones d WHERE d.id_liquidacion = rl.id_liquidacion \
+                 AND COALESCE(BTRIM(LOWER(d.clave)),'') = COALESCE(BTRIM(LOWER(r.clave)),'') AND d.fecha IS NOT DISTINCT FROM r.fecha)",
         );
 
         crate::db::reporte_liquidaciones::sync_reportes_liquidaciones_for_revision_tx(&mut tx, *rev)
@@ -103,7 +116,15 @@ fn sync_incremental_no_destructiva_bd() {
         let obra_despues = conteo(
             &mut tx,
             "SELECT COUNT(*)::bigint FROM public.reportes_detalles_liquidaciones r JOIN public.reportes_liquidaciones rl \
-             ON rl.id = r.id_reporte_liquidacion WHERE rl.id_revision = $1 AND r.id_registro_obra IS NOT NULL",
+             ON rl.id = r.id_reporte_liquidacion WHERE rl.id_revision = $1 AND r.id_registro_obra IS NOT NULL AND rl.editado_usuario",
+        );
+        let no_editados_obra_despues = conteo(
+            &mut tx,
+            "SELECT COUNT(*)::bigint FROM public.reportes_detalles_liquidaciones r JOIN public.reportes_liquidaciones rl \
+             ON rl.id = r.id_reporte_liquidacion WHERE rl.id_revision = $1 AND r.id_registro_obra IS NOT NULL AND NOT rl.editado_usuario",
+        );
+        println!(
+            "SYNC rev={rev} no_editados: tramos_con_obra {no_editados_obra_antes}->{no_editados_obra_despues} (huérfanos de cédula antes: {huerfanos_no_editados})"
         );
         println!(
             "SYNC rev={rev} reportes {rl_antes}->{rl_despues} (fuera_periodo={fuera}) tramos_con_obra {obra_antes}->{obra_despues}"
@@ -111,7 +132,7 @@ fn sync_incremental_no_destructiva_bd() {
         assert!(rl_despues >= rl_antes, "La sincronización borró reportes en la revisión {rev}");
         assert!(
             obra_despues >= obra_antes,
-            "La sincronización quitó asignaciones de obra en la revisión {rev} ({obra_antes} -> {obra_despues})"
+            "La sincronización quitó asignaciones de obra EDITADAS por el analista en la revisión {rev} ({obra_antes} -> {obra_despues})"
         );
 
         for fila in tx.query(sql_tramos.as_str(), &[rev]).expect("tramos") {
@@ -156,4 +177,61 @@ fn sync_incremental_no_destructiva_bd() {
         println!("DIF {d}");
     }
     assert!(diferencias.is_empty(), "La BD y la memoria no aplican el mismo prorrateo");
+}
+
+/// Diagnóstico (ROLLBACK): qué tramos con obra de reportes NO editados desaparecen al sincronizar y por qué.
+#[test]
+#[ignore]
+fn diagnostico_tramos_obra_perdidos_bd() {
+    let mut client = match crate::db::client::create_client() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Sin conexión: {e}");
+            return;
+        }
+    };
+    let rev: Uuid = client
+        .query_one(
+            "SELECT rl.id_revision FROM public.reportes_liquidaciones rl GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1",
+            &[],
+        )
+        .expect("rev")
+        .get(0);
+    let sql = "SELECT r.id, rl.id, COALESCE(BTRIM(LOWER(r.clave)),''), COALESCE(r.fecha::text,''), BTRIM(ro.numero), \
+                      COALESCE(ro.creado_usuario,false), rl.estado::text, ro.id_revision = rl.id_revision \
+               FROM public.reportes_detalles_liquidaciones r \
+               JOIN public.reportes_liquidaciones rl ON rl.id = r.id_reporte_liquidacion \
+               JOIN public.registros_obras ro ON ro.id = r.id_registro_obra \
+               WHERE rl.id_revision = $1 AND NOT rl.editado_usuario";
+    let mut tx = client.transaction().expect("tx");
+    let antes: Vec<postgres::Row> = tx.query(sql, &[&rev]).expect("antes");
+    crate::db::reporte_liquidaciones::sync_reportes_liquidaciones_for_revision_tx(&mut tx, rev).expect("sync");
+    let despues: std::collections::HashSet<Uuid> =
+        tx.query(sql, &[&rev]).expect("despues").iter().map(|r| r.get::<_, Uuid>(0)).collect();
+    let mut por_motivo: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for r in &antes {
+        let id: Uuid = r.get(0);
+        if despues.contains(&id) {
+            continue;
+        }
+        let rep: Uuid = r.get(1);
+        let sigue_tramo: i64 = tx
+            .query_one(
+                "SELECT COUNT(*)::bigint FROM public.reportes_detalles_liquidaciones x WHERE x.id = $1",
+                &[&id],
+            )
+            .expect("x")
+            .get(0);
+        let motivo = format!(
+            "creado_usuario={} estado={} obra_de_esta_revision={} tramo_sigue_existiendo={}",
+            r.get::<_, bool>(5), r.get::<_, String>(6), r.get::<_, bool>(7), sigue_tramo > 0
+        );
+        *por_motivo.entry(motivo).or_default() += 1;
+        let _ = rep;
+    }
+    tx.rollback().expect("rollback");
+    println!("DIAG rev={rev} tramos_con_obra_antes={} perdidos={}", antes.len(), antes.len() - despues.len());
+    for (m, n) in por_motivo {
+        println!("DIAG {n} × {m}");
+    }
 }

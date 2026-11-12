@@ -889,6 +889,34 @@ export component ReporteLiquidacionesView inherits Rectangle {
                     spacing: 8px;
                     alignment: end;
 
+                    // Acceso al historial de entregables IMSS emitidos para esta revisión
+                    Rectangle {
+                        height: 38px;
+                        width: 200px;
+                        border-radius: 6px;
+                        background: btn_historial_entregables.has-hover ? #e2e8f0 : #ffffff;
+                        border-width: 1px;
+                        border-color: #94a3b8;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "🗂"; font-size: 13px; vertical-alignment: center; }
+                            Text {
+                                text: "Historial de entregables";
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: #334155;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        btn_historial_entregables := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.entregable_abrir_historial(); }
+                        }
+                    }
+
                     // Exportar a Excel
                     Rectangle {
                         height: 38px;
@@ -6827,7 +6855,7 @@ export component ReporteLiquidacionesView inherits Rectangle {
                             color: #854d0e;
                         }
                         Text {
-                            text: "• 1_ASEG_<Folio>.TXT (1. Altas/Trabajadores)   • 2_AFIL_<Folio>.TXT (2. Datos Afiliatorios)\n• 3_MOVT_<Folio>.TXT (3. Movimientos/Salarios)   • 4_CRED_<Folio>.TXT (4. Créditos INFONAVIT)\n• 5_INCAP_<Folio>.TXT (5. Incapacidades Médicas)";
+                            text: "• 1_ASEG_<Folio>.TXT (Asegurados)   • 2_AFIL_<Folio>.TXT (Datos afiliatorios)\n• 3_MOVOBRA_<Folio>.TXT (Movimientos de obra)   • 4_MOVT_<Folio>.TXT (Movimientos y salarios)\n• 5_CRED_<Folio>.TXT (Créditos INFONAVIT)   • 6_INCAP_<Folio>.TXT (Incapacidades)";
                             font-size: 10px;
                             color: #713f12;
                         }
@@ -6958,6 +6986,310 @@ export component ReporteLiquidacionesView inherits Rectangle {
                         btn_rev_confirmar := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { AppLogic.reporte_confirmar_revertir(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Verificación previa al entregable IMSS: bloqueantes impiden emitir la versión definitiva
+    if AppData.show_entregable_modal : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        z: 8000;
+        background: #00000088;
+
+        TouchArea { }
+
+        Rectangle {
+            width: 720px;
+            height: 560px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: #ffffff;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "Verificación antes de generar el entregable IMSS";
+                    font-size: 16px;
+                    font-weight: 800;
+                    color: #0f172a;
+                }
+                Text {
+                    text: AppData.entregable_resumen;
+                    font-size: 12px;
+                    color: #64748b;
+                    wrap: word-wrap;
+                }
+
+                // Lista de puntos de verificación, con severidad por color e ícono
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 8px;
+                        for punto in AppData.entregable_puntos : Rectangle {
+                            border-radius: 6px;
+                            background: punto.severidad == 0 ? #fef2f2
+                                : (punto.severidad == 1 ? #fffbeb : #eff6ff);
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 4px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: punto.severidad == 0 ? "⛔"
+                                            : (punto.severidad == 1 ? "⚠️" : "ℹ️");
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: punto.titulo;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        color: punto.severidad == 0 ? #991b1b
+                                            : (punto.severidad == 1 ? #92400e : #1e40af);
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: punto.detalle;
+                                    font-size: 12px;
+                                    color: punto.severidad == 0 ? #991b1b
+                                        : (punto.severidad == 1 ? #92400e : #1e40af);
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Pie: cancelar, borrador y entregable definitivo (bloqueado con bloqueantes)
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    Rectangle {
+                        width: 110px;
+                        height: 38px;
+                        border-radius: 6px;
+                        background: btn_ent_cancelar.has-hover ? #e2e8f0 : #f1f5f9;
+                        Text {
+                            text: "Cancelar";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #334155;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_ent_cancelar := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.entregable_cerrar(); }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: start;
+                        Rectangle {
+                            width: 170px;
+                            height: 38px;
+                            border-radius: 6px;
+                            background: btn_ent_borrador.has-hover ? #e2e8f0 : #f1f5f9;
+                            border-width: 1px;
+                            border-color: #cbd5e1;
+                            Text {
+                                text: "Generar borrador";
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: #334155;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            btn_ent_borrador := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.entregable_generar_borrador(); }
+                            }
+                        }
+                        Text {
+                            text: "Usa la vista filtrada y lleva marca BORRADOR";
+                            font-size: 10px;
+                            color: #64748b;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: start;
+                        Rectangle {
+                            width: 200px;
+                            height: 38px;
+                            border-radius: 6px;
+                            background: !AppData.entregable_puede_entregar ? #cbd5e1
+                                : (btn_ent_definitivo.has-hover ? #1e40af : #1d4ed8);
+                            Text {
+                                text: "Generar entregable v\{AppData.entregable_siguiente_version}";
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: AppData.entregable_puede_entregar ? #ffffff : #64748b;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            btn_ent_definitivo := TouchArea {
+                                enabled: AppData.entregable_puede_entregar;
+                                mouse-cursor: AppData.entregable_puede_entregar ? pointer : default;
+                                clicked => { AppLogic.entregable_generar_definitivo(); }
+                            }
+                        }
+                        if !AppData.entregable_puede_entregar : Text {
+                            text: "Resuelve los puntos ⛔ para generar el entregable";
+                            font-size: 10px;
+                            font-weight: 700;
+                            color: #b91c1c;
+                            horizontal-alignment: right;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Historial de entregables IMSS emitidos para esta revisión, con descarga por versión
+    if AppData.show_entregable_historial : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        z: 8000;
+        background: #00000088;
+
+        TouchArea { }
+
+        Rectangle {
+            width: 760px;
+            height: 520px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: #ffffff;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "Historial de entregables";
+                    font-size: 16px;
+                    font-weight: 800;
+                    color: #0f172a;
+                }
+
+                if AppData.entregable_historial.length == 0 : Text {
+                    text: "Aún no se ha generado ningún entregable para esta revisión.";
+                    font-size: 13px;
+                    color: #64748b;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+
+                if AppData.entregable_historial.length > 0 : VerticalLayout {
+                    spacing: 8px;
+                    vertical-stretch: 1;
+
+                    // Encabezados de columna
+                    Rectangle {
+                        height: 28px;
+                        background: #f1f5f9;
+                        border-radius: 4px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            alignment: start;
+                            Text { width: 60px; text: "Versión"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                            Text { width: 100px; text: "Tipo"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                            Text { width: 130px; text: "Fecha"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                            Text { width: 150px; text: "Hash"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                            Text { horizontal-stretch: 1; text: "Resumen"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                            Rectangle { width: 120px; }
+                        }
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 4px;
+                            for version in AppData.entregable_historial : Rectangle {
+                                height: 40px;
+                                border-radius: 4px;
+                                background: #f8fafc;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Text { width: 60px; text: "v\{version.version}"; font-size: 12px; font-weight: 700; color: #0f172a; vertical-alignment: center; }
+                                    Text { width: 100px; text: version.tipo; font-size: 12px; color: #334155; vertical-alignment: center; overflow: elide; }
+                                    Text { width: 130px; text: version.fecha; font-size: 12px; color: #334155; vertical-alignment: center; overflow: elide; }
+                                    Text { width: 150px; text: version.hash; font-size: 11px; font-family: "monospace"; color: #334155; vertical-alignment: center; overflow: elide; }
+                                    Text { horizontal-stretch: 1; text: version.resumen; font-size: 12px; color: #475569; vertical-alignment: center; overflow: elide; }
+                                    Rectangle {
+                                        width: 120px;
+                                        height: 30px;
+                                        border-radius: 6px;
+                                        background: btn_ent_descargar.has-hover ? #e2e8f0 : #ffffff;
+                                        border-width: 1px;
+                                        border-color: #cbd5e1;
+                                        Text {
+                                            text: "⬇ Descargar";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #334155;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        btn_ent_descargar := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { AppLogic.entregable_descargar(version.id); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    Rectangle {
+                        width: 110px;
+                        height: 38px;
+                        border-radius: 6px;
+                        background: btn_ent_hist_cerrar.has-hover ? #e2e8f0 : #f1f5f9;
+                        Text {
+                            text: "Cerrar";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: #334155;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        btn_ent_hist_cerrar := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.entregable_cerrar_historial(); }
                         }
                     }
                 }

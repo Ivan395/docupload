@@ -49,6 +49,7 @@ pub mod reporte_view_logic;
 pub mod asignacion_view_logic;
 mod asistente_asignacion;
 mod asignacion_obra_logic;
+mod entregable_logic;
 mod operacion_ui;
 pub mod sat;
 pub mod sua_export;

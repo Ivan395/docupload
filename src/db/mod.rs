@@ -6,6 +6,7 @@ pub mod cedulas;
 pub mod client;
 pub mod config;
 pub mod depuracion_fase1;
+pub mod entregables;
 pub mod diagnostico_integridad;
 pub mod ingesta;
 pub mod nominas;
@@ -36,6 +37,8 @@ pub use schema::{ensure_schema, format_boxed_pg_error, format_pg_error};
 mod pruebas_integracion_ingesta;
 #[cfg(test)]
 mod pruebas_integracion_sync;
+#[cfg(test)]
+mod pruebas_integracion_entregable;
 #[cfg(test)]
 mod pruebas_integracion_asignacion;
 
