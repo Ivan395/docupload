@@ -210,6 +210,22 @@ const CONSULTAS: &[(&str, &str)] = &[
         "SELECT COUNT(*)::bigint FROM public.registros_patronales WHERE codigo_postal IS NULL OR BTRIM(codigo_postal) !~ '^[0-9]{5}$'",
     ),
     ("registros_patronales_total", "SELECT COUNT(*)::bigint FROM public.registros_patronales"),
+    (
+        // Obras cuyo registro patronal no coincide con el de su revisión (la migración F5 normaliza solo escrituras nuevas)
+        "obras_rp_distinto_al_de_revision",
+        "SELECT COUNT(*)::bigint FROM public.registros_obras ro JOIN public.revisiones r ON r.id = ro.id_revision \
+         WHERE ro.id_registro_patronal IS DISTINCT FROM r.id_registro_patronal",
+    ),
+    (
+        // Nóminas ligadas a una revisión que ya no existe (la FK fk_nominas_revision impide nuevas)
+        "nominas_revision_inexistente",
+        "SELECT COUNT(*)::bigint FROM public.nominas n WHERE n.id_revision IS NOT NULL \
+         AND NOT EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = n.id_revision)",
+    ),
+    (
+        "obras_fecha_fin_anterior_a_inicio",
+        "SELECT COUNT(*)::bigint FROM public.registros_obras WHERE fecha_fin < fecha_inicio",
+    ),
     ("postgres_version_num", "SELECT current_setting('server_version_num')::bigint"),
 ];
 
@@ -433,6 +449,17 @@ mod tests {
         let ahora: String = tx.query_one("SELECT to_char(now(), 'YYYY-MM-DD HH24:MI')", &[]).expect("now").get(0);
         println!("AHORA {ahora}");
         tx.rollback().expect("rollback");
+    }
+
+    #[test]
+    fn consultas_f5_integridad_estan_registradas() {
+        for nombre in [
+            "obras_rp_distinto_al_de_revision",
+            "nominas_revision_inexistente",
+            "obras_fecha_fin_anterior_a_inicio",
+        ] {
+            assert!(CONSULTAS.iter().any(|(n, _)| *n == nombre), "falta el chequeo {}", nombre);
+        }
     }
 
     #[test]

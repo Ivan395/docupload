@@ -16,6 +16,7 @@ pub mod prorrateo;
 pub mod reporte_liquidaciones;
 pub mod revisiones;
 pub mod schema;
+pub mod topes;
 
 pub use calendario::*;
 pub use catalogos::*;
@@ -49,6 +50,15 @@ mod pruebas_integracion_nominas;
 
 #[cfg(test)]
 mod pruebas_integracion_obras;
+
+#[cfg(test)]
+mod pruebas_integracion_obras_lote;
+
+#[cfg(test)]
+mod pruebas_integracion_revisiones_lote;
+
+#[cfg(test)]
+mod pruebas_integracion_topes;
 
 #[cfg(test)]
 mod tests {

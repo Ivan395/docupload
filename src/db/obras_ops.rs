@@ -244,6 +244,166 @@ pub fn desactivar_obra_tx(tx: &mut Transaction, id_obra: Uuid) -> Result<Resulta
     })
 }
 
+// ---------------------------------------------------------------------------
+// Alta masiva de obras (lote con vista previa)
+// ---------------------------------------------------------------------------
+
+use crate::obras_lote_logic::{AccionFila, EstadoFila, FilaPrevia, ObraExistente};
+
+/// Obras de la revisión (activas e inactivas) para clasificar un lote.
+pub fn fetch_obras_existentes_revision<C: GenericClient>(
+    c: &mut C,
+    id_revision: Uuid,
+) -> Result<Vec<ObraExistente>, String> {
+    let rows = c
+        .query(
+            "SELECT COALESCE(BTRIM(numero), '')::text AS numero,
+                    COALESCE(creado_usuario, false) AS creado_usuario,
+                    activa
+             FROM public.registros_obras
+             WHERE id_revision = $1",
+            &[&id_revision],
+        )
+        .map_err(|e| format!("Error consultando obras de la revisión: {}", e))?;
+    Ok(rows
+        .iter()
+        .map(|r| ObraExistente {
+            numero: r.get(0),
+            creado_usuario: r.get(1),
+            activa: r.get(2),
+        })
+        .collect())
+}
+
+/// Conteo de lo aplicado por `aplicar_lote_obras`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResumenLoteObras {
+    pub creadas: usize,
+    pub actualizadas: usize,
+    pub adoptadas: usize,
+    pub omitidas: usize,
+    pub cambio: CambioUniverso,
+}
+
+/// Aplica el lote dentro de una transacción existente (permite revertir en pruebas).
+pub fn aplicar_lote_obras_tx(
+    tx: &mut Transaction,
+    id_revision: Uuid,
+    id_rp: Uuid,
+    filas: &[FilaPrevia],
+) -> Result<ResumenLoteObras, String> {
+    if let Some(bad) = filas.iter().find(|f| {
+        f.accion != AccionFila::Omitir
+            && matches!(f.estado, EstadoFila::Error | EstadoFila::RepetidaEnLote)
+    }) {
+        return Err(format!(
+            "Renglón {}: la fila tiene errores y no puede aplicarse",
+            bad.fila.renglon
+        ));
+    }
+
+    let mut resumen = ResumenLoteObras::default();
+    for previa in filas {
+        let fila = &previa.fila;
+        let clave = fila.numero.split_whitespace().collect::<String>().to_uppercase();
+        let err_fila = |e: String| format!("Renglón {}: {}", fila.renglon, e);
+
+        match previa.accion {
+            AccionFila::Omitir => resumen.omitidas += 1,
+            AccionFila::Crear => {
+                let existe = tx
+                    .query_opt(
+                        "SELECT 1 FROM public.registros_obras WHERE id_revision = $1 AND UPPER(BTRIM(numero)) = $2",
+                        &[&id_revision, &clave],
+                    )
+                    .map_err(|e| err_fila(format!("consultando obra: {}", e)))?
+                    .is_some();
+                if existe {
+                    // Carrera: la obra apareció después de la vista previa.
+                    resumen.omitidas += 1;
+                    continue;
+                }
+                let item = RegistroObraItem {
+                    id: String::new(),
+                    id_revision: id_revision.to_string(),
+                    id_registro_patronal: id_rp.to_string(),
+                    numero: fila.numero.clone(),
+                    clase: fila.clase.clone(),
+                    tipo_obra: fila.tipo_obra.clone(),
+                    fecha_inicio: fila.fecha_inicio,
+                    fecha_fin: fila.fecha_fin,
+                    ubicacion: fila.ubicacion.clone(),
+                    superficie_construido: fila.superficie,
+                    monto: fila.monto,
+                    delegacion: fila.delegacion.clone(),
+                    subdelegacion: fila.subdelegacion.clone(),
+                    created_at: String::new(),
+                    creado_usuario: true,
+                };
+                create_obra_tx(tx, &item).map_err(err_fila)?;
+                resumen.creadas += 1;
+            }
+            AccionFila::Actualizar | AccionFila::Adoptar => {
+                let id_obra: Uuid = tx
+                    .query_opt(
+                        "SELECT id FROM public.registros_obras WHERE id_revision = $1 AND UPPER(BTRIM(numero)) = $2",
+                        &[&id_revision, &clave],
+                    )
+                    .map_err(|e| err_fila(format!("consultando obra: {}", e)))?
+                    .ok_or_else(|| err_fila("la obra ya no existe en la revisión".to_string()))?
+                    .get(0);
+                let item = RegistroObraItem {
+                    id: id_obra.to_string(),
+                    id_revision: id_revision.to_string(),
+                    id_registro_patronal: id_rp.to_string(),
+                    numero: fila.numero.clone(),
+                    clase: fila.clase.clone(),
+                    tipo_obra: fila.tipo_obra.clone(),
+                    fecha_inicio: fila.fecha_inicio,
+                    fecha_fin: fila.fecha_fin,
+                    ubicacion: fila.ubicacion.clone(),
+                    superficie_construido: fila.superficie,
+                    monto: fila.monto,
+                    delegacion: fila.delegacion.clone(),
+                    subdelegacion: fila.subdelegacion.clone(),
+                    created_at: String::new(),
+                    creado_usuario: true,
+                };
+                update_obra_tx(tx, &item).map_err(err_fila)?;
+                tx.execute(
+                    "UPDATE public.registros_obras SET activa = true, desactivada_at = NULL WHERE id = $1",
+                    &[&id_obra],
+                )
+                .map_err(|e| err_fila(format!("reactivando obra: {}", e)))?;
+                if previa.accion == AccionFila::Adoptar {
+                    resumen.adoptadas += 1;
+                } else {
+                    resumen.actualizadas += 1;
+                }
+            }
+        }
+    }
+
+    resumen.cambio = resincronizar_universo_tx(tx, id_revision)?;
+    Ok(resumen)
+}
+
+/// Aplica el lote en UNA transacción: cualquier error revierte todo.
+pub fn aplicar_lote_obras(
+    client: &mut Client,
+    id_revision: Uuid,
+    id_rp: Uuid,
+    filas: &[FilaPrevia],
+) -> Result<ResumenLoteObras, String> {
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("No se pudo iniciar la transacción: {}", e))?;
+    let resumen = aplicar_lote_obras_tx(&mut tx, id_revision, id_rp, filas)?;
+    tx.commit()
+        .map_err(|e| format!("No se pudo confirmar el lote de obras: {}", e))?;
+    Ok(resumen)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

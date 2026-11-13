@@ -629,11 +629,13 @@ export struct CalendarRevisionItem {
     has_entrega_con_prorroga: bool,
 }
 
-export struct AsigObraChip { id_obra: string, numero: string, dias: int, color_idx: int }
+export struct AsigObraChip { id_obra: string, numero: string, dias: int, color_idx: int, tope: int }
+export struct AsigObraOpcionCelda { id_obra: string, numero: string, tope: int, color_idx: int }
 export struct AsigCelda {
     existe: bool, id_reporte: string, etiqueta_mes: string,
     dias_cedula: int, disponibles: int, asignados: int,
-    obras: [AsigObraChip], es_baja: bool, sin_obra: bool, inconsistente: bool, cedula_actualizada: bool }
+    obras: [AsigObraChip], opciones: [AsigObraOpcionCelda],
+    es_baja: bool, sin_obra: bool, inconsistente: bool, cedula_actualizada: bool }
 export struct AsigEmpleadoFila {
     id_empleado: string, nombre: string, nss: string, rfc: string,
     num_obras: int, tiene_inconsistencia: bool, cedula_actualizada: bool, celdas: [AsigCelda] }
@@ -682,6 +684,8 @@ export global AppData {
     in-out property <bool> show_reporte_confirmar_revertir: false;
     // Entregable IMSS: verificación previa y historial de versiones
     in-out property <bool> show_entregable_modal: false;
+    // Excel de trabajo: true = solo vista filtrada; false = todas las filas activas
+    in-out property <bool> entregable_borrador_solo_filtrada: false;
     in-out property <[EntregablePunto]> entregable_puntos: [];
     in-out property <bool> entregable_puede_entregar: false;
     in-out property <int> entregable_siguiente_version: 1;

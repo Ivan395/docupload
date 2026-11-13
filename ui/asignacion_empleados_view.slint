@@ -1,5 +1,5 @@
 import { ScrollView, LineEdit, ComboBox, SpinBox } from "std-widgets.slint";
-import { AppData, AppLogic, AsigObraOpcion, AsigCelda, AsigObraChip } from "models.slint";
+import { AppData, AppLogic, AsigObraOpcion, AsigCelda, AsigObraChip, AsigObraOpcionCelda } from "models.slint";
 import { AsistenteAsignacionModal } from "asistente_asignacion_modal.slint";
 
 // Chip de obra con color de paleta (10 tonos). Con sin_obra usa estilo neutro.
@@ -8,6 +8,8 @@ component AsigChip inherits Rectangle {
     in property <string> texto: "";
     in property <int> color_idx: 0;
     in property <bool> sin_obra: false;
+    // Días por encima del tope de la obra: texto y borde en rojo.
+    in property <bool> alerta: false;
 
     property <[color]> pal_fondo: [#dbeafe, #dcfce7, #fef9c3, #fce7f3, #ede9fe, #ffedd5, #cffafe, #ecfccb, #fae8ff, #e0e7ff];
     property <[color]> pal_texto: [#1e40af, #166534, #854d0e, #9d174d, #5b21b6, #9a3412, #155e75, #3f6212, #86198f, #3730a3];
@@ -19,7 +21,7 @@ component AsigChip inherits Rectangle {
     border-radius: 5px;
     background: root.sin_obra ? #ffffff : root.pal_fondo[root.idx];
     border-width: 1px;
-    border-color: root.sin_obra ? #94a3b8 : root.pal_borde[root.idx];
+    border-color: root.alerta ? #fecaca : (root.sin_obra ? #94a3b8 : root.pal_borde[root.idx]);
 
     HorizontalLayout {
         padding-left: 6px;
@@ -30,7 +32,7 @@ component AsigChip inherits Rectangle {
             text: root.texto;
             font-size: 10.5px;
             font-weight: 700;
-            color: root.sin_obra ? #64748b : root.pal_texto[root.idx];
+            color: root.alerta ? #b91c1c : (root.sin_obra ? #64748b : root.pal_texto[root.idx]);
             vertical-alignment: center;
             overflow: elide;
         }
@@ -97,8 +99,11 @@ component AsigBoton inherits Rectangle {
 
 // Selector de obra: despliega una lista propia con AppData.asig_obras.
 // fijo = true: la acción se dispara al elegir y no conserva la selección.
+// usa_celda = true: lista las opciones de la celda (opciones_celda, con tope) en lugar del catálogo.
 component AsigObraPicker inherits Rectangle {
     in property <[AsigObraOpcion]> opciones: [];
+    in property <[AsigObraOpcionCelda]> opciones_celda: [];
+    in property <bool> usa_celda: false;
     in-out property <int> seleccion: -1;
     in property <string> placeholder: "Elegir obra";
     in property <bool> fijo: false;
@@ -108,7 +113,8 @@ component AsigObraPicker inherits Rectangle {
     callback elegido(int);
 
     property <bool> activo: root.habilitado && !AppData.asig_procesando;
-    property <bool> tiene_sel: !root.fijo && root.seleccion >= 0 && root.seleccion < root.opciones.length;
+    property <int> total: root.usa_celda ? root.opciones_celda.length : root.opciones.length;
+    property <bool> tiene_sel: !root.fijo && root.seleccion >= 0 && root.seleccion < root.total;
 
     height: 26px;
     border-radius: 5px;
@@ -123,7 +129,9 @@ component AsigObraPicker inherits Rectangle {
 
         Text {
             text: root.tiene_sel
-                ? (root.mostrar_numero ? root.opciones[root.seleccion].numero : root.opciones[root.seleccion].label)
+                ? (root.usa_celda
+                    ? root.opciones_celda[root.seleccion].numero
+                    : (root.mostrar_numero ? root.opciones[root.seleccion].numero : root.opciones[root.seleccion].label))
                 : root.placeholder;
             font-size: 11px;
             font-weight: 600;
@@ -170,6 +178,33 @@ component AsigObraPicker inherits Rectangle {
                 VerticalLayout {
                     padding: 4px;
                     spacing: 2px;
+
+                    for o[i] in root.opciones_celda : Rectangle {
+                        height: 28px;
+                        border-radius: 4px;
+                        background: opcion_celda_touch.has-hover ? #eff6ff : transparent;
+
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            height: parent.height;
+                            text: o.numero + " (tope " + o.tope + " d)";
+                            font-size: 11.5px;
+                            font-weight: 600;
+                            color: #1e293b;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        opcion_celda_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.seleccion = i;
+                                popup.close();
+                                root.elegido(i);
+                            }
+                        }
+                    }
 
                     for o[i] in root.opciones : Rectangle {
                         height: 28px;
@@ -637,14 +672,15 @@ export component AsignacionEmpleadosView inherits FocusScope {
                                     for ch in c.obras : AsigChip {
                                         width: 300px;
                                         height: 30px;
-                                        texto: ch.numero;
+                                        texto: ch.numero + " · " + ch.dias + "/" + ch.tope + " d";
                                         color_idx: ch.color_idx;
+                                        alerta: ch.dias > ch.tope;
 
                                         SpinBox {
                                             width: 72px;
                                             height: 24px;
                                             minimum: 0;
-                                            maximum: 31;
+                                            maximum: ch.tope;
                                             value: ch.dias;
                                             edited(v) => { AppLogic.asig_cambiar_dias(c.id_reporte, ch.id_obra, v); }
                                         }
@@ -675,9 +711,21 @@ export component AsignacionEmpleadosView inherits FocusScope {
                                     spacing: 6px;
                                     alignment: start;
 
+                                    if c.opciones.length == 0 : Text {
+                                        width: 210px;
+                                        text: "Sin obras con días disponibles";
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: #64748b;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+
                                     obra_pick := AsigObraPicker {
                                         width: 210px;
-                                        opciones: AppData.asig_obras;
+                                        visible: c.opciones.length > 0;
+                                        usa_celda: true;
+                                        opciones_celda: c.opciones;
                                         placeholder: "+ Obra";
                                         ancho_lista: 320px;
                                     }
@@ -686,17 +734,17 @@ export component AsignacionEmpleadosView inherits FocusScope {
                                         width: 72px;
                                         height: 26px;
                                         minimum: 0;
-                                        maximum: 31;
-                                        value: c.disponibles - c.asignados > 0 ? c.disponibles - c.asignados : 0;
+                                        maximum: obra_pick.seleccion >= 0 && obra_pick.seleccion < c.opciones.length ? c.opciones[obra_pick.seleccion].tope : 0;
+                                        value: Math.min(c.disponibles - c.asignados > 0 ? c.disponibles - c.asignados : 0, self.maximum);
                                     }
 
                                     AsigBoton {
                                         texto: "Vincular";
                                         pequeno: true;
                                         variante: 1;
-                                        habilitado: obra_pick.seleccion >= 0;
+                                        habilitado: obra_pick.seleccion >= 0 && obra_pick.seleccion < c.opciones.length;
                                         clicked => {
-                                            AppLogic.asig_vincular(c.id_reporte, AppData.asig_obras[obra_pick.seleccion].id_obra, dias_nueva.value);
+                                            AppLogic.asig_vincular(c.id_reporte, c.opciones[obra_pick.seleccion].id_obra, dias_nueva.value);
                                         }
                                     }
 

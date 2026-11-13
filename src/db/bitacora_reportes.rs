@@ -165,6 +165,7 @@ pub fn cerrar_edicion<C: GenericClient>(
     }
     let ids: Vec<Uuid> = filas.iter().map(|r| r.get(0)).collect();
 
+    crate::db::topes::validar_topes_lote(c, lote_id)?;
     recalcular_prorrateo_tx(c, &ids).map_err(|e| format!("cerrar_edicion (prorrateo): {}", e))?;
 
     c.execute(

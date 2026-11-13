@@ -633,7 +633,7 @@ pub fn wire_nominas_upload_callbacks(
                     Some(id_rev) => {
                         if let Some(ref pool) = pool_w {
                             if let Ok(mut client) = pool.get() {
-                                match crate::db::nominas_reporte::sync_reportes_nominas_for_target(&mut client, id_rev) {
+                                match crate::db::nominas_reporte::sync_reportes_nominas_revision(&mut client, id_rev) {
                                     Ok(resumen) => Some(format!(
                                         "Reporte de nóminas: {} nueva(s), {} fuera de alcance, {} reactivada(s).",
                                         resumen.insertadas, resumen.a_fuera_alcance, resumen.a_activo

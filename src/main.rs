@@ -48,7 +48,10 @@ pub mod rustfs;
 pub mod reporte_view_logic;
 pub mod asignacion_view_logic;
 mod asistente_asignacion;
+mod carga_masiva;
 mod asignacion_obra_logic;
+mod obras_lote_logic;
+mod revisiones_lote_logic;
 mod entregable_logic;
 mod operacion_ui;
 pub mod sat;
@@ -7555,7 +7558,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     .get()
                     .ok()
                     .and_then(|mut client| {
-                        crate::db::nominas_reporte::fetch_nominas_reporte(&mut client, None).ok()
+                        crate::db::nominas_reporte::fetch_nominas_reporte(&mut client, crate::db::nominas_reporte::AlcanceNominas::Todo).ok()
                     })
                     .map(|v| !v.is_empty())
                     .unwrap_or(false);

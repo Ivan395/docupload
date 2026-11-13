@@ -185,6 +185,37 @@ fn row_get_date(r: &postgres::Row, idx: usize) -> Option<NaiveDate> {
     None
 }
 
+/// Alcance explícito de lectura del reporte de nóminas (sustituye al `$1` polimórfico).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlcanceNominas {
+    Revision(Uuid),
+    RegistroPatronal(Uuid),
+    Cliente(Uuid),
+    Todo,
+}
+
+impl AlcanceNominas {
+    /// Condición SQL sobre una tabla con columnas id_revision e id_registro_patronal (alias `t`)
+    /// y empleado `e` (para el cliente). Usa `$1`, que siempre se pasa con `param()`.
+    fn condicion(&self, t: &str, e: &str) -> String {
+        match self {
+            AlcanceNominas::Revision(_) => format!("{t}.id_revision = $1"),
+            AlcanceNominas::RegistroPatronal(_) => format!("{t}.id_registro_patronal = $1"),
+            AlcanceNominas::Cliente(_) => format!("{e}.id_cliente = $1"),
+            AlcanceNominas::Todo => "($1::uuid IS NULL)".to_string(),
+        }
+    }
+
+    fn param(&self) -> Option<Uuid> {
+        match self {
+            AlcanceNominas::Revision(u)
+            | AlcanceNominas::RegistroPatronal(u)
+            | AlcanceNominas::Cliente(u) => Some(*u),
+            AlcanceNominas::Todo => None,
+        }
+    }
+}
+
 /// Carga las nóminas del reporte desde `reportes_nominas`
 /// (la copia filtrada de las nóminas procesadas).
 ///
@@ -205,7 +236,7 @@ fn row_get_date(r: &postgres::Row, idx: usize) -> Option<NaiveDate> {
 /// Orden: año, mes, NSS, nombre y días.
 pub fn fetch_nominas_reporte(
     client: &mut Client,
-    id_cliente: Option<Uuid>,
+    alcance: AlcanceNominas,
 ) -> Result<Vec<NominaReporteRowDb>, String> {
     let sql = format!(
         r#"
@@ -223,13 +254,7 @@ pub fn fetch_nominas_reporte(
             JOIN public.empleados e ON e.id = rn.id_empleado
             JOIN public.conceptos c ON c.id = rdn.id_concepto
             JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
-            WHERE ($1::uuid IS NULL 
-                   OR rn.id_revision = $1 
-                   OR rn.id_registro_patronal = $1 
-                   OR e.id_cliente = $1
-                   OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rn.id_registro_patronal OR r.id = rn.id_revision))
-                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rn.id_registro_patronal)
-            )
+            WHERE {COND_RN_E}
               AND rn.estado = 'ACTIVO'
             GROUP BY rdn.id_reporte_nomina
         ),
@@ -247,13 +272,7 @@ pub fn fetch_nominas_reporte(
             LEFT JOIN public.registros_obras ro
                  ON ro.id = COALESCE(rdl.id_registro_obra, rv.id_registro_obra)
             WHERE ro.id IS NOT NULL AND ro.activa
-              AND ($1::uuid IS NULL 
-                   OR rl.id_revision = $1 
-                   OR rl.id_registro_patronal = $1 
-                   OR e.id_cliente = $1
-                   OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rl.id_registro_patronal OR r.id = rl.id_revision))
-                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rl.id_registro_patronal)
-              )
+              AND {COND_RL_E}
             GROUP BY rl.id_empleado, rl.anio_periodo, UPPER(TRIM(rl.mes_periodo))
         ),
         base AS (
@@ -294,13 +313,7 @@ pub fn fetch_nominas_reporte(
             LEFT JOIN public.cfdis cf ON cf.id = n.id_cfdi
             LEFT JOIN public.contratos ct ON ct.id_cfdi = n.id_cfdi
             LEFT JOIN per ON per.id_nomina = rn.id
-            WHERE ($1::uuid IS NULL 
-                   OR rn.id_revision = $1 
-                   OR rn.id_registro_patronal = $1 
-                   OR e.id_cliente = $1
-                   OR EXISTS (SELECT 1 FROM public.revisiones rev WHERE rev.id = $1 AND (rev.id_registro_patronal = rn.id_registro_patronal OR rev.id = rn.id_revision))
-                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp2 WHERE rp2.id_cliente = $1 AND rp2.id = rn.id_registro_patronal)
-            )
+            WHERE {COND_RN_E}
               AND rn.estado = 'ACTIVO'
         )
         SELECT
@@ -347,11 +360,13 @@ pub fn fetch_nominas_reporte(
                  b.nombre ASC,
                  b.num_dias_pagados ASC
         "#,
-        MES = mes_es_sql("b.fecha_periodo")
+        MES = mes_es_sql("b.fecha_periodo"),
+        COND_RN_E = alcance.condicion("rn", "e"),
+        COND_RL_E = alcance.condicion("rl", "e"),
     );
 
     let rows = client
-        .query(sql.as_str(), &[&id_cliente])
+        .query(sql.as_str(), &[&alcance.param()])
         .map_err(|e| format!("Error consultando reporte de nóminas: {}", e))?;
 
     let mut result = Vec::with_capacity(rows.len());
@@ -398,37 +413,38 @@ pub fn fetch_nominas_reporte(
     Ok(result)
 }
 
-/// Condición SQL: la nómina (alias `a`) está dentro del alcance de las obras capturadas por el usuario
-/// para el target `$1` (revisión, RP o cliente). Sin obras de usuario, todo está en alcance (criterio vigente).
+/// Condición SQL (regla D-2): la nómina (alias `a`) está en alcance de la REVISIÓN `$1` si:
+/// 1. existe un reporte de liquidación `ACTIVO` de esa revisión para el mismo empleado, cuyo mes
+///    cae dentro de los meses que cubre la nómina;
+/// 2. ese reporte tiene un tramo con días (`dias_registro_obra > 0`) asignado a una obra de usuario
+///    ACTIVA de la misma revisión (`creado_usuario = true AND activa`);
+/// 3. las fechas de la nómina traslapan la vigencia de esa obra.
+/// Sin obras de usuario NO hay comodín: nada está en alcance.
+/// Usa solo `$1 = id_revision`.
 fn sql_nomina_en_alcance(a: &str) -> String {
-    format!(r#"(
-            NOT EXISTS (
-                SELECT 1 FROM public.registros_obras ro
-                WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
-                  AND COALESCE(ro.creado_usuario, false) = true
-                  AND ro.activa
-            )
-            OR EXISTS (
-                SELECT 1 FROM public.registros_obras ro
-                WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
-                  AND COALESCE(ro.creado_usuario, false) = true
-                  AND ro.activa
-                  AND (
-                      ({a}.fecha_final_pago IS NOT NULL AND {a}.fecha_inicial_pago IS NOT NULL AND {a}.fecha_final_pago >= ro.fecha_inicio AND {a}.fecha_inicial_pago <= ro.fecha_fin)
-                      OR ({a}.fecha_pago IS NOT NULL AND {a}.fecha_pago BETWEEN ro.fecha_inicio AND ro.fecha_fin)
-                  )
-            )
-        )"#)
+    format!(
+        r#"EXISTS (
+            SELECT 1
+            FROM public.reportes_liquidaciones rl
+            JOIN public.reportes_detalles_liquidaciones d ON d.id_reporte_liquidacion = rl.id
+            JOIN public.registros_obras ro ON ro.id = d.id_registro_obra
+            WHERE rl.id_revision = $1
+              AND rl.id_empleado = {a}.id_empleado
+              AND rl.estado = 'ACTIVO'
+              AND COALESCE(d.dias_registro_obra, 0) > 0
+              AND ro.id_revision = $1 AND COALESCE(ro.creado_usuario, false) = true AND ro.activa
+              AND MAKE_DATE(rl.anio_periodo::int, rl.mes_periodo_int::int, 1)
+                  BETWEEN date_trunc('month', COALESCE({a}.fecha_inicial_pago, {a}.fecha_pago))::date
+                      AND date_trunc('month', COALESCE({a}.fecha_final_pago, {a}.fecha_pago))::date
+              AND COALESCE({a}.fecha_final_pago, {a}.fecha_pago) >= ro.fecha_inicio
+              AND COALESCE({a}.fecha_inicial_pago, {a}.fecha_pago) <= ro.fecha_fin
+        )"#
+    )
 }
 
-/// Condición SQL: la fila de `reportes_nominas` (alias `rn`) pertenece al target `$1` (revisión, RP o cliente).
+/// Condición SQL: la fila de `reportes_nominas` (alias `rn`) pertenece a la revisión `$1`.
 fn sql_reporte_nomina_en_target() -> &'static str {
-    r#"(
-            rn.id_revision = $1
-            OR rn.id_registro_patronal = $1
-            OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rn.id_registro_patronal OR r.id = rn.id_revision))
-            OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rn.id_registro_patronal)
-        )"#
+    "(rn.id_revision = $1)"
 }
 
 /// INSERT ... SELECT de nóminas maestras del target hacia `reportes_nominas` (solo las que faltan y que
@@ -452,8 +468,8 @@ fn sql_insert_sync_nominas() -> String {
         )
         SELECT
             uuidv7(), n.id,
-            COALESCE(n.id_registro_patronal, (SELECT rev.id_registro_patronal FROM public.revisiones rev WHERE rev.id = COALESCE(n.id_revision, $1))),
-            COALESCE(n.id_revision, $1),
+            COALESCE(n.id_registro_patronal, $2),
+            $1,
             n.id_empleado, n.version_nomina,
             n.tipo_nomina, n.fecha_pago, n.fecha_inicial_pago,
             n.fecha_final_pago,
@@ -473,14 +489,9 @@ fn sql_insert_sync_nominas() -> String {
             n.timbre_rfc_proveedor_cert, n.timbre_uuid, n.timbre_fecha,
             n.nombre_archivo
         FROM public.nominas n
-        WHERE (
-            n.id_registro_patronal = $1
-            OR n.id_revision = $1
-            OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = n.id_registro_patronal OR r.id = n.id_revision))
-            OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = n.id_registro_patronal)
-        )
+        WHERE (n.id_registro_patronal = $2 OR n.id_revision = $1)
         AND NOT EXISTS (
-            SELECT 1 FROM public.reportes_nominas rn WHERE rn.id_nomina = n.id
+            SELECT 1 FROM public.reportes_nominas rn WHERE rn.id_nomina = n.id AND rn.id_revision = $1
         )
         AND {alcance}
         ON CONFLICT DO NOTHING
@@ -534,15 +545,24 @@ pub struct SyncNominasResumen {
     pub a_activo: usize,
 }
 
-/// Sincroniza (dentro de `tx`) las nóminas maestras del target hacia `reportes_nominas`.
+/// Sincroniza (dentro de `tx`) las nóminas del RP de la revisión hacia `reportes_nominas` de ESA revisión.
 /// Incremental y NO destructiva: inserta las que faltan, y las que salen del alcance se marcan
 /// `FUERA_ALCANCE` (o regresan a `ACTIVO`). Nunca toca filas `editado_usuario` ni `sintetica`.
-pub fn sync_reportes_nominas_for_target_tx(
+pub fn sync_reportes_nominas_revision_tx(
     tx: &mut postgres::Transaction<'_>,
-    target_id: Uuid,
+    id_revision: Uuid,
 ) -> Result<SyncNominasResumen, String> {
+    let id_rp: Option<Uuid> = tx
+        .query_opt(
+            "SELECT id_registro_patronal FROM public.revisiones WHERE id = $1",
+            &[&id_revision],
+        )
+        .map_err(|e| format!("Error consultando la revisión: {}", e))?
+        .ok_or_else(|| "La revisión no existe.".to_string())?
+        .get(0);
+
     let insertadas = tx
-        .execute(sql_insert_sync_nominas().as_str(), &[&target_id])
+        .execute(sql_insert_sync_nominas().as_str(), &[&id_revision, &id_rp])
         .map_err(|e| format!("Error sincronizando nóminas a reportes: {}", e))?;
 
     let sql_detalles = r#"
@@ -559,17 +579,18 @@ pub fn sync_reportes_nominas_for_target_tx(
             SELECT 1 FROM public.reportes_detalles_nominas rdn WHERE rdn.id_reporte_nomina = rn.id
         )
         AND rn.id_nomina IS NOT NULL AND rn.sintetica = false
+        AND rn.id_revision = $1
     "#;
 
-    tx.execute(sql_detalles, &[])
+    tx.execute(sql_detalles, &[&id_revision])
         .map_err(|e| format!("Error copiando detalles de nóminas a reportes: {}", e))?;
 
     let a_fuera_alcance = tx
-        .execute(sql_marcar_fuera_alcance().as_str(), &[&target_id])
+        .execute(sql_marcar_fuera_alcance().as_str(), &[&id_revision])
         .map_err(|e| format!("Error marcando nóminas fuera de alcance: {}", e))?;
 
     let a_activo = tx
-        .execute(sql_marcar_activo().as_str(), &[&target_id])
+        .execute(sql_marcar_activo().as_str(), &[&id_revision])
         .map_err(|e| format!("Error reactivando nóminas en alcance: {}", e))?;
 
     let resumen = SyncNominasResumen {
@@ -580,8 +601,8 @@ pub fn sync_reportes_nominas_for_target_tx(
 
     if resumen != SyncNominasResumen::default() {
         log::info!(
-            "Papel de trabajo de nóminas (target {}): {} insertadas, {} fuera de alcance, {} reactivadas",
-            target_id,
+            "Papel de trabajo de nóminas (revisión {}): {} insertadas, {} fuera de alcance, {} reactivadas",
+            id_revision,
             resumen.insertadas,
             resumen.a_fuera_alcance,
             resumen.a_activo
@@ -591,15 +612,15 @@ pub fn sync_reportes_nominas_for_target_tx(
     Ok(resumen)
 }
 
-/// Igual que `sync_reportes_nominas_for_target_tx`, en su propia transacción.
-pub fn sync_reportes_nominas_for_target(
+/// Igual que `sync_reportes_nominas_revision_tx`, en su propia transacción.
+pub fn sync_reportes_nominas_revision(
     client: &mut Client,
-    target_id: Uuid,
+    id_revision: Uuid,
 ) -> Result<SyncNominasResumen, String> {
     let mut tx = client
         .transaction()
         .map_err(|e| format!("Error iniciando sincronización de nóminas: {}", e))?;
-    let resumen = sync_reportes_nominas_for_target_tx(&mut tx, target_id)?;
+    let resumen = sync_reportes_nominas_revision_tx(&mut tx, id_revision)?;
     tx.commit()
         .map_err(|e| format!("Error confirmando sincronización de nóminas: {}", e))?;
     Ok(resumen)
@@ -969,9 +990,10 @@ pub struct RegistroPatronalTotalDb {
 /// no las que se crearon automáticamente desde la cédula.
 pub fn fetch_totales_dias_cedula_por_registro_patronal(
     client: &mut Client,
-    id_cliente: Option<Uuid>,
+    alcance: AlcanceNominas,
 ) -> Result<Vec<RegistroPatronalTotalDb>, String> {
-    let sql = r#"
+    let sql = format!(
+        r#"
         SELECT
             TRIM(COALESCE(rp.registro, 'SIN REGISTRO')) AS registro_patronal,
             TRIM(COALESCE(ro.numero, 'SIN NÚMERO')) AS obra_numero,
@@ -982,18 +1004,15 @@ pub fn fetch_totales_dias_cedula_por_registro_patronal(
         LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rv ON rv.id_registro_obra = ro.id
         WHERE COALESCE(ro.creado_usuario, false) = true
           AND ro.activa
-          AND ($1::uuid IS NULL
-               OR ro.id_revision = $1 
-               OR ro.id_registro_patronal = $1 
-               OR rp.id_cliente = $1
-               OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = ro.id_registro_patronal OR r.id = ro.id_revision))
-          )
+          AND {COND_RO_RP}
         GROUP BY rp.registro, ro.numero, ro.tipo_obra
         ORDER BY rp.registro ASC, ro.numero ASC
-    "#;
+    "#,
+        COND_RO_RP = alcance.condicion("ro", "rp")
+    );
 
     let rows = client
-        .query(sql, &[&id_cliente])
+        .query(sql.as_str(), &[&alcance.param()])
         .map_err(|e| format!("Error consultando totales de días cédula por registro patronal: {}", e))?;
 
     Ok(rows
@@ -1139,7 +1158,7 @@ pub struct NominaFaltanteDb {
 /// con las nóminas registradas para cada empleado y periodo.
 pub fn fetch_nominas_faltantes(
     client: &mut Client,
-    id_cliente: Option<Uuid>,
+    alcance: AlcanceNominas,
 ) -> Result<Vec<NominaFaltanteDb>, String> {
     let sql = format!(
         r#"
@@ -1159,13 +1178,7 @@ pub fn fetch_nominas_faltantes(
             JOIN public.registros_obras ro ON ro.id = rv.id_registro_obra
             LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
             WHERE COALESCE(ro.creado_usuario, false) = true
-              AND ($1::uuid IS NULL 
-                   OR rl.id_revision = $1 
-                   OR rl.id_registro_patronal = $1 
-                   OR e.id_cliente = $1
-                   OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rl.id_registro_patronal OR r.id = rl.id_revision))
-                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rl.id_registro_patronal)
-              )
+              AND {COND_RL_E}
             GROUP BY rl.id_empleado, e.nombre, e.nss, e.rfc, UPPER(TRIM(rl.mes_periodo)), rl.anio_periodo
         ),
         nom_emp AS (
@@ -1175,14 +1188,10 @@ pub fn fetch_nominas_faltantes(
                 EXTRACT(YEAR FROM COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago))::int AS anio_periodo,
                 SUM(COALESCE(rn.num_dias_pagados, 0))::float8 AS dias_nomina
             FROM public.reportes_nominas rn
+            JOIN public.empleados e ON e.id = rn.id_empleado
             WHERE (rn.fecha_final_pago IS NOT NULL OR rn.fecha_pago IS NOT NULL OR rn.fecha_inicial_pago IS NOT NULL)
               AND rn.estado = 'ACTIVO'
-              AND ($1::uuid IS NULL 
-                   OR rn.id_revision = $1 
-                   OR rn.id_registro_patronal = $1 
-                   OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rn.id_registro_patronal OR r.id = rn.id_revision))
-                   OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rn.id_registro_patronal)
-              )
+              AND {COND_RN_E}
             GROUP BY rn.id_empleado, {MES}, EXTRACT(YEAR FROM COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago))
         )
         SELECT
@@ -1205,11 +1214,13 @@ pub fn fetch_nominas_faltantes(
           AND (n.dias_nomina IS NULL OR n.dias_nomina < c.dias_cedula - 0.01)
         ORDER BY c.anio_periodo ASC, c.mes_periodo ASC, c.nombre ASC
         "#,
-        MES = mes_es_sql("COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago)")
+        MES = mes_es_sql("COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago)"),
+        COND_RL_E = alcance.condicion("rl", "e"),
+        COND_RN_E = alcance.condicion("rn", "e"),
     );
 
     let rows = client
-        .query(sql.as_str(), &[&id_cliente])
+        .query(sql.as_str(), &[&alcance.param()])
         .map_err(|e| format!("Error consultando nóminas faltantes: {}", e))?;
 
     let mut result = Vec::with_capacity(rows.len());
@@ -2019,11 +2030,44 @@ mod tests_sync_nominas {
         let sql = sql_marcar_fuera_alcance();
         assert!(sql.contains("editado_usuario = false"));
         assert!(sql.contains("sintetica = false"));
-        assert!(sql.contains("NOT ("));
+        assert!(sql.contains("NOT EXISTS ("));
     }
 
     #[test]
     fn insert_sync_es_idempotente() {
         assert!(sql_insert_sync_nominas().contains("ON CONFLICT DO NOTHING"));
+    }
+
+    #[test]
+    fn alcance_exige_tramo_con_dias_en_obra_activa_de_usuario() {
+        let sql = sql_nomina_en_alcance("n");
+        assert!(sql.contains("dias_registro_obra, 0) > 0"));
+        assert!(sql.contains("ro.activa"));
+        assert!(sql.contains("rl.estado = 'ACTIVO'"));
+        assert!(sql.contains("COALESCE(ro.creado_usuario, false) = true"));
+    }
+
+    #[test]
+    fn alcance_no_tiene_comodin_sin_obras() {
+        assert!(!sql_nomina_en_alcance("n").contains("NOT EXISTS ("));
+    }
+
+    #[test]
+    fn insert_sync_limita_a_la_revision() {
+        assert!(sql_insert_sync_nominas().contains("rn.id_revision = $1"));
+    }
+
+    #[test]
+    fn alcance_condicion_por_variante() {
+        let rev = Uuid::nil();
+        assert_eq!(AlcanceNominas::Revision(rev).condicion("rn", "e"), "rn.id_revision = $1");
+        assert_eq!(
+            AlcanceNominas::RegistroPatronal(rev).condicion("rn", "e"),
+            "rn.id_registro_patronal = $1"
+        );
+        assert_eq!(AlcanceNominas::Cliente(rev).condicion("rn", "e"), "e.id_cliente = $1");
+        assert_eq!(AlcanceNominas::Todo.condicion("rn", "e"), "($1::uuid IS NULL)");
+        assert_eq!(AlcanceNominas::Todo.param(), None);
+        assert_eq!(AlcanceNominas::Revision(rev).param(), Some(rev));
     }
 }

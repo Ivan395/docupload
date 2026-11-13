@@ -91,6 +91,14 @@ fn donde_capturar(campo: &str) -> &'static str {
 /// Evalúa si el Reporte de Liquidaciones está listo para entregarse al IMSS.
 ///
 /// `filas` son TODAS las filas activas que irán al entregable, no solo las visibles en pantalla.
+///
+/// Política D-1 (entregable vN):
+/// - Bloqueantes (impiden entregar): campos obligatorios del encabezado vacíos
+///   (`missing_header_fields`) y cuota duplicada.
+/// - Todo lo demás es advertencia o información: sin filas activas, empleado-mes sin obra,
+///   tramos inconsistentes, obras sin monto, obras que superan el 18% y cédulas actualizadas.
+///
+/// `puede_entregar` es `bloqueantes.is_empty()`.
 pub fn evaluar_lista_verificacion(
     meta: &ReporteFinalHeaderMeta,
     filas: &[ReporteLiquidacionRowDb],
@@ -111,8 +119,8 @@ pub fn evaluar_lista_verificacion(
     }
 
     if filas.is_empty() {
-        bloqueantes.push(PuntoVerificacion {
-            severidad: Severidad::Bloqueante,
+        advertencias.push(PuntoVerificacion {
+            severidad: Severidad::Advertencia,
             titulo: "No hay filas activas para entregar".to_string(),
             detalle: "Activa al menos un registro antes de generar el entregable.".to_string(),
         });
@@ -437,10 +445,11 @@ mod tests {
     }
 
     #[test]
-    fn entregable_logic_sin_filas_bloquea() {
+    fn entregable_logic_sin_filas_advierte_no_bloquea() {
         let l = evaluar_lista_verificacion(&meta_completo(), &[], &[], false);
-        assert!(!l.puede_entregar);
-        assert!(tiene_bloqueante(&l, "No hay filas activas"));
+        assert!(l.puede_entregar);
+        assert!(!tiene_bloqueante(&l, "No hay filas activas"));
+        assert!(tiene_advertencia(&l, "No hay filas activas"));
     }
 
     #[test]

@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::db::client::create_client;
 use crate::db::delete_nominas_de_revision_tx;
-use crate::db::nominas_reporte::{sync_reportes_nominas_for_target_tx, SyncNominasResumen};
+use crate::db::nominas_reporte::{sync_reportes_nominas_revision_tx, SyncNominasResumen};
+use crate::db::reporte_liquidaciones::sync_reportes_liquidaciones_for_revision_tx;
 use crate::db::schema::{ensure_schema, format_pg_error};
 
 fn d(anio: i32, mes: u32, dia: u32) -> NaiveDate {
@@ -153,7 +154,50 @@ fn contar(tx: &mut Transaction<'_>, sql: &str, id: Uuid) -> i64 {
 }
 
 fn sync(tx: &mut Transaction<'_>, id_revision: Uuid) -> SyncNominasResumen {
-    sync_reportes_nominas_for_target_tx(tx, id_revision).expect("sync_reportes_nominas_for_target_tx")
+    sync_reportes_nominas_revision_tx(tx, id_revision).expect("sync_reportes_nominas_revision_tx")
+}
+
+/// Cédula de liquidaciones (regla D-2): liquidación del empleado en `mes/anio` con un tramo de
+/// `dias` asignado a `obra`. Sin este tramo la nómina no entra al alcance de la revisión.
+fn asignar_cedula(
+    tx: &mut Transaction<'_>,
+    rp: Uuid,
+    rev: Uuid,
+    emp: Uuid,
+    obra: Uuid,
+    anio: i16,
+    mes: i16,
+    mes_nombre: &str,
+    dias: i16,
+) {
+    let id_liquidacion: Uuid = tx
+        .query_one(
+            "INSERT INTO public.liquidaciones
+                (id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo)
+             VALUES ($1, $2, $3, $4, $5, 'PRUEBA_NOMINAS.xlsx')
+             RETURNING id",
+            &[&rp, &emp, &mes_nombre, &mes, &anio],
+        )
+        .expect("crear liquidación de prueba")
+        .get(0);
+
+    tx.execute(
+        "INSERT INTO public.detalles_liquidaciones (id_liquidacion, clave, fecha, dias, sdi, cf, patronal, obrera, subtotal)
+         VALUES ($1, 'PRUEBA', $2, $3, 300.0, 10.0, 15.0, 5.0, 15.0)",
+        &[&id_liquidacion, &d(anio as i32, mes as u32, 15), &dias],
+    )
+    .expect("crear detalle de liquidación de prueba");
+
+    sync_reportes_liquidaciones_for_revision_tx(tx, rev).expect("sync de reportes de liquidaciones");
+
+    tx.execute(
+        "UPDATE public.reportes_detalles_liquidaciones SET id_registro_obra = $1, dias_registro_obra = $2
+         WHERE id_reporte_liquidacion IN (
+             SELECT id FROM public.reportes_liquidaciones WHERE id_revision = $3 AND id_empleado = $4
+         )",
+        &[&obra, &dias, &rev, &emp],
+    )
+    .expect("asignar tramo de cédula a la obra");
 }
 
 #[test]
@@ -163,7 +207,8 @@ fn i2_sync_es_idempotente_y_respeta_ediciones() {
     let mut tx = client.transaction().unwrap();
 
     let (_c, rp, rev, emp) = crear_contexto(&mut tx, "I2");
-    crear_obra(&mut tx, rp, rev, "OBRA-I2", d(2026, 3, 1), d(2026, 3, 31));
+    let obra = crear_obra(&mut tx, rp, rev, "OBRA-I2", d(2026, 3, 1), d(2026, 3, 31));
+    asignar_cedula(&mut tx, rp, rev, emp, obra, 2026, 3, "MARZO", 15);
     let a = crear_nomina(&mut tx, rp, rev, emp, d(2026, 3, 1), d(2026, 3, 15));
     let b = crear_nomina(&mut tx, rp, rev, emp, d(2026, 6, 1), d(2026, 6, 15));
 
@@ -218,6 +263,7 @@ fn alcance_se_marca_y_se_revierte_sin_borrar() {
 
     let (_c, rp, rev, emp) = crear_contexto(&mut tx, "ALC");
     let obra = crear_obra(&mut tx, rp, rev, "OBRA-ALC", d(2026, 3, 1), d(2026, 3, 31));
+    asignar_cedula(&mut tx, rp, rev, emp, obra, 2026, 3, "MARZO", 15);
     let a = crear_nomina(&mut tx, rp, rev, emp, d(2026, 3, 1), d(2026, 3, 15));
 
     sync(&mut tx, rev);
@@ -272,11 +318,13 @@ fn i3_borrar_nominas_de_una_revision_no_toca_otra() {
     let mut tx = client.transaction().unwrap();
 
     let (_ca, rp_a, rev_a, emp_a) = crear_contexto(&mut tx, "I3A");
-    crear_obra(&mut tx, rp_a, rev_a, "OBRA-I3A", d(2026, 3, 1), d(2026, 3, 31));
+    let obra_a = crear_obra(&mut tx, rp_a, rev_a, "OBRA-I3A", d(2026, 3, 1), d(2026, 3, 31));
+    asignar_cedula(&mut tx, rp_a, rev_a, emp_a, obra_a, 2026, 3, "MARZO", 15);
     crear_nomina(&mut tx, rp_a, rev_a, emp_a, d(2026, 3, 1), d(2026, 3, 15));
 
     let (_cb, rp_b, rev_b, emp_b) = crear_contexto(&mut tx, "I3B");
-    crear_obra(&mut tx, rp_b, rev_b, "OBRA-I3B", d(2026, 3, 1), d(2026, 3, 31));
+    let obra_b = crear_obra(&mut tx, rp_b, rev_b, "OBRA-I3B", d(2026, 3, 1), d(2026, 3, 31));
+    asignar_cedula(&mut tx, rp_b, rev_b, emp_b, obra_b, 2026, 3, "MARZO", 15);
     crear_nomina(&mut tx, rp_b, rev_b, emp_b, d(2026, 3, 1), d(2026, 3, 15));
 
     sync(&mut tx, rev_a);
@@ -291,6 +339,27 @@ fn i3_borrar_nominas_de_una_revision_no_toca_otra() {
     assert_eq!(nominas_a, 0, "no deben quedar nóminas de la revisión A");
     assert_eq!(nominas_b, 1, "las nóminas de la revisión B no deben tocarse");
     assert_eq!(reportes_b, 1, "los reportes de la revisión B no deben tocarse");
+
+    tx.rollback().unwrap();
+}
+
+#[test]
+#[ignore]
+fn revision_sin_obras_de_usuario_no_inserta_nominas() {
+    let mut client = conectar();
+    let mut tx = client.transaction().unwrap();
+
+    // Sin obras de usuario no hay comodín: la nómina del RP queda fuera del alcance de la revisión.
+    let (_c, rp, rev, emp) = crear_contexto(&mut tx, "SINOBRA");
+    crear_nomina(&mut tx, rp, rev, emp, d(2026, 3, 1), d(2026, 3, 15));
+
+    let resumen = sync(&mut tx, rev);
+    assert_eq!(resumen.insertadas, 0, "sin obras de usuario no debe insertarse ninguna nómina: {resumen:?}");
+    assert_eq!(
+        contar(&mut tx, "SELECT COUNT(*) FROM public.reportes_nominas WHERE id_revision = $1", rev),
+        0,
+        "el reporte de la revisión debe quedar vacío"
+    );
 
     tx.rollback().unwrap();
 }

@@ -25,7 +25,7 @@ use crate::db::reporte_liquidaciones::{
     compute_guarderias_kpis,
     extract_all_employee_movements, build_all_employee_movements_map,
     calculate_max_dias_obra_for_employee_movements, validate_obra_assignment_for_employee_movements,
-    calculate_obra_days_in_month, missing_header_fields, parse_month_and_year, ReporteFinalHeaderMeta,
+    calculate_obra_days_in_month, parse_month_and_year, ReporteFinalHeaderMeta,
     ModoEntregable,
 };
 use crate::sua_export;
@@ -1890,20 +1890,8 @@ fn abrir_carpeta_de(ruta: &Path) {
     }
 }
 
-/// Falla si el encabezado oficial tiene campos obligatorios vacíos.
-fn validar_encabezado(meta: &ReporteFinalHeaderMeta) -> Result<(), String> {
-    let faltantes = missing_header_fields(meta);
-    if faltantes.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "No se generó el Excel. Captura primero: {}",
-            faltantes.join(", ")
-        ))
-    }
-}
-
-/// Genera el Excel en `out_file`. El borrador usa la vista filtrada; el entregable, todas las filas activas.
+/// Genera el Excel en `out_file`. El borrador usa todas las filas activas, o solo la vista filtrada
+/// si `solo_vista_filtrada` está activo; el entregable siempre usa todas las filas activas.
 fn generar_excel(
     ctx: &ContextoEntregable,
     meta: &ReporteFinalHeaderMeta,
@@ -1917,7 +1905,10 @@ fn generar_excel(
         .map(|o| o.id)
         .collect();
     let (filas, filtro_obra) = match modo {
-        ModoEntregable::Borrador => (ctx.filtered_rows.as_slice(), ctx.filter_obra_id),
+        ModoEntregable::Borrador { solo_vista_filtrada: true } => {
+            (ctx.filtered_rows.as_slice(), ctx.filter_obra_id)
+        }
+        ModoEntregable::Borrador { solo_vista_filtrada: false } => (ctx.all_rows.as_slice(), None),
         ModoEntregable::Entregable { .. } => (ctx.all_rows.as_slice(), None),
     };
     let guarderias_kpis = compute_guarderias_kpis(filas, &ctx.obras_options, filtro_obra);
@@ -1960,8 +1951,13 @@ fn preparar_verificacion(
     Ok((lista, version))
 }
 
-/// Genera el borrador (vista filtrada) en la carpeta de salida. No sube ni registra nada.
-fn generar_borrador(pool: &DbPool, ctx: &ContextoEntregable) -> Result<PathBuf, String> {
+/// Genera el Excel de trabajo (borrador) en la carpeta de salida. No sube ni registra nada.
+/// Nunca se bloquea: `solo_vista_filtrada` decide si incluye solo la vista filtrada o todas las filas activas.
+fn generar_borrador(
+    pool: &DbPool,
+    ctx: &ContextoEntregable,
+    solo_vista_filtrada: bool,
+) -> Result<PathBuf, String> {
     let rev = ctx
         .revision_id
         .ok_or_else(|| "No hay una revisión activa seleccionada.".to_string())?;
@@ -1975,7 +1971,7 @@ fn generar_borrador(pool: &DbPool, ctx: &ContextoEntregable) -> Result<PathBuf, 
         &meta.revision_folio,
         &marca_tiempo(),
     ));
-    generar_excel(ctx, &meta, ModoEntregable::Borrador, &ruta)?;
+    generar_excel(ctx, &meta, ModoEntregable::Borrador { solo_vista_filtrada }, &ruta)?;
     Ok(ruta)
 }
 
@@ -1993,7 +1989,7 @@ fn generar_entregable(
         .get()
         .map_err(|e| format!("conexión a la base de datos: {e}"))?;
     let meta = fetch_reporte_header_meta(&mut client, rev)?;
-    validar_encabezado(&meta)?;
+    // Los campos faltantes del encabezado bloquean vía evaluar_lista_verificacion (criterio único).
     let lista = evaluar_lista_verificacion(&meta, &ctx.all_rows, &ctx.obras_options, ctx.hay_filtros);
     if !lista.puede_entregar {
         return Err("La verificación ya no permite entregar; revísala de nuevo.".to_string());
@@ -5538,31 +5534,48 @@ pub fn wire_reporte_liquidaciones_callbacks(
             let pool_clone = db_pool.clone();
             app_logic.on_entregable_generar_borrador(move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
+                let solo_vista_filtrada = ui.global::<AppData>().get_entregable_borrador_solo_filtrada();
                 ui.global::<AppData>().set_show_entregable_modal(false);
                 let ctx = {
                     let state = session_clone.lock().unwrap();
                     ContextoEntregable::desde_estado(&state)
                 };
-                if ctx.filtered_rows.is_empty() {
-                    crate::show_toast_message(&ui, "No hay filas en la vista para generar el borrador.");
+                let filas_a_exportar = if solo_vista_filtrada {
+                    ctx.filtered_rows.len()
+                } else {
+                    ctx.all_rows.len()
+                };
+                if filas_a_exportar == 0 {
+                    let mensaje = if solo_vista_filtrada {
+                        "No hay filas en la vista para generar el Excel de trabajo."
+                    } else {
+                        "No hay filas activas para generar el Excel de trabajo."
+                    };
+                    crate::show_toast_message(&ui, mensaje);
                     return;
                 }
                 let Some(pool) = pool_clone.clone() else {
                     crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
                     return;
                 };
+                let alcance = if solo_vista_filtrada { "solo vista filtrada" } else { "todas las filas activas" };
                 crate::operacion_ui::ejecutar_con_avance(
                     &ui,
-                    "Generando borrador…",
-                    "Generando el Excel con la vista filtrada. No se guarda en RustFS ni se registra versión.",
-                    move || generar_borrador(&pool, &ctx),
+                    "Generando Excel de trabajo…",
+                    &format!("Generando el Excel de trabajo ({alcance}). No se guarda en RustFS ni se registra versión."),
+                    move || generar_borrador(&pool, &ctx, solo_vista_filtrada),
                     move |ui, resultado| match resultado {
                         Ok(ruta) => {
                             let nombre = ruta
                                 .file_name()
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_default();
-                            crate::show_toast_message(ui, &format!("Borrador generado: {nombre}"));
+                            let etiqueta = if solo_vista_filtrada {
+                                "Excel de trabajo generado (solo vista filtrada)"
+                            } else {
+                                "Excel de trabajo generado (todas las filas activas)"
+                            };
+                            crate::show_toast_message(ui, &format!("{etiqueta}: {nombre}"));
                             abrir_carpeta_de(&ruta);
                         }
                         Err(e) => {

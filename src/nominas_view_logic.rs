@@ -6,7 +6,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use uuid::Uuid;
 
 use crate::db::nominas_reporte::{
-    check_empleado_tiene_baja_periodo, create_bulk_missing_nominas,
+    check_empleado_tiene_baja_periodo, create_bulk_missing_nominas, AlcanceNominas,
     create_nomina_from_template, export_reporte_nominas_to_excel,
     fetch_conceptos_nomina_detalle, fetch_nominas_faltantes, fetch_nominas_reporte,
     fetch_percepcion_conceptos, fetch_percepciones_nomina, fetch_percepciones_por_nomina,
@@ -616,39 +616,47 @@ pub fn sync_and_load_nominas_data(
         .get()
         .map_err(|e| format!("Error de conexión a la base de datos: {}", e))?;
 
-    let target_uuid: Option<Uuid> = cliente_id.or_else(|| {
+    // Precedencia: cliente explícito > revisión > RP > cliente de la selección > todo.
+    let uuid_de = |s: &SharedString| Uuid::parse_str(s.trim()).ok();
+    let alcance = if let Some(c) = cliente_id {
+        AlcanceNominas::Cliente(c)
+    } else {
         let app_data = ui.global::<AppData>();
-        let rev_str = app_data.get_selected_revision_id().to_string();
-        if !rev_str.trim().is_empty() {
-            if let Ok(u) = Uuid::parse_str(rev_str.trim()) {
-                return Some(u);
-            }
+        if let Some(u) = uuid_de(&app_data.get_selected_revision_id()) {
+            AlcanceNominas::Revision(u)
+        } else if let Some(u) = uuid_de(&app_data.get_selected_rp_id()) {
+            AlcanceNominas::RegistroPatronal(u)
+        } else if let Some(u) = uuid_de(&app_data.get_selected_cliente_id()) {
+            AlcanceNominas::Cliente(u)
+        } else {
+            AlcanceNominas::Todo
         }
-        let rp_str = app_data.get_selected_rp_id().to_string();
-        if !rp_str.trim().is_empty() {
-            if let Ok(u) = Uuid::parse_str(rp_str.trim()) {
-                return Some(u);
-            }
-        }
-        let cid_str = app_data.get_selected_cliente_id().to_string();
-        if !cid_str.trim().is_empty() {
-            if let Ok(u) = Uuid::parse_str(cid_str.trim()) {
-                return Some(u);
-            }
-        }
-        None
-    });
+    };
 
-    if let Some(t_id) = target_uuid {
-        if let Err(e) = crate::db::nominas_reporte::sync_reportes_nominas_for_target(&mut client, t_id) {
+    if let AlcanceNominas::Revision(id_rev) = alcance {
+        if let Err(e) = crate::db::nominas_reporte::sync_reportes_nominas_revision(&mut client, id_rev) {
             log::warn!("No se pudo sincronizar el reporte de nóminas: {}", e);
+        }
+        let tiene_obras = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM public.registros_obras
+                    WHERE id_revision = $1 AND COALESCE(creado_usuario, false) AND activa)",
+                &[&id_rev],
+            )
+            .map(|r| r.get::<_, bool>(0))
+            .unwrap_or(true);
+        if !tiene_obras {
+            crate::show_toast_message(
+                ui,
+                "Captura registros de obra en la revisión para ver nóminas: sin obras no hay nóminas en alcance.",
+            );
         }
     }
 
-    let rows = fetch_nominas_reporte(&mut client, target_uuid)?;
-    let totales_rp = fetch_totales_dias_cedula_por_registro_patronal(&mut client, target_uuid)
+    let rows = fetch_nominas_reporte(&mut client, alcance)?;
+    let totales_rp = fetch_totales_dias_cedula_por_registro_patronal(&mut client, alcance)
         .unwrap_or_default();
-    let faltantes_db = fetch_nominas_faltantes(&mut client, target_uuid)
+    let faltantes_db = fetch_nominas_faltantes(&mut client, alcance)
         .unwrap_or_default();
 
     let mut st = session
@@ -1352,7 +1360,7 @@ pub fn wire_nominas_callbacks(
         let Some(ref pool) = pool_faltantes else { return };
         let Ok(mut client) = pool.get() else { return };
 
-        let items = fetch_nominas_faltantes(&mut client, None).unwrap_or_default();
+        let items = fetch_nominas_faltantes(&mut client, AlcanceNominas::Todo).unwrap_or_default();
         let mut st = match s_faltantes.lock() {
             Ok(guard) => guard,
             Err(_) => return,

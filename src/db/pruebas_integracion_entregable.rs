@@ -65,7 +65,7 @@ fn excel_entregable_con_datos_reales() {
     let borrador = dir.join("BORRADOR_prueba.xlsx");
     export_reporte_liquidaciones_to_excel(
         &filas, &filas, Some(&usuario), &kpis, &borrador, &meta.cliente_nombre, &meta.rp_registro,
-        &meta.revision_folio, &meta, ModoEntregable::Borrador,
+        &meta.revision_folio, &meta, ModoEntregable::Borrador { solo_vista_filtrada: false },
     )
     .expect("borrador");
     println!("ENT borrador generado: {}", borrador.display());

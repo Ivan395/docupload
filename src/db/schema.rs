@@ -269,6 +269,58 @@ BEGIN
 END $$;
 "#;
 
+/// F5 (MOD-04): integridad RP ↔ revisión ↔ obra ↔ nómina. Solo agrega triggers, avisos y una FK NOT VALID;
+/// no modifica ni borra filas existentes (las asignaciones solo ocurren en escrituras nuevas).
+pub(crate) const SQL_CORRECCIONES_F5_INTEGRIDAD: &str = r#"
+-- Obra: su registro patronal es SIEMPRE el de su revisión. Se normaliza al insertar o actualizar
+-- (las obras automáticas de cédula pueden venir con el RP "equivalente" de otro cliente).
+-- No modifica filas existentes: solo actúa en escrituras nuevas.
+CREATE OR REPLACE FUNCTION public.normalizar_rp_obra() RETURNS trigger AS $$
+DECLARE rp_rev uuid;
+BEGIN
+    IF NEW.id_revision IS NOT NULL THEN
+        SELECT id_registro_patronal INTO rp_rev FROM public.revisiones WHERE id = NEW.id_revision;
+        IF rp_rev IS NOT NULL AND NEW.id_registro_patronal IS DISTINCT FROM rp_rev THEN
+            NEW.id_registro_patronal := rp_rev;
+        END IF;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_normalizar_rp_obra ON public.registros_obras;
+CREATE TRIGGER trg_normalizar_rp_obra BEFORE INSERT OR UPDATE OF id_revision, id_registro_patronal
+    ON public.registros_obras FOR EACH ROW EXECUTE FUNCTION public.normalizar_rp_obra();
+
+-- Aviso (no corrige) de obras existentes con RP distinto al de su revisión.
+DO $$
+DECLARE n bigint;
+BEGIN
+    SELECT COUNT(*) INTO n FROM public.registros_obras ro JOIN public.revisiones r ON r.id = ro.id_revision
+    WHERE ro.id_registro_patronal IS DISTINCT FROM r.id_registro_patronal;
+    IF n > 0 THEN
+        RAISE WARNING 'registros_obras: % obras con registro patronal distinto al de su revisión (ver diagnóstico de integridad)', n;
+    END IF;
+END $$;
+
+-- Nómina → revisión: FK NOT VALID (aplica a filas nuevas); se valida solo si no hay huérfanas.
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_nominas_revision') THEN
+        ALTER TABLE public.nominas ADD CONSTRAINT fk_nominas_revision FOREIGN KEY (id_revision)
+            REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE SET NULL NOT VALID;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_nominas_revision' AND NOT convalidated) THEN
+        SELECT COUNT(*) INTO n FROM public.nominas n2
+        WHERE n2.id_revision IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = n2.id_revision);
+        IF n = 0 THEN
+            ALTER TABLE public.nominas VALIDATE CONSTRAINT fk_nominas_revision;
+        ELSE
+            RAISE WARNING 'fk_nominas_revision sin validar: % nóminas con revisión inexistente', n;
+        END IF;
+    END IF;
+END $$;
+"#;
+
 pub(crate) const SQL_FASE1_RESTRICCIONES: &str = r#"
 -- a) Empleados: NSS único por cliente (solo NSS no vacíos)
 DO $$
@@ -2282,6 +2334,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     // 15. Correcciones F1: borrado lógico de obras (activa), CHECK de fechas y referencia en bitácora
     exec_schema_step(client, "7_correcciones_f1_obras", SQL_CORRECCIONES_F1_OBRAS)?;
 
+    // 16. Correcciones F5: RP de obra normalizado a su revisión y FK nómina→revisión NOT VALID (no destructivo)
+    exec_schema_step(client, "8_correcciones_f5_integridad", SQL_CORRECCIONES_F5_INTEGRIDAD)?;
+
     match restricciones_fase1_pendientes(client) {
         Ok(lista) if !lista.is_empty() => log::warn!(
             "Restricciones de integridad pendientes (hay duplicados por depurar): {}",
@@ -2496,6 +2551,31 @@ mod tests_fase1_ddl {
             assert!(
                 !SQL_CORRECCIONES_F1_OBRAS.contains(prohibido),
                 "SQL_CORRECCIONES_F1_OBRAS no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn correcciones_f5_integridad_no_modifica_datos() {
+        for fragmento in ["trg_normalizar_rp_obra", "fk_nominas_revision", "NOT VALID"] {
+            assert!(
+                SQL_CORRECCIONES_F5_INTEGRIDAD.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F5_INTEGRIDAD",
+                fragmento
+            );
+        }
+        // "ON DELETE SET NULL" es requerido por la FK; por eso se prohíbe "DELETE FROM" en lugar de "DELETE ".
+        for prohibido in [
+            "DELETE FROM",
+            "TRUNCATE",
+            "DROP TABLE",
+            "DROP COLUMN",
+            "UPDATE public.",
+        ] {
+            assert!(
+                !SQL_CORRECCIONES_F5_INTEGRIDAD.contains(prohibido),
+                "SQL_CORRECCIONES_F5_INTEGRIDAD no debe contener {}",
                 prohibido
             );
         }

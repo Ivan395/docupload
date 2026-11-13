@@ -267,7 +267,7 @@ fn encabezado_impresion(xml: &str) -> &str {
 #[test]
 fn golden_borrador_estructura_y_marcas() {
     let salida = ArchivoTemporal::nuevo("golden_borrador");
-    generar(&salida.0, &meta_completo(), ModoEntregable::Borrador)
+    generar(&salida.0, &meta_completo(), ModoEntregable::Borrador { solo_vista_filtrada: false })
         .expect("el borrador con encabezado completo debe generarse");
     let partes = partes_xlsx(&salida.0);
 
@@ -299,6 +299,24 @@ fn golden_borrador_estructura_y_marcas() {
 
     let shared = parte(&partes, "xl/sharedStrings.xml");
     assert!(shared.contains(BANNER_BORRADOR), "falta el banner de borrador");
+}
+
+#[test]
+fn golden_borrador_solo_vista_filtrada_marca_encabezado() {
+    let salida = ArchivoTemporal::nuevo("golden_borrador_filtrado");
+    generar(&salida.0, &meta_completo(), ModoEntregable::Borrador { solo_vista_filtrada: true })
+        .expect("el borrador de vista filtrada debe generarse");
+    let partes = partes_xlsx(&salida.0);
+
+    let hojas = xml_de_hojas(&partes);
+    for (numero, xml) in &hojas {
+        let cabecera = encabezado_impresion(xml);
+        assert!(cabecera.contains("BORRADOR"), "hoja {numero} sin marca BORRADOR");
+        assert!(
+            cabecera.contains("SOLO VISTA FILTRADA"),
+            "hoja {numero} sin marca SOLO VISTA FILTRADA en el encabezado"
+        );
+    }
 }
 
 #[test]
@@ -339,7 +357,7 @@ fn golden_meta_incompleto_rechaza_entregable_y_marca_borrador() {
     );
 
     let borrador = ArchivoTemporal::nuevo("golden_sin_representante_borrador");
-    generar(&borrador.0, &meta, ModoEntregable::Borrador)
+    generar(&borrador.0, &meta, ModoEntregable::Borrador { solo_vista_filtrada: false })
         .expect("el borrador con campos faltantes debe generarse");
     let partes = partes_xlsx(&borrador.0);
     let shared = parte(&partes, "xl/sharedStrings.xml");
@@ -352,7 +370,7 @@ fn golden_meta_incompleto_rechaza_entregable_y_marca_borrador() {
 #[test]
 fn golden_sin_datos_fijos_historicos() {
     let borrador = ArchivoTemporal::nuevo("golden_fijos_borrador");
-    generar(&borrador.0, &meta_completo(), ModoEntregable::Borrador)
+    generar(&borrador.0, &meta_completo(), ModoEntregable::Borrador { solo_vista_filtrada: false })
         .expect("borrador debe generarse");
     let entregable = ArchivoTemporal::nuevo("golden_fijos_entregable");
     generar(&entregable.0, &meta_completo(), ModoEntregable::Entregable { version: 3 })

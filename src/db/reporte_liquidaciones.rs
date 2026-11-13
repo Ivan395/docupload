@@ -78,7 +78,7 @@ pub fn compute_guarderias_kpis(
         // Para calcular el valor de las guarderías es el total de gps de todos los empleados vinculados al registro de obra dividido entre 1% (0.01):
         let valor_guarderias = total_gps_obra / 0.01;
         // Sin monto capturado (0.0 o ausente) no hay base para el 18%: no se marca alerta.
-        let sin_monto = !(monto_obra > 0.0);
+        let sin_monto = monto_obra.is_nan() || monto_obra <= 0.0;
         let supera_18 = !sin_monto && valor_guarderias > limite_18;
 
         result.push(ReporteGuarderiaKpiDb {
@@ -3932,7 +3932,9 @@ pub fn meta_con_marcadores_faltantes(meta: &ReporteFinalHeaderMeta) -> ReporteFi
 /// Modo de exportación del Excel IMSS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModoEntregable {
-    Borrador,
+    /// Excel de trabajo: nunca se bloquea. `solo_vista_filtrada` indica si solo
+    /// contiene las filas de la vista filtrada (marcado en el encabezado).
+    Borrador { solo_vista_filtrada: bool },
     Entregable { version: i32 },
 }
 
@@ -4128,7 +4130,13 @@ pub fn export_reporte_liquidaciones_to_excel(
 
     // Marca central: borrador visible o versión del entregable (límite de Excel: 255 caracteres)
     let centro_encabezado = match modo {
-        ModoEntregable::Borrador => "&\"-,Bold\"&KFF0000BORRADOR — NO VÁLIDO PARA ENTREGA".to_string(),
+        ModoEntregable::Borrador { solo_vista_filtrada } => {
+            let mut texto = "&\"-,Bold\"&KFF0000BORRADOR — NO VÁLIDO PARA ENTREGA".to_string();
+            if solo_vista_filtrada {
+                texto.push_str(" — SOLO VISTA FILTRADA");
+            }
+            texto
+        }
         ModoEntregable::Entregable { version } => format!("ENTREGABLE IMSS v{}", version),
     };
 
@@ -4346,15 +4354,20 @@ pub fn export_reporte_liquidaciones_to_excel(
         }
 
         // Marca visible de borrador en la fila libre (índice 10) bajo los metadatos
-        if matches!(modo, ModoEntregable::Borrador) {
+        if let ModoEntregable::Borrador { solo_vista_filtrada } = modo {
             let borrador_fmt = Format::new()
                 .set_bold()
                 .set_font_size(12)
                 .set_font_color(Color::RGB(0xFF0000))
                 .set_align(FormatAlign::Center)
                 .set_align(FormatAlign::VerticalCenter);
+            let leyenda = if solo_vista_filtrada {
+                "BORRADOR — NO VÁLIDO PARA ENTREGA AL IMSS (solo vista filtrada)"
+            } else {
+                "BORRADOR — NO VÁLIDO PARA ENTREGA AL IMSS"
+            };
             ws_final
-                .merge_range(10, 0, 10, 18, "BORRADOR — NO VÁLIDO PARA ENTREGA AL IMSS", &borrador_fmt)
+                .merge_range(10, 0, 10, 18, leyenda, &borrador_fmt)
                 .map_err(|e| e.to_string())?;
         }
 
@@ -6376,7 +6389,7 @@ pub fn calculate_max_dias_obra_for_employee_movements(
     obra_fecha_fin: Option<NaiveDate>,
     movements: &[EmployeeMovement],
 ) -> (i16, Option<i16>) {
-    let dias_efectivos = (dias_cedula as f64 - lic - inc - aus).round().max(0.0) as i16;
+    let dias_efectivos = crate::db::prorrateo::dias_efectivos(i32::from(dias_cedula), lic, inc, aus) as i16;
 
     let (month, year) = match parse_month_and_year(mes_str, anio, periodo_str) {
         Some((m, y)) => (m, y),

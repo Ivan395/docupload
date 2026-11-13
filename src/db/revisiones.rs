@@ -3,6 +3,8 @@ use chrono::NaiveDate;
 use postgres::{Client, GenericClient};
 use uuid::Uuid;
 
+use crate::revisiones_lote_logic::{EstadoRevisionLote, RevisionExistente, RevisionPrevia};
+
 #[derive(Clone, Debug, Default)]
 pub struct RevisionItem {
     pub id: String,
@@ -336,10 +338,15 @@ pub fn parse_optional_uuid(val: Option<&str>) -> Option<Uuid> {
 }
 
 pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<RevisionItem, String> {
+    create_revision_tx(client, item)
+}
+
+/// Versión genérica de `create_revision` para ejecutar dentro de una transacción.
+pub fn create_revision_tx<C: GenericClient>(c: &mut C, item: &RevisionItem) -> Result<RevisionItem, String> {
     let rp_uuid = Uuid::parse_str(&item.id_registro_patronal)
         .map_err(|e| format!("ID de Registro Patronal inválido: {}", e))?;
 
-    let rp_row = client
+    let rp_row = c
         .query_opt("SELECT registro FROM public.registros_patronales WHERE id = $1", &[&rp_uuid])
         .map_err(|e| format!("Error verificando registro patronal: {}", e))?;
     if let Some(r) = rp_row {
@@ -385,7 +392,7 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
         Some(clean_folio.clone())
     };
 
-    let row = client
+    let row = c
         .query_one(
             query,
             &[
@@ -777,6 +784,131 @@ pub fn delete_obra(client: &mut Client, id: &str) -> Result<(), String> {
         "UPDATE public.registros_obras SET activa = false, desactivada_at = now() WHERE id = $1",
     );
     Ok(())
+}
+
+/// Revisiones del registro patronal (nombre y folio) para clasificar el lote de alta masiva.
+pub fn fetch_revisiones_existentes<C: GenericClient>(c: &mut C, id_rp: Uuid) -> Result<Vec<RevisionExistente>, String> {
+    let rows = c
+        .query(
+            "SELECT TRIM(nombre), TRIM(folio) FROM public.revisiones WHERE id_registro_patronal = $1",
+            &[&id_rp],
+        )
+        .map_err(|e| format!("Error consultando revisiones existentes: {}", e))?;
+    Ok(rows
+        .iter()
+        .map(|r| RevisionExistente {
+            nombre: r.get(0),
+            folio: r.get(1),
+        })
+        .collect())
+}
+
+/// Id del concepto de diferencia por nombre (sin distinguir mayúsculas ni espacios).
+pub fn buscar_concepto_id<C: GenericClient>(c: &mut C, nombre: &str) -> Result<Option<Uuid>, String> {
+    let row = c
+        .query_opt(
+            "SELECT id FROM public.conceptos WHERE UPPER(TRIM(nombre)) = UPPER(TRIM($1)) LIMIT 1",
+            &[&nombre],
+        )
+        .map_err(|e| format!("Error buscando concepto: {}", e))?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// Id del estatus por nombre (sin distinguir mayúsculas ni espacios).
+pub fn buscar_estatus_id<C: GenericClient>(c: &mut C, nombre: &str) -> Result<Option<Uuid>, String> {
+    let row = c
+        .query_opt(
+            "SELECT id FROM public.estatus WHERE UPPER(TRIM(nombre)) = UPPER(TRIM($1)) LIMIT 1",
+            &[&nombre],
+        )
+        .map_err(|e| format!("Error buscando estatus: {}", e))?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResumenLoteRevisiones {
+    /// Nombres (normalizados) de las revisiones creadas.
+    pub creadas: Vec<String>,
+    pub omitidas: usize,
+}
+
+/// Crea las revisiones marcadas para incluir dentro de la transacción recibida. Cualquier error
+/// aborta el lote completo (el llamador debe revertir la transacción).
+pub fn crear_revisiones_lote_tx(
+    tx: &mut postgres::Transaction,
+    id_rp: Uuid,
+    filas: &[RevisionPrevia],
+    inhabiles: &HashSet<NaiveDate>,
+) -> Result<ResumenLoteRevisiones, String> {
+    let mut resumen = ResumenLoteRevisiones::default();
+    for p in filas {
+        if !p.incluir {
+            resumen.omitidas += 1;
+            continue;
+        }
+        let fila = &p.fila;
+        if p.estado != EstadoRevisionLote::Valida {
+            return Err(format!(
+                "Renglón {}: la fila no es válida y no puede crearse",
+                fila.renglon
+            ));
+        }
+
+        let concepto = fila.concepto.trim();
+        let id_concepto = if concepto.is_empty() {
+            None
+        } else {
+            buscar_concepto_id(tx, concepto)?
+        };
+        let estatus = fila.estatus.trim();
+        let id_estatus = if estatus.is_empty() {
+            None
+        } else {
+            buscar_estatus_id(tx, estatus)?
+        };
+
+        let item = RevisionItem {
+            id_registro_patronal: id_rp.to_string(),
+            id_concepto_diferencia: id_concepto.map(|u| u.to_string()),
+            concepto_diferencia: if id_concepto.is_some() {
+                concepto.to_string()
+            } else {
+                "Sin Concepto Asignado".to_string()
+            },
+            id_estatus: id_estatus.map(|u| u.to_string()),
+            estatus: estatus.to_string(),
+            nombre: fila.nombre.clone(),
+            folio: fila.folio.clone().unwrap_or_default(),
+            fecha_aprobacion_imss: fila.fecha_aprobacion_imss,
+            fecha_maxima_entrega_revision: fila
+                .fecha_aprobacion_imss
+                .map(|a| add_business_days(a, 40, Some(inhabiles))),
+            fecha_entrega_revision: fila.fecha_entrega_revision,
+            periodo_inicio: fila.periodo_inicio,
+            periodo_fin: fila.periodo_fin,
+            ..Default::default()
+        };
+
+        let creada = create_revision_tx(tx, &item).map_err(|e| format!("Renglón {}: {}", fila.renglon, e))?;
+        resumen.creadas.push(creada.nombre);
+    }
+    Ok(resumen)
+}
+
+/// Envoltorio de `crear_revisiones_lote_tx`: abre la transacción y hace COMMIT si todo sale bien.
+pub fn crear_revisiones_lote(
+    client: &mut Client,
+    id_rp: Uuid,
+    filas: &[RevisionPrevia],
+    inhabiles: &HashSet<NaiveDate>,
+) -> Result<ResumenLoteRevisiones, String> {
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("No se pudo iniciar la transacción: {}", e))?;
+    let resumen = crear_revisiones_lote_tx(&mut tx, id_rp, filas, inhabiles)?;
+    tx.commit()
+        .map_err(|e| format!("No se pudo confirmar el lote de revisiones: {}", e))?;
+    Ok(resumen)
 }
 
 #[cfg(test)]

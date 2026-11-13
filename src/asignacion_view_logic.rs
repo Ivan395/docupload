@@ -13,17 +13,17 @@ use uuid::Uuid;
 
 use crate::db::bitacora_reportes::{deshacer_lote, ultimo_lote_revision};
 use crate::db::asignacion_ops::revertir_reportes_empleado;
-use crate::db::prorrateo::dias_efectivos;
 use crate::db::reporte_liquidaciones::{
     add_obra_vinculacion_for_employee, batch_assign_multiple_obras_to_employees,
     batch_save_reporte_row_updates, ObraOptionDb,
     ReporteLiquidacionRowDb,
 };
+use crate::db::topes::{efectivos_de, movimientos_de, tope_dias_obra, vigencia_en_mes};
 use crate::db::DbPool;
 use crate::reporte_view_logic::{sync_and_load_reporte_data, ReporteSessionState};
 use crate::{
     show_toast_message, AppData, AppLogic, AsigCelda, AsigEmpleadoFila, AsigObraChip,
-    AsigObraOpcion, MainWindow,
+    AsigObraOpcion, AsigObraOpcionCelda, MainWindow,
 };
 
 /// Clave de movimiento que identifica una baja (comparación sin distinguir mayúsculas).
@@ -41,6 +41,17 @@ pub struct ChipObra {
     pub dias: i32,
     pub ids_tramos: Vec<Uuid>,
     pub color_idx: i32,
+    /// Máximo de días que admite esta obra en el mes (vigencia, movimientos y otras obras).
+    pub tope: i32,
+}
+
+/// Obra del catálogo que aún no tiene chip en la celda y puede recibir días en ese mes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpcionObraCelda {
+    pub id_obra: Uuid,
+    pub numero: String,
+    pub tope: i32,
+    pub color_idx: i32,
 }
 
 /// Celda de la matriz: un reporte (empleado-mes).
@@ -57,6 +68,8 @@ pub struct CeldaMes {
     pub es_baja: bool,
     pub inconsistente: bool,
     pub cedula_actualizada: bool,
+    /// Obras del catálogo (sin chip aquí) con tope > 0 en el mes; vacío si la celda es baja.
+    pub opciones: Vec<OpcionObraCelda>,
 }
 
 /// Fila de la matriz: un empleado con una celda opcional por mes.
@@ -203,10 +216,12 @@ fn construir_celda(id_reporte: Uuid, grupo: &[&ReporteLiquidacionRowDb], obras: 
         .map(|t| i32::from(t.dias_cedula))
         .max()
         .unwrap_or(0);
-    let disponibles = match no_baja.first() {
-        Some(t) => dias_efectivos(dias_cedula, t.lic, t.inc, t.aus),
-        None => 0,
-    };
+    // Fórmula canónica MOD-05: todos los tramos del grupo, bajas excluidas.
+    let tuplas: Vec<(i16, f64, f64, f64, bool)> = grupo
+        .iter()
+        .map(|t| (t.dias_cedula, t.lic, t.inc, t.aus, es_baja_tramo(t)))
+        .collect();
+    let disponibles = efectivos_de(&tuplas);
 
     // Agrupa tramos con obra en chips, sumando días y acumulando ids de tramo.
     let mut chips: Vec<ChipObra> = Vec::new();
@@ -225,6 +240,7 @@ fn construir_celda(id_reporte: Uuid, grupo: &[&ReporteLiquidacionRowDb], obras: 
                             dias: 0,
                             ids_tramos: Vec::new(),
                             color_idx: color_obra(id_obra, obras),
+                            tope: 0,
                         });
                         let i = chips.len() - 1;
                         idx_chip.insert(id_obra, i);
@@ -242,7 +258,45 @@ fn construir_celda(id_reporte: Uuid, grupo: &[&ReporteLiquidacionRowDb], obras: 
     chips.sort_by(|a, b| a.numero.cmp(&b.numero).then(a.id_obra.cmp(&b.id_obra)));
 
     let asignados: i32 = chips.iter().map(|c| c.dias).sum();
-    let inconsistente = grupo.iter().any(|t| t.tiene_inconsistencia) || asignados > disponibles;
+
+    // Vigencia del mes por obra: fechas de la obra y movimientos (baja / alta) del empleado.
+    let movs = movimientos_de(&grupo.iter().map(|t| (t.clave.as_str(), t.fecha)).collect::<Vec<_>>());
+    let tope_para = |obra: Option<&ObraOptionDb>, otras: i32| -> i32 {
+        let (inicio, fin) = obra.map_or((None, None), |o| (o.fecha_inicio, o.fecha_fin));
+        let vig = vigencia_en_mes(primero.anio_periodo, primero.mes_periodo_int, inicio, fin, &movs);
+        tope_dias_obra(disponibles, vig, otras).tope
+    };
+
+    for chip in &mut chips {
+        let otras = asignados - chip.dias;
+        chip.tope = tope_para(obras.iter().find(|o| o.id == chip.id_obra), otras);
+    }
+
+    let ids_con_chip: HashSet<Uuid> = chips.iter().map(|c| c.id_obra).collect();
+    let mut candidatas: Vec<(bool, OpcionObraCelda)> = Vec::new();
+    if !es_baja {
+        for o in obras.iter().filter(|o| !ids_con_chip.contains(&o.id)) {
+            let tope = tope_para(Some(o), asignados);
+            if tope > 0 {
+                candidatas.push((
+                    o.creado_usuario,
+                    OpcionObraCelda {
+                        id_obra: o.id,
+                        numero: o.numero.clone(),
+                        tope,
+                        color_idx: color_obra(o.id, obras),
+                    },
+                ));
+            }
+        }
+    }
+    // Creadas por el usuario primero, luego por número.
+    candidatas.sort_by(|(ua, a), (ub, b)| (!ua).cmp(&!ub).then(a.numero.cmp(&b.numero)));
+    let opciones: Vec<OpcionObraCelda> = candidatas.into_iter().map(|(_, o)| o).collect();
+
+    let inconsistente = grupo.iter().any(|t| t.tiene_inconsistencia)
+        || asignados > disponibles
+        || chips.iter().any(|c| c.dias > c.tope);
     let cedula_actualizada = grupo.iter().any(|t| t.cedula_actualizada);
 
     CeldaMes {
@@ -257,6 +311,7 @@ fn construir_celda(id_reporte: Uuid, grupo: &[&ReporteLiquidacionRowDb], obras: 
         es_baja,
         inconsistente,
         cedula_actualizada,
+        opciones,
     }
 }
 
@@ -458,11 +513,22 @@ fn chip_slint(c: &ChipObra) -> AsigObraChip {
         numero: c.numero.clone().into(),
         dias: c.dias,
         color_idx: c.color_idx,
+        tope: c.tope,
+    }
+}
+
+fn opcion_celda_slint(o: &OpcionObraCelda) -> AsigObraOpcionCelda {
+    AsigObraOpcionCelda {
+        id_obra: o.id_obra.to_string().into(),
+        numero: o.numero.clone().into(),
+        tope: o.tope,
+        color_idx: o.color_idx,
     }
 }
 
 fn celda_slint(c: &CeldaMes) -> AsigCelda {
     let obras: Vec<AsigObraChip> = c.obras.iter().map(chip_slint).collect();
+    let opciones: Vec<AsigObraOpcionCelda> = c.opciones.iter().map(opcion_celda_slint).collect();
     AsigCelda {
         existe: true,
         id_reporte: c.id_reporte.to_string().into(),
@@ -471,6 +537,7 @@ fn celda_slint(c: &CeldaMes) -> AsigCelda {
         disponibles: c.disponibles,
         asignados: c.asignados,
         obras: ModelRc::new(VecModel::from(obras)),
+        opciones: ModelRc::new(VecModel::from(opciones)),
         es_baja: c.es_baja,
         sin_obra: !c.es_baja && c.obras.is_empty(),
         inconsistente: c.inconsistente,
@@ -488,6 +555,7 @@ fn celda_vacia(anio: i16, mes: i16) -> AsigCelda {
         disponibles: 0,
         asignados: 0,
         obras: ModelRc::new(VecModel::from(Vec::<AsigObraChip>::new())),
+        opciones: ModelRc::new(VecModel::from(Vec::<AsigObraOpcionCelda>::new())),
         es_baja: false,
         sin_obra: false,
         inconsistente: false,
@@ -828,6 +896,45 @@ fn ejecutar_accion<F>(
     }
 }
 
+/// Celda del reporte tal como la muestra la vista (None si el reporte no tiene tramos en la sesión).
+fn celda_de_reporte(st: &ReporteSessionState, rep_id: Uuid) -> Option<CeldaMes> {
+    let grupo: Vec<&ReporteLiquidacionRowDb> =
+        st.all_rows.iter().filter(|t| t.id_parent_reporte_liq == rep_id).collect();
+    if grupo.is_empty() {
+        return None;
+    }
+    Some(construir_celda(rep_id, &grupo, &st.obras_options))
+}
+
+/// Rechaza cambiar los días de una obra por encima de su tope en el mes.
+fn validar_tope_cambio_dias(st: &ReporteSessionState, rep_id: Uuid, obra_id: Uuid, dias: i32) -> Result<(), String> {
+    let Some(celda) = celda_de_reporte(st, rep_id) else {
+        return Ok(());
+    };
+    match celda.obras.iter().find(|c| c.id_obra == obra_id) {
+        Some(chip) if dias > chip.tope => Err(format!(
+            "El tope de la obra en este mes es {} días (vigencia, movimientos y otras obras).",
+            chip.tope
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Rechaza agregar una obra sin días disponibles en el mes o con más días que su tope.
+fn validar_tope_vincular(st: &ReporteSessionState, rep_id: Uuid, obra_id: Uuid, dias: i32) -> Result<(), String> {
+    let Some(celda) = celda_de_reporte(st, rep_id) else {
+        return Ok(());
+    };
+    match celda.opciones.iter().find(|o| o.id_obra == obra_id) {
+        None => Err("La obra no tiene días disponibles en este mes (fuera de vigencia o sin días efectivos).".to_string()),
+        Some(opcion) if dias > opcion.tope => Err(format!(
+            "El tope de la obra en este mes es {} días (vigencia, movimientos y otras obras).",
+            opcion.tope
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Registra los callbacks de la pestaña "Asignación por empleado".
 pub fn wire_asignacion_callbacks(
     main_window: &MainWindow,
@@ -885,6 +992,14 @@ pub fn wire_asignacion_callbacks(
             };
             if dias <= 0 {
                 show_toast_message(&ui, "Los días de obra deben ser mayores a 0.");
+                return;
+            }
+            let tope = match session.lock() {
+                Ok(st) => validar_tope_vincular(&st, rep_id, obra_id, dias),
+                Err(_) => Ok(()),
+            };
+            if let Err(e) = tope {
+                show_toast_message(&ui, &e);
                 return;
             }
             ejecutar_accion(&ui, &pool, &session, "vincular la obra", move |client, rev, st| {
@@ -967,6 +1082,14 @@ pub fn wire_asignacion_callbacks(
             };
             if dias <= 0 {
                 show_toast_message(&ui, "Los días de obra deben ser mayores a 0.");
+                return;
+            }
+            let tope = match session.lock() {
+                Ok(st) => validar_tope_cambio_dias(&st, rep_id, obra_id, dias),
+                Err(_) => Ok(()),
+            };
+            if let Err(e) = tope {
+                show_toast_message(&ui, &e);
                 return;
             }
             ejecutar_accion(&ui, &pool, &session, "cambiar los días de la obra", move |client, _rev, st| {
@@ -1584,5 +1707,84 @@ mod tests {
         assert_eq!(etiqueta_mes(2026, 3), "MAR 2026");
         assert_eq!(etiqueta_mes(2025, 12), "DIC 2025");
         assert_eq!(etiqueta_mes(2026, 13), "??? 2026");
+    }
+
+    /// Celda construida a partir de tramos de un mismo reporte (uid 10).
+    fn celda_de(tramos: &[ReporteLiquidacionRowDb], obras: &[ObraOptionDb]) -> CeldaMes {
+        let refs: Vec<&ReporteLiquidacionRowDb> = tramos.iter().collect();
+        construir_celda(uid(10), &refs, obras)
+    }
+
+    #[test]
+    fn tope_obra_que_inicia_dia_16_con_30_dias_cedula() {
+        let mut o = obra(100, "001");
+        o.fecha_inicio = NaiveDate::from_ymd_opt(2026, 1, 16);
+        let t = con_obra(tramo(1, 10, 1, "Ana", 2026, 1, 30), 100, "001", 10);
+        let celda = celda_de(&[t], &[o]);
+        assert_eq!(celda.obras[0].tope, 16);
+        assert!(celda.obras[0].dias <= celda.obras[0].tope);
+        assert!(!celda.inconsistente);
+    }
+
+    #[test]
+    fn tope_con_baja_el_dia_10() {
+        let alta = con_obra(tramo(1, 10, 1, "Ana", 2026, 1, 30), 100, "001", 10);
+        let mut baja = tramo(2, 10, 1, "Ana", 2026, 1, 0);
+        baja.clave = "BAJA".to_string();
+        baja.fecha = NaiveDate::from_ymd_opt(2026, 1, 10);
+        let celda = celda_de(&[alta, baja], &[obra(100, "001")]);
+        assert_eq!(celda.disponibles, 30);
+        assert_eq!(celda.obras[0].tope, 10);
+    }
+
+    #[test]
+    fn incapacidad_de_dos_dias_reduce_disponibles_a_28() {
+        let mut t = tramo(1, 10, 1, "Ana", 2026, 1, 30);
+        t.inc = 2.0;
+        let celda = celda_de(&[t], &[]);
+        assert_eq!(celda.disponibles, 28);
+    }
+
+    #[test]
+    fn segunda_obra_tiene_tope_de_los_dias_restantes() {
+        let a = con_obra(tramo(1, 10, 1, "Ana", 2026, 1, 30), 100, "001", 15);
+        let b = con_obra(tramo(2, 10, 1, "Ana", 2026, 1, 30), 101, "002", 10);
+        let celda = celda_de(&[a, b], &[obra(100, "001"), obra(101, "002")]);
+        assert_eq!(celda.disponibles, 30);
+        let segunda = celda.obras.iter().find(|c| c.numero == "002").expect("chip 002");
+        assert_eq!(segunda.tope, 15);
+        let primera = celda.obras.iter().find(|c| c.numero == "001").expect("chip 001");
+        assert_eq!(primera.tope, 20);
+    }
+
+    #[test]
+    fn opciones_excluyen_obras_sin_vigencia_en_el_mes() {
+        let mut fuera = obra(100, "001");
+        fuera.fecha_inicio = NaiveDate::from_ymd_opt(2026, 2, 1);
+        fuera.fecha_fin = NaiveDate::from_ymd_opt(2026, 2, 28);
+        let dentro = obra(101, "002");
+        let celda = celda_de(&[tramo(1, 10, 1, "Ana", 2026, 1, 30)], &[fuera, dentro]);
+        assert_eq!(celda.opciones.len(), 1);
+        assert_eq!(celda.opciones[0].numero, "002");
+        assert_eq!(celda.opciones[0].tope, 30);
+    }
+
+    #[test]
+    fn opciones_vacias_en_celda_de_baja() {
+        let mut baja = tramo(1, 10, 1, "Ana", 2026, 1, 0);
+        baja.clave = "BAJA".to_string();
+        let celda = celda_de(&[baja], &[obra(100, "001")]);
+        assert!(celda.es_baja);
+        assert!(celda.opciones.is_empty());
+    }
+
+    #[test]
+    fn exceder_tope_marca_inconsistente() {
+        let t = con_obra(tramo(1, 10, 1, "Ana", 2026, 1, 30), 100, "001", 20);
+        let mut o = obra(100, "001");
+        o.fecha_inicio = NaiveDate::from_ymd_opt(2026, 1, 16);
+        let celda = celda_de(&[t], &[o]);
+        assert_eq!(celda.obras[0].tope, 16);
+        assert!(celda.inconsistente);
     }
 }

@@ -1100,12 +1100,14 @@ mod tests {
                     dias: 10,
                     ids_tramos: Vec::new(),
                     color_idx: 0,
+                    tope: 30,
                 })
                 .collect(),
             ids_tramos_sin_obra: Vec::new(),
             es_baja,
             inconsistente: false,
             cedula_actualizada: false,
+            opciones: Vec::new(),
         }
     }
 
