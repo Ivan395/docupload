@@ -239,6 +239,36 @@ BEGIN
 END $$;
 "#;
 
+/// F1: borrado lógico de obras, CHECK de fechas (NOT VALID + validación solo si no hay violaciones)
+/// y referencia de obra en la bitácora para poder deshacer su eliminación. Solo agrega; no borra datos.
+pub(crate) const SQL_CORRECCIONES_F1_OBRAS: &str = r#"
+ALTER TABLE public.registros_obras ADD COLUMN IF NOT EXISTS activa boolean NOT NULL DEFAULT true;
+ALTER TABLE public.registros_obras ADD COLUMN IF NOT EXISTS desactivada_at timestamptz;
+ALTER TABLE IF EXISTS revision_history.registros_obras ADD COLUMN IF NOT EXISTS activa boolean;
+ALTER TABLE IF EXISTS revision_history.registros_obras ADD COLUMN IF NOT EXISTS desactivada_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_registros_obras_rev_activa ON public.registros_obras(id_revision) WHERE activa;
+
+ALTER TABLE public.reportes_cambios ADD COLUMN IF NOT EXISTS id_registro_obra uuid;
+ALTER TABLE IF EXISTS revision_history.reportes_cambios ADD COLUMN IF NOT EXISTS id_registro_obra uuid;
+
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_registros_obras_fechas') THEN
+        ALTER TABLE public.registros_obras
+            ADD CONSTRAINT chk_registros_obras_fechas CHECK (fecha_fin >= fecha_inicio) NOT VALID;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_registros_obras_fechas' AND NOT convalidated) THEN
+        SELECT COUNT(*) INTO n FROM public.registros_obras WHERE fecha_fin < fecha_inicio;
+        IF n = 0 THEN
+            ALTER TABLE public.registros_obras VALIDATE CONSTRAINT chk_registros_obras_fechas;
+        ELSE
+            RAISE WARNING 'chk_registros_obras_fechas sin validar: % obras con fecha_fin < fecha_inicio', n;
+        END IF;
+    END IF;
+END $$;
+"#;
+
 pub(crate) const SQL_FASE1_RESTRICCIONES: &str = r#"
 -- a) Empleados: NSS único por cliente (solo NSS no vacíos)
 DO $$
@@ -2249,6 +2279,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     // 14. Correcciones F0: estado/editado/sintética en reportes_nominas (no destructivo)
     exec_schema_step(client, "6_correcciones_f0_nominas", SQL_CORRECCIONES_F0_NOMINAS)?;
 
+    // 15. Correcciones F1: borrado lógico de obras (activa), CHECK de fechas y referencia en bitácora
+    exec_schema_step(client, "7_correcciones_f1_obras", SQL_CORRECCIONES_F1_OBRAS)?;
+
     match restricciones_fase1_pendientes(client) {
         Ok(lista) if !lista.is_empty() => log::warn!(
             "Restricciones de integridad pendientes (hay duplicados por depurar): {}",
@@ -2434,6 +2467,35 @@ mod tests_fase1_ddl {
             assert!(
                 !SQL_CORRECCIONES_F0_NOMINAS.contains(prohibido),
                 "SQL_CORRECCIONES_F0_NOMINAS no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn correcciones_f1_obras_es_aditiva_y_no_destructiva() {
+        for fragmento in [
+            "activa boolean NOT NULL DEFAULT true",
+            "chk_registros_obras_fechas",
+            "NOT VALID",
+            "reportes_cambios ADD COLUMN IF NOT EXISTS id_registro_obra",
+        ] {
+            assert!(
+                SQL_CORRECCIONES_F1_OBRAS.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F1_OBRAS",
+                fragmento
+            );
+        }
+        for prohibido in [
+            "DELETE ",
+            "DROP TABLE",
+            "DROP COLUMN",
+            "TRUNCATE",
+            "UPDATE public.registros_obras",
+        ] {
+            assert!(
+                !SQL_CORRECCIONES_F1_OBRAS.contains(prohibido),
+                "SQL_CORRECCIONES_F1_OBRAS no debe contener {}",
                 prohibido
             );
         }

@@ -335,6 +335,7 @@ fn get_obra_filter_dates(
         WHERE (ro.id_revision = $1
            OR ro.id_registro_patronal = (SELECT r.id_registro_patronal FROM public.revisiones r WHERE r.id = $1))
           AND COALESCE(ro.creado_usuario, false) = true
+          AND ro.activa
         "#,
         &[&id_revision],
     ).unwrap_or_default();

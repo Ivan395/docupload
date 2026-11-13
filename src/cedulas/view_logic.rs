@@ -1520,8 +1520,8 @@ pub fn load_cedulas_from_db(
                 fecha_inicio,
                 fecha_fin,
                 COALESCE(creado_usuario, false) AS creado_usuario
-            FROM public.registros_obras 
-            WHERE id_revision = $1
+            FROM public.registros_obras
+            WHERE id_revision = $1 AND activa
             ORDER BY fecha_inicio ASC;
             "#,
             &[&target_uuid],

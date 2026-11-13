@@ -177,6 +177,18 @@ fn update_cedulas_ui(ui: &MainWindow, entries: &[SelectedFileEntry]) {
     app_data.set_cedulas_files(ModelRc::new(VecModel::from(models)));
 }
 
+/// Texto del efecto de una resincronización del universo de la revisión; vacío si no hubo cambios.
+fn mensaje_cambio_universo(c: &crate::db::obras_ops::CambioUniverso) -> String {
+    if c.a_fuera == 0 && c.a_activo == 0 {
+        String::new()
+    } else {
+        format!(
+            "Reporte de liquidaciones: {} fila(s) pasaron a fuera de periodo, {} regresaron al periodo.",
+            c.a_fuera, c.a_activo
+        )
+    }
+}
+
 pub fn show_toast_message(ui: &MainWindow, message: &str) {
     let app_data = ui.global::<AppData>();
 
@@ -931,7 +943,7 @@ fn load_obras_ui(ui: &MainWindow, pool: &DbPool, revision_id: &str) {
 
     for o in &obras {
         total_sup += o.superficie_construido;
-        total_monto += o.monto;
+        total_monto += o.monto.unwrap_or(0.0);
     }
 
     app_data.set_obras_superficie_total(total_sup as f32);
@@ -982,8 +994,11 @@ fn load_obras_ui(ui: &MainWindow, pool: &DbPool, revision_id: &str) {
                 ubicacion: o.ubicacion.into(),
                 superficie_construida: o.superficie_construido as f32,
                 superficie_construida_str: format!("{:.2} m²", o.superficie_construido).into(),
-                monto: o.monto as f32,
-                monto_str: format!("${} MXN", format_monto_mexico(o.monto)).into(),
+                monto: o.monto.unwrap_or(0.0) as f32,
+                monto_str: match o.monto {
+                    Some(m) => format!("${} MXN", format_monto_mexico(m)).into(),
+                    None => "Sin monto".into(),
+                },
                 delegacion: o.delegacion.into(),
                 subdelegacion: o.subdelegacion.into(),
                 created_at_str: o.created_at.into(),
@@ -1053,7 +1068,7 @@ fn update_global_stats(ui: &MainWindow, pool: &DbPool) {
                 (SELECT COUNT(*) FROM public.registros_patronales)::int,
                 (SELECT COUNT(*) FROM public.empleados WHERE COALESCE(esta_activo, true) = true)::int,
                 (SELECT COUNT(*) FROM public.revisiones)::int,
-                (SELECT COUNT(*) FROM public.registros_obras WHERE COALESCE(creado_usuario, false) = true)::int
+                (SELECT COUNT(*) FROM public.registros_obras WHERE COALESCE(creado_usuario, false) = true AND activa = true)::int
             "#,
             &[],
         ) {
@@ -5125,6 +5140,35 @@ fn main() -> Result<(), slint::PlatformError> {
                                 let _ = crate::rustfs::ensure_revision_structure(&client_nom, &rp_reg, &rev_nom);
                             });
 
+                            // Al editar, el universo de reportes depende de las fechas/periodo: resincronizar.
+                            if is_edit {
+                                if let Ok(uuid_rev) = Uuid::parse_str(&item.id) {
+                                    let ui_weak2 = ui_weak.clone();
+                                    let pool_bg = pool.clone();
+                                    thread::spawn(move || {
+                                        let res_sync = match pool_bg.get() {
+                                            Ok(mut client_bg) => crate::db::obras_ops::resincronizar_universo(&mut client_bg, uuid_rev),
+                                            Err(e) => Err(format!("Error de conexión: {}", e)),
+                                        };
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(ui) = ui_weak2.upgrade() {
+                                                match res_sync {
+                                                    Ok(cambio) => {
+                                                        let texto = mensaje_cambio_universo(&cambio);
+                                                        if !texto.is_empty() {
+                                                            show_toast_message(&ui, &texto);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        show_toast_message(&ui, &format!("No se pudo resincronizar el reporte: {}", e));
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    });
+                                }
+                            }
+
                             app_data.set_show_revision_modal(false);
                             load_revisiones_ui(&ui, pool, &rp_id);
                             update_global_stats(&ui, pool);
@@ -5636,8 +5680,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_obra_form_fecha_fin(format_date_opt(o.fecha_fin).into());
                                 app_data.set_obra_form_ubicacion(o.ubicacion.into());
                                 app_data.set_obra_form_superficie(format!("{:.2}", o.superficie_construido).into());
-                                let monto_fmt = if o.monto > 0.0 { format_monto_mexico(o.monto) } else { "".to_string() };
-                                let monto_preview = if o.monto > 0.0 { format!("${} MXN", monto_fmt) } else { "".to_string() };
+                                let monto_fmt = match o.monto { Some(m) if m > 0.0 => format_monto_mexico(m), _ => "".to_string() };
+                                let monto_preview = if monto_fmt.is_empty() { "".to_string() } else { format!("${} MXN", monto_fmt) };
                                 app_data.set_obra_form_monto(monto_fmt.into());
                                 app_data.set_obra_form_monto_preview(monto_preview.into());
                                 app_data.set_obra_form_delegacion(o.delegacion.into());
@@ -5691,18 +5735,23 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
 
                 let sup: f64 = sup_str.trim().parse().unwrap_or(0.0);
-                let clean_monto_str = monto_str.replace(',', "");
-                let monto: f64 = clean_monto_str.trim().parse().unwrap_or(0.0);
+                let monto: Option<f64> = {
+                    let s = monto_str.replace(',', "");
+                    let s = s.trim();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        match s.parse::<f64>() {
+                            Ok(v) => Some(v),
+                            Err(_) => {
+                                show_toast_message(&ui, "El monto de la obra no es un número válido.");
+                                return;
+                            }
+                        }
+                    }
+                };
 
                 if let Some(ref pool) = pool_clone {
-                    let mut client = match pool.get() {
-                        Ok(c) => c,
-                        Err(e) => {
-                            show_toast_message(&ui, &format!("Error de conexión: {}", e));
-                            return;
-                        }
-                    };
-
                     let item = RegistroObraItem {
                         id: id.to_string(),
                         id_revision: rev_id.clone(),
@@ -5721,34 +5770,52 @@ fn main() -> Result<(), slint::PlatformError> {
                     };
 
                     let is_edit = !id.is_empty();
-                    let res = if is_edit {
-                        update_obra(&mut client, &item)
-                    } else {
-                        create_obra(&mut client, &item)
-                    };
+                    show_toast_message(&ui, "Guardando registro de obra...");
 
-                    match res {
-                        Ok(_) => {
-                            app_data.set_show_obra_modal(false);
-                            app_data.set_obra_form_numero_status("".into());
-                            app_data.set_obra_form_numero_msg("".into());
-                            load_obras_ui(&ui, pool, &rev_id);
-                            update_global_stats(&ui, pool);
-                            let msg = if monto > 0.0 {
-                                if is_edit { "Obra actualizada exitosamente." } else { "Registro de obra creado exitosamente." }
-                            } else {
-                                if is_edit {
-                                    "Obra actualizada. Aviso: Monto Total en 0; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
-                                } else {
-                                    "Registro de obra creado. Aviso: Monto Total en 0; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
+                    let ui_weak2 = ui_weak.clone();
+                    let pool_bg = pool.clone();
+                    let rev_id_bg = rev_id.clone();
+                    thread::spawn(move || {
+                        let res = match pool_bg.get() {
+                            Ok(mut client) => crate::db::obras_ops::guardar_obra_y_resincronizar(&mut client, &item, is_edit),
+                            Err(e) => Err(format!("Error de conexión: {}", e)),
+                        };
+
+                        let pool_for_ui = pool_bg.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak2.upgrade() {
+                                match res {
+                                    Ok((_, cambio)) => {
+                                        let app_data = ui.global::<AppData>();
+                                        app_data.set_show_obra_modal(false);
+                                        app_data.set_obra_form_numero_status("".into());
+                                        app_data.set_obra_form_numero_msg("".into());
+                                        load_obras_ui(&ui, &pool_for_ui, &rev_id_bg);
+                                        update_global_stats(&ui, &pool_for_ui);
+                                        let msg_base = if monto.map_or(false, |m| m > 0.0) {
+                                            if is_edit { "Obra actualizada exitosamente." } else { "Registro de obra creado exitosamente." }
+                                        } else {
+                                            if is_edit {
+                                                "Obra actualizada. Aviso: Sin monto capturado; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
+                                            } else {
+                                                "Registro de obra creado. Aviso: Sin monto capturado; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
+                                            }
+                                        };
+                                        let extra = mensaje_cambio_universo(&cambio);
+                                        let msg = if extra.is_empty() {
+                                            msg_base.to_string()
+                                        } else {
+                                            format!("{} {}", msg_base, extra)
+                                        };
+                                        show_toast_message(&ui, &msg);
+                                    }
+                                    Err(e) => {
+                                        show_toast_message(&ui, &format!("Error al guardar obra: {}", e));
+                                    }
                                 }
-                            };
-                            show_toast_message(&ui, msg);
-                        }
-                        Err(e) => {
-                            show_toast_message(&ui, &format!("Error al guardar obra: {}", e));
-                        }
-                    }
+                            }
+                        });
+                    });
                 }
             }
         });
@@ -5791,12 +5858,45 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
         app_logic.on_open_delete_obra_dialog(move |id, numero| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
-                app_data.set_delete_obra_id(id);
+                app_data.set_delete_obra_id(id.clone());
                 app_data.set_delete_obra_numero(numero);
+                app_data.set_delete_obra_impacto("Calculando impacto...".into());
                 app_data.set_show_delete_obra_modal(true);
+
+                if let Some(ref pool) = pool_clone {
+                    let ui_weak2 = ui_weak.clone();
+                    let pool_bg = pool.clone();
+                    let obra_id_str = id.to_string();
+                    thread::spawn(move || {
+                        let res = match Uuid::parse_str(&obra_id_str) {
+                            Err(_) => Err("ID de obra inválido".to_string()),
+                            Ok(uuid) => match pool_bg.get() {
+                                Ok(mut client) => crate::db::obras_ops::contar_impacto_obra(&mut client, uuid),
+                                Err(e) => Err(format!("Error de conexión: {}", e)),
+                            },
+                        };
+
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak2.upgrade() {
+                                let texto = match res {
+                                    Ok(imp) if imp.empleado_mes == 0 => {
+                                        "La obra no tiene empleados asignados en el reporte de liquidaciones.".to_string()
+                                    }
+                                    Ok(imp) => format!(
+                                        "La obra está asignada a {} empleado(s) en {} empleado-mes ({} tramos). Al eliminarla, esos tramos quedan sin obra y se recalculan los importes. Puedes deshacerlo desde Asignación por empleado → Deshacer.",
+                                        imp.empleados, imp.empleado_mes, imp.tramos
+                                    ),
+                                    Err(e) => format!("No se pudo calcular el impacto: {}", e),
+                                };
+                                ui.global::<AppData>().set_delete_obra_impacto(texto.into());
+                            }
+                        });
+                    });
+                }
             }
         });
     }
@@ -5824,21 +5924,31 @@ fn main() -> Result<(), slint::PlatformError> {
 
                 thread::spawn(move || {
                     if let Some(ref pool) = pool_opt {
-                        let res = match pool.get() {
-                            Ok(mut client) => delete_obra(&mut client, obra_id_str.as_str()),
-                            Err(e) => Err(format!("Error obteniendo conexión a la BD: {}", e)),
+                        let res = match Uuid::parse_str(obra_id_str.as_str()) {
+                            Err(_) => Err("ID de obra inválido".to_string()),
+                            Ok(uuid) => match pool.get() {
+                                Ok(mut client) => crate::db::obras_ops::desactivar_obra(&mut client, uuid),
+                                Err(e) => Err(format!("Error obteniendo conexión a la BD: {}", e)),
+                            },
                         };
 
                         let pool_for_ui = pool.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = ui_weak2.upgrade() {
                                 match res {
-                                    Ok(_) => {
+                                    Ok(r) => {
                                         let app_data = ui.global::<AppData>();
                                         let rev_id = app_data.get_selected_revision_id().to_string();
                                         load_obras_ui(&ui, &pool_for_ui, &rev_id);
                                         update_global_stats(&ui, &pool_for_ui);
-                                        show_toast_message(&ui, "Registro de obra eliminado correctamente.");
+                                        let mut msg = "Registro de obra eliminado.".to_string();
+                                        if r.hay_bitacora {
+                                            msg.push_str(&format!(
+                                                " Se quitaron sus asignaciones en {} empleado-mes; puedes deshacerlo desde Asignación por empleado → Deshacer.",
+                                                r.reportes_afectados
+                                            ));
+                                        }
+                                        show_toast_message(&ui, &msg);
                                     }
                                     Err(e) => {
                                         show_toast_message(&ui, &format!("Error al eliminar registro de obra: {}", e));
@@ -8152,6 +8262,27 @@ mod tests_ui {
         for r in &state.all_rows {
             assert_eq!(r.subtotal, r.subtotal_orig);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_mensajes_obras {
+    use super::*;
+    use crate::db::obras_ops::CambioUniverso;
+
+    #[test]
+    fn mensaje_cambio_universo_sin_cambios_es_vacio() {
+        let c = CambioUniverso { a_fuera: 0, a_activo: 0 };
+        assert_eq!(mensaje_cambio_universo(&c), "");
+    }
+
+    #[test]
+    fn mensaje_cambio_universo_con_cambios() {
+        let c = CambioUniverso { a_fuera: 2, a_activo: 1 };
+        assert_eq!(
+            mensaje_cambio_universo(&c),
+            "Reporte de liquidaciones: 2 fila(s) pasaron a fuera de periodo, 1 regresaron al periodo."
+        );
     }
 }
 

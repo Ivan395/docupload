@@ -1167,7 +1167,7 @@ export component RegistrosObrasView inherits Rectangle {
 
         Rectangle {
             width: 480px;
-            height: 230px;
+            height: 300px;
             border-radius: 12px;
             background: #ffffff;
             border-width: 1px;
@@ -1207,7 +1207,7 @@ export component RegistrosObrasView inherits Rectangle {
                             color: #991b1b;
                         }
                         Text {
-                            text: "Esta acción eliminará el registro de obra seleccionado y sus vinculaciones asociadas.";
+                            text: "La obra se marcará como eliminada (se conserva su historial). Sus asignaciones en el reporte se quitarán con registro en la bitácora.";
                             font-size: 12px;
                             color: #475569;
                             wrap: word-wrap;
@@ -1236,6 +1236,12 @@ export component RegistrosObrasView inherits Rectangle {
                             font-size: 14px;
                             font-weight: 800;
                             color: #0f172a;
+                        }
+                        Text {
+                            text: AppData.delete_obra_impacto;
+                            font-size: 11px;
+                            color: #475569;
+                            wrap: word-wrap;
                         }
                     }
                 }

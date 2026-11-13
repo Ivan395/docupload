@@ -18,6 +18,13 @@ pub const ACCION_DESVINCULAR: &str = "DESVINCULAR";
 pub const ACCION_ASIGNAR_LOTE: &str = "ASIGNAR_LOTE";
 pub const ACCION_REVERTIR: &str = "REVERTIR";
 pub const ACCION_DESHACER: &str = "DESHACER";
+pub const ACCION_DESACTIVAR_OBRA: &str = "DESACTIVAR_OBRA";
+
+/// Reactiva las obras que el lote desactivó (`registros_obras.activa`). Deshacer una desactivación
+/// debe devolver la obra al catálogo activo.
+const SQL_REACTIVAR_OBRAS_DEL_LOTE: &str = "UPDATE public.registros_obras SET activa = true, desactivada_at = NULL \
+    WHERE id IN (SELECT id_registro_obra FROM public.reportes_cambios \
+    WHERE lote_id = $1 AND id_registro_obra IS NOT NULL)";
 
 /// Longitud máxima de la columna `reportes_cambios.accion` (varchar(30)).
 const LONGITUD_MAX_ACCION: usize = 30;
@@ -225,6 +232,9 @@ pub fn deshacer_lote_tx<C: GenericClient>(c: &mut C, lote_id: Uuid) -> Result<u6
     }
     let ids: Vec<Uuid> = fotos.iter().map(|(id, _)| *id).collect();
 
+    c.execute(SQL_REACTIVAR_OBRAS_DEL_LOTE, &[&lote_id])
+        .map_err(|e| format!("deshacer_lote (reactivar obra): {}", format_pg_error(&e)))?;
+
     let lote_nuevo = iniciar_edicion(c, ACCION_DESHACER, &ids)?;
 
     for (id_reporte, antes) in &fotos {
@@ -299,6 +309,7 @@ mod tests {
             ACCION_ASIGNAR_LOTE,
             ACCION_REVERTIR,
             ACCION_DESHACER,
+            ACCION_DESACTIVAR_OBRA,
         ] {
             assert!(validar_accion(accion).is_ok(), "acción fuera de límite: {}", accion);
         }
@@ -312,6 +323,12 @@ mod tests {
         assert!(SQL_RVOL_INSERT.contains("GROUP BY d.id_registro_obra, d.id_reporte_liquidacion"));
         assert!(SQL_RVOL_INSERT.contains("LEAST(SUM(COALESCE(d.dias_registro_obra, 0)), 31)"));
         assert!(SQL_RVOL_INSERT.contains("d.id_registro_obra IS NOT NULL"));
+    }
+
+    #[test]
+    fn deshacer_reactiva_obras_desactivadas_por_el_lote() {
+        assert!(SQL_REACTIVAR_OBRAS_DEL_LOTE.contains("activa = true"));
+        assert!(SQL_REACTIVAR_OBRAS_DEL_LOTE.contains("lote_id = $1"));
     }
 
     #[test]

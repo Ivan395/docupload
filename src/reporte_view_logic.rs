@@ -1406,10 +1406,11 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             valor_guarderias: k.valor_guarderias as f32,
             valor_guarderias_str: format_curr(k.valor_guarderias).into(),
             monto_obra: k.monto_obra as f32,
-            monto_obra_str: format_curr(k.monto_obra).into(),
+            monto_obra_str: if k.sin_monto { "Sin monto (N/D)".into() } else { format_curr(k.monto_obra).into() },
             limite_18_obra: k.limite_18_obra as f32,
-            limite_18_obra_str: format_curr(k.limite_18_obra).into(),
+            limite_18_obra_str: if k.sin_monto { "N/D".into() } else { format_curr(k.limite_18_obra).into() },
             supera_18: k.supera_18,
+            sin_monto: k.sin_monto,
             empleados_count: k.empleados_count as i32,
         }
     }).collect();
@@ -6868,14 +6869,16 @@ mod tests {
         let total_gps = 1_500.00;
         let valor_guarderias = total_gps / 0.01;
         assert_eq!(valor_guarderias, 150_000.00);
-        let supera_18 = (monto_obra > 0.0 && valor_guarderias > limite_18) || (monto_obra == 0.0 && valor_guarderias > 0.0);
+        // Sin monto (0.0) nunca supera el 18%: no hay base para el cálculo
+        let sin_monto = !(monto_obra > 0.0);
+        let supera_18 = !sin_monto && valor_guarderias > limite_18;
         assert!(!supera_18);
 
         // Total GPS de empleados = 2,000.00 -> 200,000.00 > 180,000.00
         let total_gps_alto = 2_000.00;
         let valor_guarderias_alto = total_gps_alto / 0.01;
         assert_eq!(valor_guarderias_alto, 200_000.00);
-        let supera_18_alto = (monto_obra > 0.0 && valor_guarderias_alto > limite_18) || (monto_obra == 0.0 && valor_guarderias_alto > 0.0);
+        let supera_18_alto = !sin_monto && valor_guarderias_alto > limite_18;
         assert!(supera_18_alto);
     }
 

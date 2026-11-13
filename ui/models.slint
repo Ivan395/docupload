@@ -205,6 +205,7 @@ export struct ReporteGuarderiaObraItem {
     limite_18_obra: float,
     limite_18_obra_str: string,
     supera_18: bool,
+    sin_monto: bool,
     empleados_count: int,
     registros_patronales_str: string,
 }
@@ -936,6 +937,7 @@ export global AppData {
     in-out property <bool> show_delete_obra_modal: false;
     in-out property <string> delete_obra_id: "";
     in-out property <string> delete_obra_numero: "";
+    in-out property <string> delete_obra_impacto: "";
 
     // Estado original de Carga de Nóminas y Cédulas
     in-out property <[FileItemData]> nominas_files: [];

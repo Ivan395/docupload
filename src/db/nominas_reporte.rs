@@ -246,7 +246,7 @@ pub fn fetch_nominas_reporte(
                  ON rv.id_reporte_liquidacion = rl.id
             LEFT JOIN public.registros_obras ro
                  ON ro.id = COALESCE(rdl.id_registro_obra, rv.id_registro_obra)
-            WHERE ro.id IS NOT NULL
+            WHERE ro.id IS NOT NULL AND ro.activa
               AND ($1::uuid IS NULL 
                    OR rl.id_revision = $1 
                    OR rl.id_registro_patronal = $1 
@@ -406,11 +406,13 @@ fn sql_nomina_en_alcance(a: &str) -> String {
                 SELECT 1 FROM public.registros_obras ro
                 WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
                   AND COALESCE(ro.creado_usuario, false) = true
+                  AND ro.activa
             )
             OR EXISTS (
                 SELECT 1 FROM public.registros_obras ro
                 WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
                   AND COALESCE(ro.creado_usuario, false) = true
+                  AND ro.activa
                   AND (
                       ({a}.fecha_final_pago IS NOT NULL AND {a}.fecha_inicial_pago IS NOT NULL AND {a}.fecha_final_pago >= ro.fecha_inicio AND {a}.fecha_inicial_pago <= ro.fecha_fin)
                       OR ({a}.fecha_pago IS NOT NULL AND {a}.fecha_pago BETWEEN ro.fecha_inicio AND ro.fecha_fin)
@@ -979,7 +981,8 @@ pub fn fetch_totales_dias_cedula_por_registro_patronal(
         JOIN public.registros_patronales rp ON rp.id = ro.id_registro_patronal
         LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rv ON rv.id_registro_obra = ro.id
         WHERE COALESCE(ro.creado_usuario, false) = true
-          AND ($1::uuid IS NULL 
+          AND ro.activa
+          AND ($1::uuid IS NULL
                OR ro.id_revision = $1 
                OR ro.id_registro_patronal = $1 
                OR rp.id_cliente = $1
@@ -1494,7 +1497,7 @@ pub fn check_registros_obras_exists(
     revision_id: Uuid,
 ) -> Result<bool, String> {
     let row = client.query_opt(
-        "SELECT 1 FROM public.registros_obras WHERE id_revision = $1 LIMIT 1",
+        "SELECT 1 FROM public.registros_obras WHERE id_revision = $1 AND activa LIMIT 1",
         &[&revision_id],
     ).map_err(|e| format!("Error verificando registros de obras: {}", e))?;
     Ok(row.is_some())

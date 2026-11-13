@@ -65,9 +65,9 @@ pub fn fetch_reporte_header_meta(
                 r.periodo_inicio,
                 r.periodo_fin,
                 (SELECT MIN(o.fecha_inicio) FROM public.registros_obras o
-                  WHERE o.id_revision = r.id AND o.creado_usuario) AS obras_inicio,
+                  WHERE o.id_revision = r.id AND o.creado_usuario AND o.activa) AS obras_inicio,
                 (SELECT MAX(o.fecha_fin) FROM public.registros_obras o
-                  WHERE o.id_revision = r.id AND o.creado_usuario) AS obras_fin
+                  WHERE o.id_revision = r.id AND o.creado_usuario AND o.activa) AS obras_fin
              FROM public.revisiones r
              LEFT JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal
              LEFT JOIN public.clientes c ON c.id = rp.id_cliente

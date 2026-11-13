@@ -11,6 +11,7 @@ pub mod diagnostico_integridad;
 pub mod ingesta;
 pub mod nominas;
 pub mod nominas_reporte;
+pub mod obras_ops;
 pub mod prorrateo;
 pub mod reporte_liquidaciones;
 pub mod revisiones;
@@ -45,6 +46,9 @@ mod pruebas_integracion_asignacion;
 mod pruebas_integracion_fase6;
 #[cfg(test)]
 mod pruebas_integracion_nominas;
+
+#[cfg(test)]
+mod pruebas_integracion_obras;
 
 #[cfg(test)]
 mod tests {

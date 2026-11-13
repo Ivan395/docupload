@@ -32,6 +32,7 @@ pub struct ReporteGuarderiaKpiDb {
     pub monto_obra: f64,
     pub limite_18_obra: f64,
     pub supera_18: bool,
+    pub sin_monto: bool,
     pub empleados_count: usize,
 }
 
@@ -76,7 +77,9 @@ pub fn compute_guarderias_kpis(
         let limite_18 = monto_obra * 0.18;
         // Para calcular el valor de las guarderías es el total de gps de todos los empleados vinculados al registro de obra dividido entre 1% (0.01):
         let valor_guarderias = total_gps_obra / 0.01;
-        let supera_18 = (monto_obra > 0.0 && valor_guarderias > limite_18) || (monto_obra == 0.0 && valor_guarderias > 0.0);
+        // Sin monto capturado (0.0 o ausente) no hay base para el 18%: no se marca alerta.
+        let sin_monto = !(monto_obra > 0.0);
+        let supera_18 = !sin_monto && valor_guarderias > limite_18;
 
         result.push(ReporteGuarderiaKpiDb {
             id_obra: o.id,
@@ -88,6 +91,7 @@ pub fn compute_guarderias_kpis(
             monto_obra,
             limite_18_obra: limite_18,
             supera_18,
+            sin_monto,
             empleados_count: emps_count,
         });
     }
@@ -330,7 +334,7 @@ pub fn fetch_obras_for_revision(client: &mut Client, id_revision: Uuid) -> Resul
                COALESCE(ro.creado_usuario, false) AS creado_usuario,
                COALESCE(ro.monto, 0.0) AS monto
         FROM public.registros_obras ro
-        WHERE (
+        WHERE ro.activa AND (
             ($1::uuid IS NOT NULL AND (
                 ro.id_revision = $1
                 OR ro.id IN (
@@ -409,7 +413,7 @@ pub fn fetch_all_obras_for_revision(client: &mut Client, id_revision: Uuid) -> R
                COALESCE(ro.creado_usuario, false) AS creado_usuario,
                COALESCE(ro.monto, 0.0) AS monto
         FROM public.registros_obras ro
-        WHERE (
+        WHERE ro.activa AND (
             ($1::uuid IS NOT NULL AND (
                 ro.id_revision = $1
                 OR ro.id IN (
@@ -550,6 +554,7 @@ pub fn check_missing_cedulas_for_revision(
             OR ($1::uuid IS NULL AND ro.id_registro_patronal = ANY($2))
         )
         AND COALESCE(ro.creado_usuario, false) = true
+        AND ro.activa
         ORDER BY ro.fecha_inicio ASC
         "#,
         &[&rev_uuid_opt, &all_rp_uuids],
@@ -702,10 +707,10 @@ fn sql_en_universo(anio: &str, mes: &str) -> String {
                     AND {fin_mes} >= (SELECT rv.periodo_inicio FROM public.revisiones rv WHERE rv.id = $3)
                 WHEN EXISTS (
                     SELECT 1 FROM public.registros_obras ro
-                    WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true
+                    WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true AND ro.activa
                 ) THEN EXISTS (
                     SELECT 1 FROM public.registros_obras ro
-                    WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true
+                    WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true AND ro.activa
                       AND (ro.fecha_inicio IS NULL OR {md} <= COALESCE(ro.fecha_fin, ro.fecha_inicio))
                       AND (ro.fecha_fin IS NULL OR {fin_mes} >= COALESCE(ro.fecha_inicio, ro.fecha_fin))
                 )
@@ -999,7 +1004,7 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         JOIN public.registros_obras ro_tgt ON (
             (rl.id_revision IS NOT NULL AND ro_tgt.id_revision = rl.id_revision AND TRIM(UPPER(ro_tgt.numero)) = TRIM(UPPER(ro_src.numero)))
             OR (rl.id_revision IS NULL AND ro_tgt.id = ro_src.id)
-        )
+        ) AND ro_tgt.activa
         WHERE rl.id_registro_patronal = ANY($2)
           AND ($1::uuid IS NULL OR rl.id_revision = $1)
           AND NOT EXISTS (
@@ -1330,7 +1335,7 @@ pub fn revertir_reporte_liquidaciones_a_originales(
 
     // Mapa de obras válidas con sus rangos de fechas
     let valid_obras_rows = tx.query(
-        "SELECT id, numero, fecha_inicio, fecha_fin FROM public.registros_obras WHERE (($1::uuid IS NOT NULL AND id_revision = $1) OR ($1::uuid IS NULL AND id_registro_patronal = ANY($2)))",
+        "SELECT id, numero, fecha_inicio, fecha_fin FROM public.registros_obras WHERE activa AND (($1::uuid IS NOT NULL AND id_revision = $1) OR ($1::uuid IS NULL AND id_registro_patronal = ANY($2)))",
         &[&rev_uuid_opt, &all_rp_uuids],
     ).map_err(|e| format!("Error consultando registros de obras: {}", e))?;
 
@@ -5055,16 +5060,26 @@ pub fn export_reporte_liquidaciones_to_excel(
                     .map_err(|e| e.to_string())?;
             }
 
-            worksheet.write_number_with_format(kpi_r, 3, kpi.monto_obra, &kpi_curr_format)
-                .map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(kpi_r, 4, kpi.limite_18_obra, &kpi_green_curr_format)
-                .map_err(|e| e.to_string())?;
+            if kpi.sin_monto {
+                worksheet.write_string_with_format(kpi_r, 3, "N/D", &kpi_text_format)
+                    .map_err(|e| e.to_string())?;
+                worksheet.write_string_with_format(kpi_r, 4, "N/D", &kpi_text_format)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                worksheet.write_number_with_format(kpi_r, 3, kpi.monto_obra, &kpi_curr_format)
+                    .map_err(|e| e.to_string())?;
+                worksheet.write_number_with_format(kpi_r, 4, kpi.limite_18_obra, &kpi_green_curr_format)
+                    .map_err(|e| e.to_string())?;
+            }
             worksheet.write_number_with_format(kpi_r, 5, kpi.total_gps, &kpi_blue_curr_format)
                 .map_err(|e| e.to_string())?;
             worksheet.write_number_with_format(kpi_r, 6, kpi.empleados_count as f64, &kpi_num_format)
                 .map_err(|e| e.to_string())?;
 
-            if kpi.supera_18 {
+            if kpi.sin_monto {
+                worksheet.write_string_with_format(kpi_r, 7, "⚪ SIN MONTO (N/D)", &kpi_text_format)
+                    .map_err(|e| e.to_string())?;
+            } else if kpi.supera_18 {
                 worksheet.write_string_with_format(kpi_r, 7, "⚠️ SUPERA EL 18%", &kpi_status_warn_format)
                     .map_err(|e| e.to_string())?;
             } else {
@@ -5107,6 +5122,16 @@ pub fn export_reporte_liquidaciones_to_excel(
             worksheet.write_string_with_format(kpi_r, 0, &card_header_text, &kpi_sec_title_format)
                 .map_err(|e| e.to_string())?;
 
+            if kpi.sin_monto {
+                kpi_r += 1;
+                worksheet.write_string_with_format(
+                    kpi_r,
+                    0,
+                    "Sin monto capturado: no se calcula el límite del 18%",
+                    &kpi_sec_sub_format,
+                ).map_err(|e| e.to_string())?;
+            }
+
             if kpi.supera_18 {
                 kpi_r += 1;
                 worksheet.write_string_with_format(
@@ -5129,8 +5154,13 @@ pub fn export_reporte_liquidaciones_to_excel(
             } else {
                 worksheet.write_number_with_format(kpi_r, 0, kpi.valor_guarderias, &kpi_curr_format).map_err(|e| e.to_string())?;
             }
-            worksheet.write_number_with_format(kpi_r, 1, kpi.monto_obra, &kpi_curr_format).map_err(|e| e.to_string())?;
-            worksheet.write_number_with_format(kpi_r, 2, kpi.limite_18_obra, &kpi_green_curr_format).map_err(|e| e.to_string())?;
+            if kpi.sin_monto {
+                worksheet.write_string_with_format(kpi_r, 1, "N/D", &kpi_text_format).map_err(|e| e.to_string())?;
+                worksheet.write_string_with_format(kpi_r, 2, "N/D", &kpi_text_format).map_err(|e| e.to_string())?;
+            } else {
+                worksheet.write_number_with_format(kpi_r, 1, kpi.monto_obra, &kpi_curr_format).map_err(|e| e.to_string())?;
+                worksheet.write_number_with_format(kpi_r, 2, kpi.limite_18_obra, &kpi_green_curr_format).map_err(|e| e.to_string())?;
+            }
             worksheet.write_number_with_format(kpi_r, 3, kpi.total_gps, &kpi_blue_curr_format).map_err(|e| e.to_string())?;
 
             kpi_r += 2;
@@ -5832,16 +5862,26 @@ pub fn export_reporte_liquidaciones_to_excel(
                     .map_err(|e| e.to_string())?;
             }
 
-            ws_guard.write_number_with_format(curr_r_s4, 3, kpi.monto_obra, &currency_format)
-                .map_err(|e| e.to_string())?;
-            ws_guard.write_number_with_format(curr_r_s4, 4, kpi.limite_18_obra, &kpi_green_curr_format)
-                .map_err(|e| e.to_string())?;
+            if kpi.sin_monto {
+                ws_guard.write_string_with_format(curr_r_s4, 3, "N/D", &text_format)
+                    .map_err(|e| e.to_string())?;
+                ws_guard.write_string_with_format(curr_r_s4, 4, "N/D", &text_format)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                ws_guard.write_number_with_format(curr_r_s4, 3, kpi.monto_obra, &currency_format)
+                    .map_err(|e| e.to_string())?;
+                ws_guard.write_number_with_format(curr_r_s4, 4, kpi.limite_18_obra, &kpi_green_curr_format)
+                    .map_err(|e| e.to_string())?;
+            }
             ws_guard.write_number_with_format(curr_r_s4, 5, kpi.total_gps, &kpi_blue_curr_format)
                 .map_err(|e| e.to_string())?;
             ws_guard.write_number_with_format(curr_r_s4, 6, kpi.empleados_count as f64, &integer_format)
                 .map_err(|e| e.to_string())?;
 
-            if kpi.supera_18 {
+            if kpi.sin_monto {
+                ws_guard.write_string_with_format(curr_r_s4, 7, "⚪ SIN MONTO (N/D)", &text_format)
+                    .map_err(|e| e.to_string())?;
+            } else if kpi.supera_18 {
                 ws_guard.write_string_with_format(curr_r_s4, 7, "⚠️ SUPERA EL 18%", &kpi_status_warn_format)
                     .map_err(|e| e.to_string())?;
             } else {
@@ -5884,6 +5924,16 @@ pub fn export_reporte_liquidaciones_to_excel(
             ws_guard.write_string_with_format(curr_r_s4, 0, &card_header_text, &title_format)
                 .map_err(|e| e.to_string())?;
 
+            if kpi.sin_monto {
+                curr_r_s4 += 1;
+                ws_guard.write_string_with_format(
+                    curr_r_s4,
+                    0,
+                    "Sin monto capturado: no se calcula el límite del 18%",
+                    &text_format,
+                ).map_err(|e| e.to_string())?;
+            }
+
             if kpi.supera_18 {
                 curr_r_s4 += 1;
                 ws_guard.write_string_with_format(
@@ -5906,8 +5956,13 @@ pub fn export_reporte_liquidaciones_to_excel(
             } else {
                 ws_guard.write_number_with_format(curr_r_s4, 0, kpi.valor_guarderias, &currency_format).map_err(|e| e.to_string())?;
             }
-            ws_guard.write_number_with_format(curr_r_s4, 1, kpi.monto_obra, &currency_format).map_err(|e| e.to_string())?;
-            ws_guard.write_number_with_format(curr_r_s4, 2, kpi.limite_18_obra, &kpi_green_curr_format).map_err(|e| e.to_string())?;
+            if kpi.sin_monto {
+                ws_guard.write_string_with_format(curr_r_s4, 1, "N/D", &text_format).map_err(|e| e.to_string())?;
+                ws_guard.write_string_with_format(curr_r_s4, 2, "N/D", &text_format).map_err(|e| e.to_string())?;
+            } else {
+                ws_guard.write_number_with_format(curr_r_s4, 1, kpi.monto_obra, &currency_format).map_err(|e| e.to_string())?;
+                ws_guard.write_number_with_format(curr_r_s4, 2, kpi.limite_18_obra, &kpi_green_curr_format).map_err(|e| e.to_string())?;
+            }
             ws_guard.write_number_with_format(curr_r_s4, 3, kpi.total_gps, &kpi_blue_curr_format).map_err(|e| e.to_string())?;
 
             curr_r_s4 += 2;
@@ -7350,6 +7405,51 @@ mod tests {
         for br in &bermudez_rows {
             assert!(!br.tiene_inconsistencia, "Bermúdez fila {} no debe tener inconsistencia: {}", br.periodo_str, br.observacion_validacion);
         }
+    }
+
+    #[test]
+    fn guarderias_kpi_sin_monto_no_alerta_18() {
+        let oid_sin_monto = Uuid::now_v7();
+        let oid_con_monto = Uuid::now_v7();
+        // sub = 100 -> gps = 5.0 -> valor guarderías = 500.0
+        let rows = vec![
+            create_mock_row(Uuid::now_v7(), "EMP SIN MONTO", Some(oid_sin_monto), "OBRA-SM", true, "ENERO", 2025, 30, 100.0),
+            create_mock_row(Uuid::now_v7(), "EMP CON MONTO", Some(oid_con_monto), "OBRA-CM", true, "ENERO", 2025, 30, 100.0),
+        ];
+        let obras = vec![
+            ObraOptionDb {
+                id: oid_sin_monto,
+                numero: "OBRA-SM".to_string(),
+                tipo_obra: "EDIFICACION".to_string(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "OBRA-SM".to_string(),
+                creado_usuario: true,
+                monto: 0.0,
+            },
+            ObraOptionDb {
+                id: oid_con_monto,
+                numero: "OBRA-CM".to_string(),
+                tipo_obra: "EDIFICACION".to_string(),
+                fecha_inicio: None,
+                fecha_fin: None,
+                label: "OBRA-CM".to_string(),
+                creado_usuario: true,
+                monto: 1000.0,
+            },
+        ];
+
+        let kpis = compute_guarderias_kpis(&rows, &obras, None);
+        assert_eq!(kpis.len(), 2);
+
+        // Sin monto: no hay alerta falsa del 18%
+        assert!(kpis[0].sin_monto);
+        assert!(!kpis[0].supera_18);
+        assert_eq!(kpis[0].monto_obra, 0.0);
+
+        // Con monto 1000: límite 180 < valor 500 -> supera
+        assert!(!kpis[1].sin_monto);
+        assert!(kpis[1].supera_18);
     }
 }
 
