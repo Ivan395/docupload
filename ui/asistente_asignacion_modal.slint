@@ -245,7 +245,9 @@ export component AsistenteAsignacionModal inherits Rectangle {
                     }
 
                     Rectangle {
-                        height: 110px;
+                        min-height: Math.min(110px, Math.min(lista_obras_asist.preferred-height, 200px));
+                        preferred-height: Math.min(lista_obras_asist.preferred-height, 200px);
+                        vertical-stretch: 1;
                         border-radius: 6px;
                         border-width: 1px;
                         border-color: #cbd5e1;
@@ -256,7 +258,7 @@ export component AsistenteAsignacionModal inherits Rectangle {
                             height: parent.height;
                             content-width: self.width;
 
-                            VerticalLayout {
+                            lista_obras_asist := VerticalLayout {
                                 padding: 4px;
                                 spacing: 2px;
 
@@ -396,7 +398,7 @@ export component AsistenteAsignacionModal inherits Rectangle {
                     }
 
                     AstBoton {
-                        texto: "Vista previa →";
+                        texto: "Vista previa ›";
                         variante: 1;
                         clicked => { AppLogic.asig_asistente_vista_previa(); }
                     }
@@ -551,7 +553,7 @@ export component AsistenteAsignacionModal inherits Rectangle {
                     alignment: end;
 
                     AstBoton {
-                        texto: "← Atrás";
+                        texto: "‹ Atrás";
                         clicked => { AppLogic.asig_asistente_atras(); }
                     }
 

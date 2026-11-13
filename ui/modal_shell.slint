@@ -1,0 +1,43 @@
+// Capa de modal reutilizable: fondo que bloquea los clics y tarjeta centrada cuyo alto es el de su
+// contenido (alto-contenido) con tope en el área disponible menos un margen; nunca se sale de la pantalla
+// ni deja huecos en blanco. El contenido (via @children) debe ser un único layout con secciones elásticas.
+export component ModalOverlay inherits Rectangle {
+    // Ancho máximo de la tarjeta (se reduce si el área es más angosta)
+    in property <length> ancho-max: 720px;
+    // Alto que necesita el contenido; normalmente `<id del layout>.preferred-height`
+    in property <length> alto-contenido: 400px;
+    // Si es true, un clic en el fondo invoca `fondo-clic()`
+    in property <bool> cerrar-con-fondo: false;
+    callback fondo-clic();
+
+    property <length> margen: root.width < 900px ? 12px : 24px;
+    out property <length> ancho-tarjeta: tarjeta.width;
+    out property <length> alto-tarjeta: tarjeta.height;
+
+    background: #0f172a88;
+
+    TouchArea {
+        clicked => {
+            if (root.cerrar-con-fondo) {
+                root.fondo-clic();
+            }
+        }
+    }
+
+    tarjeta := Rectangle {
+        width: Math.min(root.width - 2 * root.margen, root.ancho-max);
+        height: Math.min(root.height - 2 * root.margen, root.alto-contenido);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: #ffffff;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: #e2e8f0;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000040;
+        drop-shadow-offset-y: 6px;
+        clip: true;
+
+        @children
+    }
+}
