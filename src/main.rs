@@ -4612,8 +4612,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
 
                 if view_idx == 7 {
-                    let target_id = if !rev_id.is_empty() { rev_id.clone() } else { rp_id.clone() };
-                    sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &target_id, false);
+                    // El reporte requiere una revisión seleccionada (nunca trabaja sobre el registro patronal)
+                    if !rev_id.is_empty() {
+                        sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &rev_id, false);
+                    } else {
+                        crate::show_toast_message(&ui, "Selecciona primero una revisión para ver el Reporte de Liquidaciones.");
+                    }
                 }
 
 

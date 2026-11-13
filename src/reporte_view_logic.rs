@@ -46,9 +46,8 @@ pub struct ReporteSessionState {
     pub rp_registro: String,
     pub revision_nombre: String,
     pub revision_folio: String,
+    /// Filas ACTIVO dentro del universo de la revisión (meses cubiertos por los Registros de Obra del usuario).
     pub all_rows: Vec<ReporteLiquidacionRowDb>,
-    /// Filas FUERA_PERIODO/EXCLUIDO: fuera de KPIs, totales y Excel; solo visibles con el filtro "Fuera de periodo".
-    pub rows_fuera_periodo: Vec<ReporteLiquidacionRowDb>,
     pub filtered_rows: Vec<ReporteLiquidacionRowDb>,
     pub selected_ids: HashSet<Uuid>,
     pub obras_options: Vec<ObraOptionDb>,
@@ -115,7 +114,6 @@ impl Default for ReporteSessionState {
             revision_nombre: String::new(),
             revision_folio: String::new(),
             all_rows: Vec::new(),
-            rows_fuera_periodo: Vec::new(),
             filtered_rows: Vec::new(),
             selected_ids: HashSet::new(),
             obras_options: Vec::new(),
@@ -657,13 +655,8 @@ pub fn apply_reporte_filtering(state: &mut ReporteSessionState) {
         None
     };
 
-    // Índice 3 = "Fuera de periodo": la fuente son las filas no ACTIVAS; el resto usa all_rows
-    let source_rows: &Vec<ReporteLiquidacionRowDb> = if state.filter_estado_idx == 3 {
-        &state.rows_fuera_periodo
-    } else {
-        &state.all_rows
-    };
-    state.filtered_rows = source_rows
+    state.filtered_rows = state
+        .all_rows
         .iter()
         .filter(|r| {
             // Filtro de búsqueda textual
@@ -1473,6 +1466,22 @@ pub fn sync_and_load_reporte_data(
             }
         }
     } else {
+        // Sin sincronización completa: reevaluar ACTIVO/FUERA_PERIODO según los Registros de Obra actuales.
+        // Un fallo no aborta la carga de la vista.
+        match crate::db::reporte_liquidaciones::reevaluar_universo_revision(&mut client, rev_uuid) {
+            Ok((fuera, activos)) => {
+                if fuera > 0 || activos > 0 {
+                    log::info!(
+                        "Universo reevaluado: {} pasaron a fuera de periodo, {} regresaron",
+                        fuera,
+                        activos
+                    );
+                }
+            }
+            Err(e) => {
+                log::error!("Error reevaluando universo de la revisión: {}", e);
+            }
+        }
         Some(0)
     };
 
@@ -1506,9 +1515,9 @@ pub fn sync_and_load_reporte_data(
         }
     };
 
-    // Solo las filas ACTIVAS alimentan KPIs, periodos, obras y Excel; el resto va al filtro "Fuera de periodo"
-    let (rows, rows_fuera_periodo) = separar_filas_por_estado(rows);
-    let n_fuera = rows_fuera_periodo.len();
+    // fetch_reporte_liquidaciones ya devuelve solo filas ACTIVO dentro del universo de la revisión;
+    // este filtro es únicamente una salvaguarda.
+    let rows: Vec<_> = rows.into_iter().filter(|r| r.estado == "ACTIVO").collect();
 
     let obras = match obras_res {
         Ok(o) => o,
@@ -1612,8 +1621,17 @@ pub fn sync_and_load_reporte_data(
         SharedString::from("Todos"),
         SharedString::from("Asignados"),
         SharedString::from("Sin Asignar (Pendiente)"),
-        SharedString::from(format!("Fuera de periodo ({})", n_fuera)),
     ])));
+
+    // Estado vacío: sin Registros de Obra del usuario con fechas no hay meses en el universo del reporte
+    let sin_ro = match crate::db::reporte_liquidaciones::revision_tiene_ro_usuario(&mut client, rev_uuid) {
+        Ok(tiene) => !tiene,
+        Err(e) => {
+            log::error!("Error verificando Registros de Obra de la revisión: {}", e);
+            false
+        }
+    };
+    app_data.set_reporte_sin_ro(sin_ro);
 
     // 4. Actualizar estado de sesión
     {
@@ -1624,7 +1642,6 @@ pub fn sync_and_load_reporte_data(
         state.revision_nombre = rev_name;
         state.revision_folio = rev_folio;
         state.all_rows = rows;
-        state.rows_fuera_periodo = rows_fuera_periodo;
         state.obras_options = obras;
         state.all_obras_options = all_obras;
         state.periodo_options = periodo_options;
@@ -2071,8 +2088,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 let rev_id = app_data.get_selected_revision_id().to_string();
-                let rp_id = app_data.get_selected_rp_id().to_string();
-                let target_id = if !rev_id.trim().is_empty() { rev_id } else { rp_id };
+                // El reporte siempre trabaja sobre una revisión seleccionada (nunca sobre el registro patronal)
+                let target_id = rev_id.trim().to_string();
                 crate::app_logger::log_ui_action(
                     "Reporte Liquidaciones",
                     "Navegación",
@@ -2085,9 +2102,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         "Reporte Liquidaciones",
                         "Navegación",
                         "Validación",
-                        "No hay registro patronal seleccionado",
+                        "No hay revisión seleccionada",
                     );
-                    crate::show_toast_message(&ui, "Seleccione primero un Registro Patronal.");
+                    crate::show_toast_message(&ui, "Selecciona primero una revisión para ver el Reporte de Liquidaciones.");
                     return;
                 }
                 app_data.set_reporte_liquidaciones_access_allowed(true);
@@ -2106,8 +2123,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 let rev_id = app_data.get_selected_revision_id().to_string();
-                let rp_id = app_data.get_selected_rp_id().to_string();
-                let target_id = if !rev_id.trim().is_empty() { rev_id } else { rp_id };
+                // El reporte siempre trabaja sobre una revisión seleccionada (nunca sobre el registro patronal)
+                let target_id = rev_id.trim().to_string();
                 crate::app_logger::log_ui_action(
                     "Reporte Liquidaciones",
                     "Barra Superior",

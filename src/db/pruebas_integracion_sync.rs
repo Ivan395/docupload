@@ -8,6 +8,9 @@
 //! Ejecutar: `cargo test sync_incremental_no_destructiva_bd -- --ignored --nocapture`
 
 use crate::db::prorrateo::{factor_prorrateo, prorratear, ImportesTramo};
+use crate::db::revisiones::{create_obra_tx, RegistroObraItem};
+use chrono::NaiveDate;
+use postgres::{Client, Transaction};
 use uuid::Uuid;
 
 /// Columnas monetarias comparadas (nombre, índice en la consulta de originales/guardados).
@@ -234,4 +237,152 @@ fn diagnostico_tramos_obra_perdidos_bd() {
     for (m, n) in por_motivo {
         println!("DIAG {n} × {m}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Universo del Reporte de Liquidaciones (solo meses de los Registros de Obra del usuario).
+// Patrón de fixture copiado de `pruebas_integracion_topes.rs` (sus helpers son privados). Todo
+// ocurre en una transacción que termina en ROLLBACK; nunca hay COMMIT.
+// ---------------------------------------------------------------------------------------------
+
+const MESES_NOMBRE: [&str; 12] = [
+    "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+    "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+];
+
+fn fecha_prueba(anio: i32, mes: u32, dia: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(anio, mes, dia).expect("fecha de prueba inválida")
+}
+
+/// Cliente, registro patronal, revisión (sin periodo_inicio/fin) y empleado temporales.
+fn crear_contexto_universo(tx: &mut Transaction<'_>) -> (Uuid, Uuid, Uuid) {
+    let uuid = Uuid::now_v7();
+    let nombre_cliente = format!("ZZ PRUEBA UNIVERSO {}", uuid.simple());
+    let registro = format!("U{:010}", uuid.as_u128() % 10_000_000_000);
+
+    let id_cliente: Uuid = tx
+        .query_one("INSERT INTO public.clientes (nombre) VALUES ($1) RETURNING id", &[&nombre_cliente])
+        .expect("crear cliente de prueba")
+        .get(0);
+    let id_rp: Uuid = tx
+        .query_one(
+            "INSERT INTO public.registros_patronales (id_cliente, registro) VALUES ($1, $2) RETURNING id",
+            &[&id_cliente, &registro],
+        )
+        .expect("crear registro patronal de prueba")
+        .get(0);
+    let id_revision: Uuid = tx
+        .query_one(
+            "INSERT INTO public.revisiones (id_registro_patronal, nombre) VALUES ($1, $2) RETURNING id",
+            &[&id_rp, &format!("ZZ REVISION UNIVERSO {}", uuid.simple())],
+        )
+        .expect("crear revisión de prueba")
+        .get(0);
+    let id_empleado: Uuid = tx
+        .query_one(
+            "INSERT INTO public.empleados (id_cliente, nombre, nss) VALUES ($1, $2, $3) RETURNING id",
+            &[&id_cliente, &"PRUEBA UNIVERSO 1", &"12345678903"],
+        )
+        .expect("crear empleado de prueba")
+        .get(0);
+    (id_rp, id_revision, id_empleado)
+}
+
+/// Liquidación del mes/año indicados con un detalle de 10 días.
+fn crear_liquidacion_mes(tx: &mut Transaction<'_>, id_rp: Uuid, id_empleado: Uuid, anio: i32, mes: u32) -> Uuid {
+    let id_liquidacion: Uuid = tx
+        .query_one(
+            "INSERT INTO public.liquidaciones
+                (id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo)
+             VALUES ($1, $2, $3, $4, $5, 'PRUEBA_UNIVERSO.xlsx')
+             RETURNING id",
+            &[&id_rp, &id_empleado, &MESES_NOMBRE[(mes - 1) as usize], &(mes as i16), &(anio as i16)],
+        )
+        .expect("crear liquidación de prueba")
+        .get(0);
+    tx.execute(
+        "INSERT INTO public.detalles_liquidaciones (id_liquidacion, clave, fecha, dias, sdi, cf, patronal, obrera, subtotal)
+         VALUES ($1, 'PRUEBA', $2, 10, 300.0, 10.0, 5.0, 5.0, 10.0)",
+        &[&id_liquidacion, &fecha_prueba(anio, mes, 15)],
+    )
+    .expect("crear detalle de liquidación de prueba");
+    id_liquidacion
+}
+
+fn item_ro_usuario(id_revision: Uuid, id_rp: Uuid, numero: &str, inicio: NaiveDate, fin: NaiveDate) -> RegistroObraItem {
+    RegistroObraItem {
+        id: String::new(),
+        id_revision: id_revision.to_string(),
+        id_registro_patronal: id_rp.to_string(),
+        numero: numero.to_string(),
+        clase: "A".to_string(),
+        tipo_obra: "OBRA DE PRUEBA".to_string(),
+        fecha_inicio: Some(inicio),
+        fecha_fin: Some(fin),
+        ubicacion: "PRUEBA".to_string(),
+        superficie_construido: 0.0,
+        monto: None,
+        delegacion: "PRUEBA".to_string(),
+        subdelegacion: "PRUEBA".to_string(),
+        created_at: String::new(),
+        creado_usuario: true,
+    }
+}
+
+/// Meses (anio, mes) ACTIVO de una revisión tras sincronizar, con la misma condición de estado que `fetch`.
+fn meses_activos(tx: &mut Transaction<'_>, id_revision: Uuid) -> Vec<(i32, i32)> {
+    tx.query(
+        "SELECT rl.anio_periodo::int, rl.mes_periodo_int::int FROM public.reportes_liquidaciones rl
+         WHERE rl.id_revision = $1 AND rl.estado::text = 'ACTIVO'
+         ORDER BY 1, 2",
+        &[&id_revision],
+    )
+    .expect("consultar meses activos")
+    .iter()
+    .map(|r| (r.get::<_, i32>(0), r.get::<_, i32>(1)))
+    .collect()
+}
+
+#[test]
+#[ignore]
+fn universo_solo_meses_de_ro() {
+    let mut client: Client = match crate::db::client::create_client() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("PostgreSQL no disponible (prueba omitida): {e}");
+            return;
+        }
+    };
+    crate::db::schema::ensure_schema(&mut client).expect("ensure_schema");
+    let mut tx = client.transaction().expect("transacción");
+
+    // Caso dorado: dos RO del usuario, sin periodo de revisión. Liquidaciones de 2014-01 a 2015-12.
+    let (rp, rev, emp) = crear_contexto_universo(&mut tx);
+    for anio in [2014, 2015] {
+        for mes in 1..=12u32 {
+            crear_liquidacion_mes(&mut tx, rp, emp, anio, mes);
+        }
+    }
+    create_obra_tx(&mut tx, &item_ro_usuario(rev, rp, "U0000001", fecha_prueba(2014, 1, 1), fecha_prueba(2014, 5, 30)))
+        .expect("crear RO 1 de prueba");
+    create_obra_tx(&mut tx, &item_ro_usuario(rev, rp, "U0000002", fecha_prueba(2015, 7, 15), fecha_prueba(2015, 8, 30)))
+        .expect("crear RO 2 de prueba");
+
+    crate::db::reporte_liquidaciones::sync_reportes_liquidaciones_for_revision_tx(&mut tx, rev)
+        .expect("sync del universo con dos RO");
+    let esperado: Vec<(i32, i32)> = vec![
+        (2014, 1), (2014, 2), (2014, 3), (2014, 4), (2014, 5), (2015, 7), (2015, 8),
+    ];
+    assert_eq!(meses_activos(&mut tx, rev), esperado, "el universo debe ser solo los meses de las RO");
+
+    // Caso sin RO del usuario: el universo debe quedar vacío (decisión D1).
+    let (rp2, rev2, emp2) = crear_contexto_universo(&mut tx);
+    for mes in 1..=12u32 {
+        crear_liquidacion_mes(&mut tx, rp2, emp2, 2014, mes);
+    }
+    crate::db::reporte_liquidaciones::sync_reportes_liquidaciones_for_revision_tx(&mut tx, rev2)
+        .expect("sync sin RO");
+    assert!(meses_activos(&mut tx, rev2).is_empty(), "sin RO del usuario no debe haber meses en el universo");
+
+    tx.rollback().expect("rollback");
 }

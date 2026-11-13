@@ -692,43 +692,135 @@ pub fn check_missing_cedulas_for_revision(
 const SQL_MES_RL: &str = "LEAST(GREATEST(COALESCE(NULLIF(rl.mes_periodo_int, 0), CASE UPPER(TRIM(rl.mes_periodo)) WHEN 'ENERO' THEN 1 WHEN 'FEBRERO' THEN 2 WHEN 'MARZO' THEN 3 WHEN 'ABRIL' THEN 4 WHEN 'MAYO' THEN 5 WHEN 'JUNIO' THEN 6 WHEN 'JULIO' THEN 7 WHEN 'AGOSTO' THEN 8 WHEN 'SEPTIEMBRE' THEN 9 WHEN 'OCTUBRE' THEN 10 WHEN 'NOVIEMBRE' THEN 11 WHEN 'DICIEMBRE' THEN 12 ELSE 1 END)::int, 1), 12)";
 
 /// Condición SQL booleana: el mes (`anio`, `mes`, expresiones enteras) pertenece al universo de la
-/// revisión identificada por el parámetro `$3`. Granularidad mensual (mes completo), INTERSECCIÓN de:
+/// revisión indicada por `rev`, que es una expresión SQL del id de revisión (p. ej. `"$3"` o
+/// `"rl.id_revision"`). Granularidad mensual (mes completo), INTERSECCIÓN de:
 /// - `en_periodo`: si la revisión tiene `periodo_inicio` y `periodo_fin`, el mes debe traslapar ese
 ///   rango; si no, true.
-/// - `en_obras`: si existen obras `creado_usuario` y `activa` en la revisión, el mes debe traslapar la
-///   vigencia de alguna; si no, true.
+/// - `en_obras` (decisión D1): el mes debe traslapar la vigencia de ALGÚN Registro de Obra del usuario
+///   (`creado_usuario = true` y `activa`) de la revisión. Reglas por RO:
+///   - Sin RO del usuario en la revisión ⇒ universo vacío (false).
+///   - `fecha_inicio` NULL ⇒ la RO no aporta meses.
+///   - `fecha_fin` NULL ⇒ la RO cubre solo el mes de `fecha_inicio`.
+///   - `fecha_fin < fecha_inicio` ⇒ se usa `fecha_inicio` como fin (GREATEST).
+///   Los traslapes entre RO se unen naturalmente por el EXISTS.
 /// Resultado: `en_periodo AND en_obras`.
 ///
 /// Los marcadores son comentarios de bloque (`/* ... */`) y no de línea, para no depender de los saltos
 /// de línea del SQL que se envía.
-fn sql_en_universo(anio: &str, mes: &str) -> String {
+fn sql_en_universo(rev: &str, anio: &str, mes: &str) -> String {
     let md = format!("MAKE_DATE(({anio})::int, ({mes})::int, 1)");
     let fin_mes = format!("({md} + INTERVAL '1 month' - INTERVAL '1 day')::date");
     format!(
         r#"(
             /* en_periodo */
             CASE
-                WHEN (SELECT rv.periodo_inicio IS NOT NULL AND rv.periodo_fin IS NOT NULL FROM public.revisiones rv WHERE rv.id = $3) THEN
-                    {md} <= (SELECT rv.periodo_fin FROM public.revisiones rv WHERE rv.id = $3)
-                    AND {fin_mes} >= (SELECT rv.periodo_inicio FROM public.revisiones rv WHERE rv.id = $3)
+                WHEN (SELECT rv.periodo_inicio IS NOT NULL AND rv.periodo_fin IS NOT NULL FROM public.revisiones rv WHERE rv.id = {rev}) THEN
+                    {md} <= (SELECT rv.periodo_fin FROM public.revisiones rv WHERE rv.id = {rev})
+                    AND {fin_mes} >= (SELECT rv.periodo_inicio FROM public.revisiones rv WHERE rv.id = {rev})
                 ELSE true
             END
             AND
             /* en_obras */
-            CASE
-                WHEN EXISTS (
-                    SELECT 1 FROM public.registros_obras ro
-                    WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true AND ro.activa
-                ) THEN EXISTS (
-                    SELECT 1 FROM public.registros_obras ro
-                    WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true AND ro.activa
-                      AND (ro.fecha_inicio IS NULL OR {md} <= COALESCE(ro.fecha_fin, ro.fecha_inicio))
-                      AND (ro.fecha_fin IS NULL OR {fin_mes} >= COALESCE(ro.fecha_inicio, ro.fecha_fin))
-                )
-                ELSE true
-            END
+            EXISTS (
+                SELECT 1 FROM public.registros_obras ro
+                WHERE ro.id_revision = {rev}
+                  AND COALESCE(ro.creado_usuario, false) = true
+                  AND ro.activa
+                  AND ro.fecha_inicio IS NOT NULL
+                  AND {md} <= GREATEST(COALESCE(ro.fecha_fin, ro.fecha_inicio), ro.fecha_inicio)
+                  AND {fin_mes} >= ro.fecha_inicio
+            )
         )"#
     )
+}
+
+/// Reevalúa ACTIVO / FUERA_PERIODO de los reportes según el universo de SU PROPIA revisión (rl.id_revision).
+/// No inserta ni borra. Devuelve (pasaron_a_fuera, regresaron_a_activo).
+pub fn reevaluar_universo_tx(
+    tx: &mut Transaction,
+    rev_uuid_opt: Option<Uuid>,
+    all_rp_uuids: &[Uuid],
+) -> Result<(u64, u64), String> {
+    let en_universo_rl = sql_en_universo("rl.id_revision", "rl.anio_periodo", SQL_MES_RL);
+
+    let sql_marcar_fuera = format!(
+        r#"
+        UPDATE public.reportes_liquidaciones rl
+        SET estado = 'FUERA_PERIODO'
+        WHERE rl.id_registro_patronal = ANY($2)
+          AND ($1::uuid IS NULL OR rl.id_revision = $1)
+          AND rl.estado = 'ACTIVO'
+          AND NOT {en_universo_rl}
+        "#
+    );
+    let pasaron_a_fuera = tx.execute(
+        sql_marcar_fuera.as_str(),
+        &[&rev_uuid_opt, &all_rp_uuids],
+    ).map_err(|e| {
+        let err_str = crate::db::schema::format_pg_error(&e);
+        crate::app_logger::log_db_error(
+            "UPDATE reportes_liquidaciones estado FUERA_PERIODO",
+            &["public.reportes_liquidaciones"],
+            "UPDATE public.reportes_liquidaciones SET estado = 'FUERA_PERIODO' WHERE ...",
+            &err_str,
+        );
+        format!(
+            "Error marcando reportes fuera de periodo: {}",
+            err_str
+        )
+    })?;
+
+    let sql_reactivar = format!(
+        r#"
+        UPDATE public.reportes_liquidaciones rl
+        SET estado = 'ACTIVO'
+        WHERE rl.id_registro_patronal = ANY($2)
+          AND ($1::uuid IS NULL OR rl.id_revision = $1)
+          AND rl.estado = 'FUERA_PERIODO'
+          AND {en_universo_rl}
+        "#
+    );
+    let regresaron_a_activo = tx.execute(
+        sql_reactivar.as_str(),
+        &[&rev_uuid_opt, &all_rp_uuids],
+    ).map_err(|e| {
+        let err_str = crate::db::schema::format_pg_error(&e);
+        crate::app_logger::log_db_error(
+            "UPDATE reportes_liquidaciones estado ACTIVO",
+            &["public.reportes_liquidaciones"],
+            "UPDATE public.reportes_liquidaciones SET estado = 'ACTIVO' WHERE ...",
+            &err_str,
+        );
+        format!(
+            "Error reactivando reportes dentro de periodo: {}",
+            err_str
+        )
+    })?;
+
+    Ok((pasaron_a_fuera, regresaron_a_activo))
+}
+
+/// Reevalúa el universo de una revisión en su propia transacción (se usa al abrir la vista).
+pub fn reevaluar_universo_revision(client: &mut Client, id_revision: Uuid) -> Result<(u64, u64), String> {
+    let (rev_uuid_opt, _id_rp, _clean_reg, all_rp_uuids) = resolve_rp_context(client, id_revision)?;
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("Error iniciando transacción: {}", crate::db::schema::format_pg_error(&e)))?;
+    let conteos = reevaluar_universo_tx(&mut tx, rev_uuid_opt, &all_rp_uuids)?;
+    tx.commit()
+        .map_err(|e| format!("Error en commit de reevaluación de universo: {}", crate::db::schema::format_pg_error(&e)))?;
+    Ok(conteos)
+}
+
+/// true si la revisión tiene al menos un Registro de Obra del usuario activo con fecha de inicio.
+pub fn revision_tiene_ro_usuario(client: &mut Client, id_revision: Uuid) -> Result<bool, String> {
+    client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM public.registros_obras WHERE id_revision = $1 AND COALESCE(creado_usuario,false) AND activa AND fecha_inicio IS NOT NULL)",
+            &[&id_revision],
+        )
+        .map(|r| r.get(0))
+        .map_err(|e| format!("Error consultando registros de obra del usuario: {}", crate::db::schema::format_pg_error(&e)))
 }
 
 /// Versión transaccional de `sync_reportes_liquidaciones_for_revision` para ejecutarse dentro
@@ -765,64 +857,10 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
         }
     };
 
-    // 1. Universo de la revisión (ver `sql_en_universo`). Se usa UPDATE en lugar de DELETE: los meses
-    // fuera del universo quedan como FUERA_PERIODO con sus ediciones intactas, y reaparecen como ACTIVO
-    // si el analista ajusta el periodo de la revisión o la vigencia de sus obras.
-    let en_universo_rl = sql_en_universo("rl.anio_periodo", SQL_MES_RL);
-
-    let sql_marcar_fuera = format!(
-        r#"
-        UPDATE public.reportes_liquidaciones rl
-        SET estado = 'FUERA_PERIODO'
-        WHERE rl.id_registro_patronal = ANY($2)
-          AND ($1::uuid IS NULL OR rl.id_revision = $1)
-          AND rl.estado = 'ACTIVO'
-          AND NOT {en_universo_rl}
-        "#
-    );
-    tx.execute(
-        sql_marcar_fuera.as_str(),
-        &[&rev_uuid_opt, &all_rp_uuids, &active_rev_id],
-    ).map_err(|e| {
-        let err_str = crate::db::schema::format_pg_error(&e);
-        crate::app_logger::log_db_error(
-            "UPDATE reportes_liquidaciones estado FUERA_PERIODO",
-            &["public.reportes_liquidaciones"],
-            "UPDATE public.reportes_liquidaciones SET estado = 'FUERA_PERIODO' WHERE ...",
-            &err_str,
-        );
-        format!(
-            "Error marcando reportes fuera de periodo: {}",
-            err_str
-        )
-    })?;
-
-    let sql_reactivar = format!(
-        r#"
-        UPDATE public.reportes_liquidaciones rl
-        SET estado = 'ACTIVO'
-        WHERE rl.id_registro_patronal = ANY($2)
-          AND ($1::uuid IS NULL OR rl.id_revision = $1)
-          AND rl.estado = 'FUERA_PERIODO'
-          AND {en_universo_rl}
-        "#
-    );
-    tx.execute(
-        sql_reactivar.as_str(),
-        &[&rev_uuid_opt, &all_rp_uuids, &active_rev_id],
-    ).map_err(|e| {
-        let err_str = crate::db::schema::format_pg_error(&e);
-        crate::app_logger::log_db_error(
-            "UPDATE reportes_liquidaciones estado ACTIVO",
-            &["public.reportes_liquidaciones"],
-            "UPDATE public.reportes_liquidaciones SET estado = 'ACTIVO' WHERE ...",
-            &err_str,
-        );
-        format!(
-            "Error reactivando reportes dentro de periodo: {}",
-            err_str
-        )
-    })?;
+    // 1. Universo de la revisión (ver `sql_en_universo`). Cada reporte se evalúa contra el universo de SU
+    // PROPIA revisión (rl.id_revision). Se usa UPDATE en lugar de DELETE: los meses fuera del universo quedan
+    // como FUERA_PERIODO con sus ediciones intactas, y reaparecen como ACTIVO si cambian las obras del usuario.
+    reevaluar_universo_tx(tx, rev_uuid_opt, &all_rp_uuids)?;
 
     // 1.1 (Eliminado) Los duplicados por empleado/periodo los impide la restricción uq_rl_rev_emp_periodo.
 
@@ -903,7 +941,7 @@ pub fn sync_reportes_liquidaciones_for_revision_tx(
     // 2. Inserción de liquidaciones en public.reportes_liquidaciones dentro del universo de la revisión.
     // DISTINCT ON elige una única liquidación por empleado y periodo (la de obras y cuotas completas).
     // Los reportes ya existentes se respetan mediante ON CONFLICT sobre uq_rl_rev_emp_periodo.
-    let en_universo_l = sql_en_universo("l.anio_periodo", "l.calc_mes_int");
+    let en_universo_l = sql_en_universo("$3", "l.anio_periodo", "l.calc_mes_int");
     let sql_insert_reportes = format!(
         r#"
         INSERT INTO public.reportes_liquidaciones (
@@ -1677,9 +1715,10 @@ pub fn revertir_reporte_liquidaciones_a_originales(
     Ok(restored_count)
 }
 
-/// Consulta todas las filas de reportes_liquidaciones para la revisión activa,
-/// con sus valores prorrateados y originales listos para la interfaz Slint.
-/// Sin ningún COALESCE en la consulta SQL.
+/// Consulta las filas de reportes_liquidaciones ACTIVO de la revisión que caen dentro del universo
+/// (meses de los Registros de Obra del usuario), con sus valores prorrateados y originales listos para la
+/// interfaz Slint. El universo se aplica en SQL (`sql_en_universo`), fuente única de verdad: los meses fuera
+/// de las RO no se consultan ni se devuelven. Sin ningún COALESCE en la consulta SQL.
 pub fn fetch_reporte_liquidaciones(
     client: &mut Client,
     id_revision: Uuid,
@@ -1711,28 +1750,6 @@ pub fn fetch_reporte_liquidaciones(
             clean_reg
         );
         let _ = sync_reportes_liquidaciones_for_revision(client, id_revision);
-    }
-
-    let obras = fetch_all_obras_for_revision(client, id_revision)?;
-
-    // Extraer claves exactas de periodo (anio_periodo, mes_periodo_int) analizados a partir de los registros de obra
-    let mut required_periods: BTreeSet<(i32, i16)> = BTreeSet::new();
-    for o in &obras {
-        if let Some(f_ini) = o.fecha_inicio {
-            let f_fin = o.fecha_fin.unwrap_or(f_ini).max(f_ini);
-            let mut curr_y = f_ini.year();
-            let mut curr_m = f_ini.month() as i16;
-            let end_y = f_fin.year();
-            let end_m = f_fin.month() as i16;
-            while (curr_y < end_y) || (curr_y == end_y && curr_m <= end_m) {
-                required_periods.insert((curr_y, curr_m));
-                curr_m += 1;
-                if curr_m > 12 {
-                    curr_m = 1;
-                    curr_y += 1;
-                }
-            }
-        }
     }
 
     let base_select = r#"
@@ -1848,7 +1865,11 @@ pub fn fetch_reporte_liquidaciones(
             e.nombre ASC;
     "#;
 
-    let where_clause = "WHERE rl.id_registro_patronal = ANY($1) AND ($2::uuid IS NULL OR rl.id_revision = $2)";
+    // Universo por fila (su propia revisión); solo ACTIVO. Meses fuera de las RO no se consultan ni se pintan.
+    let universo = sql_en_universo("rl.id_revision", "rl.anio_periodo", SQL_MES_RL);
+    let where_clause = format!(
+        "WHERE rl.id_registro_patronal = ANY($1) AND ($2::uuid IS NULL OR rl.id_revision = $2) AND rl.estado::text = 'ACTIVO' AND {universo}"
+    );
     let full_sql = format!("{} {} {}", base_select, where_clause, order_clause);
     let rows = client.query(&full_sql, &[&all_rp_uuids, &rev_uuid_opt])
         .map_err(|e| format!("Error consultando filas de reportes_liquidaciones: {}", e))?;
@@ -2004,25 +2025,6 @@ pub fn fetch_reporte_liquidaciones(
         });
     }
 
-    let final_result = if !required_periods.is_empty() {
-        let matching: Vec<ReporteLiquidacionRowDb> = result
-            .iter()
-            .filter(|r| {
-                let m_int = if (1..=12).contains(&r.mes_periodo_int) {
-                    r.mes_periodo_int
-                } else {
-                    mes_to_periodo_int(&r.mes_periodo)
-                };
-                let y = r.anio_periodo as i32;
-                required_periods.contains(&(y, m_int))
-            })
-            .cloned()
-            .collect();
-        matching
-    } else {
-        result
-    };
-
     // Registro de versiones para el bloqueo optimista (D-6 a). Un fallo aquí no rompe la carga.
     if let Some(rev) = rev_uuid_opt {
         match client.query(
@@ -2040,7 +2042,7 @@ pub fn fetch_reporte_liquidaciones(
         }
     }
 
-    Ok(final_result)
+    Ok(result)
 }
 
 /// Actualiza en tiempo real los días o el registro de obra de un empleado en la base de datos,
@@ -6631,7 +6633,7 @@ mod tests {
 
     #[test]
     fn sql_en_universo_une_periodo_y_obras_con_and() {
-        let sql = sql_en_universo("rl.anio_periodo", SQL_MES_RL);
+        let sql = sql_en_universo("$3", "rl.anio_periodo", SQL_MES_RL);
         let pos_periodo = sql.find("/* en_periodo */").expect("falta el marcador en_periodo");
         let pos_obras = sql.find("/* en_obras */").expect("falta el marcador en_obras");
         assert!(pos_periodo < pos_obras, "en_periodo debe ir antes que en_obras");
@@ -6640,8 +6642,28 @@ mod tests {
             entre.trim_end().ends_with("END\n            AND"),
             "en_periodo debe cerrar con END y unirse con AND a en_obras: {entre:?}"
         );
-        assert_eq!(sql.matches("$3").count(), 5, "el parámetro $3 (revisión) debe usarse en ambas partes");
+        assert_eq!(sql.matches("$3").count(), 4, "el parámetro $3 (revisión) debe usarse en ambas partes (3 en en_periodo y 1 en en_obras)");
         assert!(!sql.contains("--"), "el SQL no debe usar comentarios de línea");
+    }
+
+    #[test]
+    fn sql_en_universo_correlacionado_no_usa_parametros() {
+        let sql = sql_en_universo("rl.id_revision", "rl.anio_periodo", SQL_MES_RL);
+        assert!(!sql.contains('$'), "con rev correlacionada el SQL no debe contener parámetros `$`");
+        assert!(sql.contains("rl.id_revision"), "la revisión debe referirse a la fila");
+    }
+
+    #[test]
+    fn sql_en_universo_sin_ro_no_es_universo_total() {
+        let sql = sql_en_universo("rl.id_revision", "rl.anio_periodo", SQL_MES_RL);
+        let pos_obras = sql.find("/* en_obras */").expect("falta el marcador en_obras");
+        let en_obras = &sql[pos_obras..];
+        assert!(!en_obras.contains("ELSE true"), "sin RO el universo debe ser vacío, no total");
+        assert!(en_obras.contains("fecha_inicio IS NOT NULL"), "las RO sin fecha_inicio no deben aportar meses");
+        assert!(
+            en_obras.contains("GREATEST(COALESCE(ro.fecha_fin, ro.fecha_inicio), ro.fecha_inicio)"),
+            "fecha_fin NULL debe cubrir solo el mes de inicio y fecha_fin < fecha_inicio debe tratarse como inicio"
+        );
     }
 
     fn create_mock_row(emp_id: Uuid, nombre: &str, oid: Option<Uuid>, obra_num: &str, is_user: bool, mes: &str, anio: i16, dias: i16, sub: f64) -> ReporteLiquidacionRowDb {
