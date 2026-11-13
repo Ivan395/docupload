@@ -252,7 +252,6 @@ pub fn load_nominas_upload_stats(
         .get()
         .map_err(|e| format!("Error de conexión a la base de datos: {}", e))?;
 
-    let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client);
     let rows = fetch_all_nominas_for_stats(&mut client, None)?;
 
     let d = ui.global::<AppData>();
@@ -561,6 +560,7 @@ pub fn wire_nominas_upload_callbacks(
         let session_w = s_pg.clone();
         let pool_w = pool_pg.clone();
         let revision_id_w = revision_id_parsed;
+        let sync_revision_id: Option<Uuid> = Uuid::parse_str(&d.get_selected_revision_id()).ok();
 
         let rustfs_rp_cb = rustfs_rp.clone();
         let client_rfc_cb = client_rfc.clone();
@@ -622,35 +622,38 @@ pub fn wire_nominas_upload_callbacks(
                 }
             }
 
-            // Copia en background a las tablas de reporte
-            // (`reportes_nominas` + `reportes_detalles_nominas`):
-            // empleados con obras creadas por el usuario y
-            // fechas de nómina coincidentes con el registro
-            // de obra.
+            // Sincroniza en background el papel de trabajo de la
+            // revisión seleccionada (`reportes_nominas`): inserta las
+            // nóminas nuevas y marca como FUERA_ALCANCE las que ya no
+            // corresponden a las obras. No borra nada: las ediciones
+            // del analista y las nóminas sintéticas se conservan.
             let copy_msg: Option<String> = match res {
-                Ok(ref r) if r.valid_count > 0 => {
-                    if let Some(ref pool) = pool_w {
-                        if let Ok(mut client) = pool.get() {
-                            match crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client) {
-                                Ok((n, d)) => Some(format!(
-                                    "{} nómina(s) y {} detalle(s) copiados al reporte.",
-                                    n, d
-                                )),
-                                Err(e) => {
-                                    log::warn!("Error copiando nóminas a reportes: {}", e);
-                                    Some(format!(
-                                        "Error copiando al reporte: {}",
-                                        e
-                                    ))
+                Ok(ref r) if r.valid_count > 0 => match sync_revision_id {
+                    None => None,
+                    Some(id_rev) => {
+                        if let Some(ref pool) = pool_w {
+                            if let Ok(mut client) = pool.get() {
+                                match crate::db::nominas_reporte::sync_reportes_nominas_for_target(&mut client, id_rev) {
+                                    Ok(resumen) => Some(format!(
+                                        "Reporte de nóminas: {} nueva(s), {} fuera de alcance, {} reactivada(s).",
+                                        resumen.insertadas, resumen.a_fuera_alcance, resumen.a_activo
+                                    )),
+                                    Err(e) => {
+                                        log::warn!("Error sincronizando el reporte de nóminas: {}", e);
+                                        Some(format!(
+                                            "Error sincronizando el reporte de nóminas: {}",
+                                            e
+                                        ))
+                                    }
                                 }
+                            } else {
+                                Some("Sin conexión para sincronizar el reporte de nóminas.".to_string())
                             }
                         } else {
-                            Some("Sin conexión para copiar al reporte.".to_string())
+                            Some("Base de datos no disponible para el reporte.".to_string())
                         }
-                    } else {
-                        Some("Base de datos no disponible para el reporte.".to_string())
                     }
-                }
+                },
                 _ => None,
             };
 
@@ -787,9 +790,9 @@ pub fn wire_nominas_upload_callbacks(
     });
 
     // "Realizar Reporte" → lleva a la vista de reporte (vista 9).
-    // El reporte ya muestra únicamente las nóminas copiadas
-    // en `reportes_nominas` (empleados con obras creadas por
-    // el usuario y fechas coincidentes).
+    // El reporte muestra únicamente las nóminas activas de
+    // `reportes_nominas` (estado ACTIVO: dentro del alcance de
+    // las obras creadas por el usuario y con fechas coincidentes).
     let ui_weak = main_window.as_weak();
     let pool_rp = db_pool.clone();
     let rep_sess = report_session.clone();
@@ -845,11 +848,48 @@ pub fn wire_nominas_upload_callbacks(
         }
     });
 
-    // "Borrar Todo": abre el modal de confirmación
+    // "Borrar Todo": abre el modal de confirmación con el conteo de la revisión seleccionada
     let ui_weak = main_window.as_weak();
+    let pool_solicitar = db_pool.clone();
     app_logic.on_solicitar_borrar_todas_nominas(move || {
         let Some(win) = ui_weak.upgrade() else { return };
-        win.global::<AppData>().set_show_delete_all_nominas_modal(true);
+        let d = win.global::<AppData>();
+
+        let revision_id = d.get_selected_revision_id().to_string();
+        let revision_nombre = d.get_selected_revision_nombre().to_string();
+        let Ok(id_revision) = Uuid::parse_str(&revision_id) else {
+            show_toast_message(&win, "Selecciona una revisión para borrar sus nóminas.");
+            return;
+        };
+
+        let conteo = match pool_solicitar.as_ref().map(|p| p.get()) {
+            Some(Ok(mut client)) => crate::db::contar_nominas_de_revision(&mut client, id_revision),
+            _ => Err("Sin conexión a la base de datos.".to_string()),
+        };
+
+        match conteo {
+            Ok(c) if c.nominas == 0 && c.reportes == 0 => {
+                show_toast_message(&win, "La revisión seleccionada no tiene nóminas cargadas.");
+                return;
+            }
+            Ok(c) => {
+                d.set_delete_nominas_resumen(
+                    format!(
+                        "Revisión {}: {} nómina(s) y {} fila(s) del reporte de nóminas. Los archivos de RustFS de esta revisión se moverán a Trash.",
+                        revision_nombre, c.nominas, c.reportes
+                    )
+                    .into(),
+                );
+            }
+            Err(e) => {
+                log::warn!("No se pudo contar las nóminas de la revisión: {}", e);
+                d.set_delete_nominas_resumen(
+                    "No se pudo contar las nóminas de la revisión; se borrarán solo las de la revisión seleccionada.".into(),
+                );
+            }
+        }
+
+        d.set_show_delete_all_nominas_modal(true);
     });
 
     // Cancelar borrado
@@ -859,13 +899,18 @@ pub fn wire_nominas_upload_callbacks(
         win.global::<AppData>().set_show_delete_all_nominas_modal(false);
     });
 
-    // Confirmar borrado total de nóminas en BD
+    // Confirmar borrado de las nóminas de la revisión seleccionada en BD
     let ui_weak = main_window.as_weak();
     let pool_del = db_pool.clone();
     let s_del = session.clone();
     app_logic.on_confirmar_borrar_todas_nominas(move || {
         let Some(win) = ui_weak.upgrade() else { return };
         let d = win.global::<AppData>();
+
+        let Ok(id_revision) = Uuid::parse_str(&d.get_selected_revision_id()) else {
+            show_toast_message(&win, "Selecciona una revisión para borrar sus nóminas.");
+            return;
+        };
         d.set_show_delete_all_nominas_modal(false);
 
         // Contexto de RustFS para mover los archivos a Trash
@@ -873,7 +918,7 @@ pub fn wire_nominas_upload_callbacks(
         let rf_rp = d.get_selected_rp_registro().to_string();
         let rf_revision = d.get_selected_revision_nombre().to_string();
 
-        show_toast_message(&win, "Eliminando todas las nóminas de la base de datos...");
+        show_toast_message(&win, "Eliminando las nóminas de la revisión...");
 
         let ui_w = ui_weak.clone();
         let session_w = s_del.clone();
@@ -884,18 +929,25 @@ pub fn wire_nominas_upload_callbacks(
             let mut error_msg: Option<String> = None;
 
             if let Some(ref pool) = pool_w {
-                if let Ok(mut client) = pool.get() {
-                    match crate::db::delete_all_nominas(&mut client) {
-                        Ok(n) => {
-                            deleted = n;
-                            log::info!("Borradas {} filas de nóminas", n);
-                        }
-                        Err(e) => {
-                            log::error!("Error al borrar nóminas: {}", e);
-                            error_msg = Some(format!("Error al borrar en base de datos: {}", e));
+                match pool.get() {
+                    Ok(mut client) => {
+                        match crate::db::delete_nominas_de_revision(&mut client, id_revision) {
+                            Ok(n) => {
+                                deleted = n;
+                                log::info!("Borradas {} filas de nóminas de la revisión {}", n, id_revision);
+                            }
+                            Err(e) => {
+                                log::error!("Error al borrar nóminas: {}", e);
+                                error_msg = Some(format!("Error al borrar en base de datos: {}", e));
+                            }
                         }
                     }
+                    Err(_) => {
+                        error_msg = Some("Sin conexión a la base de datos.".to_string());
+                    }
                 }
+            } else {
+                error_msg = Some("Sin conexión a la base de datos.".to_string());
             }
 
             // Mover los archivos de RustFS a Trash (best-effort)
@@ -927,7 +979,7 @@ pub fn wire_nominas_upload_callbacks(
                     Some(e) => show_toast_message(&ui, &e),
                     None => show_toast_message(
                         &ui,
-                        &format!("Se borraron {} registro(s) de nóminas de la base de datos.", del_count),
+                        &format!("Se borraron {} registro(s) de nóminas de la revisión.", del_count),
                     ),
                 }
             });

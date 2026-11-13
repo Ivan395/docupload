@@ -27,7 +27,7 @@ pub use config::{
     create_tls_connector, get_active_config, get_active_config_path, update_active_config,
     DbConfig, DEFAULT_CONFIG_FILENAME,
 };
-pub use nominas::{save_nominas_concurrent, save_nominas_to_db, delete_all_nominas, NominasDbStats};
+pub use nominas::{save_nominas_concurrent, save_nominas_to_db, delete_nominas_de_revision, delete_nominas_de_revision_tx, contar_nominas_de_revision, ConteoNominasRevision, NominasDbStats};
 pub use nominas_reporte::*;
 pub use reporte_liquidaciones::*;
 pub use revisiones::*;
@@ -43,6 +43,8 @@ mod pruebas_integracion_entregable;
 mod pruebas_integracion_asignacion;
 #[cfg(test)]
 mod pruebas_integracion_fase6;
+#[cfg(test)]
+mod pruebas_integracion_nominas;
 
 #[cfg(test)]
 mod tests {

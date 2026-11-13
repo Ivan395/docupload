@@ -1011,7 +1011,7 @@ export component NominasUploadView inherits Rectangle {
 
         Rectangle {
             width: 480px;
-            height: 230px;
+            height: 280px;
             border-radius: 12px;
             background: #ffffff;
             border-width: 1px;
@@ -1045,13 +1045,13 @@ export component NominasUploadView inherits Rectangle {
                     VerticalLayout {
                         spacing: 4px;
                         Text {
-                            text: "¿Borrar Todas las Nóminas?";
+                            text: "¿Borrar las nóminas de esta revisión?";
                             font-size: 16px;
                             font-weight: 800;
                             color: #991b1b;
                         }
                         Text {
-                            text: "Esta acción eliminará todas las nóminas y sus detalles de la base de datos.";
+                            text: "Se eliminarán las nóminas de la revisión seleccionada y sus copias en el reporte de nóminas. Otras revisiones y clientes no se tocan.";
                             font-size: 12px;
                             color: #475569;
                             wrap: word-wrap;
@@ -1076,10 +1076,11 @@ export component NominasUploadView inherits Rectangle {
                             color: #065f46;
                         }
                         Text {
-                            text: "Se borrarán todos los registros procesados; los archivos de RustFS se moverán a Trash";
+                            text: AppData.delete_nominas_resumen;
                             font-size: 13px;
                             font-weight: 800;
                             color: #0f172a;
+                            wrap: word-wrap;
                         }
                     }
                 }

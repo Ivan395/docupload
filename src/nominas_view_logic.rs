@@ -640,14 +640,8 @@ pub fn sync_and_load_nominas_data(
     });
 
     if let Some(t_id) = target_uuid {
-        let _ = crate::db::nominas_reporte::sync_reportes_nominas_for_target(&mut client, t_id);
-    } else {
-        let count_rows: i64 = client
-            .query_one("SELECT COUNT(*) FROM public.reportes_nominas", &[])
-            .map(|r| r.get(0))
-            .unwrap_or(0);
-        if count_rows == 0 {
-            let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(&mut client);
+        if let Err(e) = crate::db::nominas_reporte::sync_reportes_nominas_for_target(&mut client, t_id) {
+            log::warn!("No se pudo sincronizar el reporte de nóminas: {}", e);
         }
     }
 

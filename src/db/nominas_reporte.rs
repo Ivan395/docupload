@@ -230,6 +230,7 @@ pub fn fetch_nominas_reporte(
                    OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rn.id_registro_patronal OR r.id = rn.id_revision))
                    OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rn.id_registro_patronal)
             )
+              AND rn.estado = 'ACTIVO'
             GROUP BY rdn.id_reporte_nomina
         ),
         ced AS (
@@ -300,6 +301,7 @@ pub fn fetch_nominas_reporte(
                    OR EXISTS (SELECT 1 FROM public.revisiones rev WHERE rev.id = $1 AND (rev.id_registro_patronal = rn.id_registro_patronal OR rev.id = rn.id_revision))
                    OR EXISTS (SELECT 1 FROM public.registros_patronales rp2 WHERE rp2.id_cliente = $1 AND rp2.id = rn.id_registro_patronal)
             )
+              AND rn.estado = 'ACTIVO'
         )
         SELECT
             b.id_nomina,
@@ -396,153 +398,42 @@ pub fn fetch_nominas_reporte(
     Ok(result)
 }
 
-/// Copia en background las nóminas a las tablas de reporte
-/// (`reportes_nominas` + `reportes_detalles_nominas`).
-///
-/// Solo se copian las nóminas de empleados que tengan 1 o más
-/// registros de obra creados por el usuario
-/// (`registros_obras.creado_usuario = true`) vinculados en las
-/// tablas de reporte de cédulas (`reportes_liquidaciones` +
-/// `reportes_vinculaciones_obras_liquidaciones`), y cuyas
-/// fechas de la nómina coincidan (se traslapen) con las fechas
-/// del registro de obra (`registros_obras.fecha_inicio`..
-/// `fecha_fin`).
-pub fn copy_nominas_a_reportes(
-    client: &mut Client,
-) -> Result<(usize, usize), String> {
-    // Reemplazo total de las copias anteriores.
-    client
-        .execute(
-            r#"
-            DELETE FROM public.reportes_detalles_nominas
-            WHERE id_reporte_nomina IN (
-                SELECT id FROM public.reportes_nominas
-            )
-            "#,
-            &[],
-        )
-        .map_err(|e| {
-            format!("Error limpiando reportes_detalles_nominas: {}", e)
-        })?;
-    client
-        .execute("DELETE FROM public.reportes_nominas", &[])
-        .map_err(|e| {
-            format!("Error limpiando reportes_nominas: {}", e)
-        })?;
-
-    // Copia de las nóminas filtradas estrictamente por obra de usuario y rango de fechas.
-    let nominas = client
-        .execute(
-            r#"
-            INSERT INTO public.reportes_nominas (
-                id, id_nomina, id_registro_patronal, id_revision, id_empleado, version_nomina,
-                tipo_nomina, fecha_pago, fecha_inicial_pago,
-                fecha_final_pago, num_dias_pagados, total_sueldos,
-                total_gravado, total_exento, total_otras_deducciones,
-                total_impuestos_retenidos,
-                salario_base_cotizacion_aportacion,
-                salario_diario_integrado, salario_diario_calculado,
-                salario_base_cotizacion_aportacion_calculado,
-                salario_diario_integrado_calculado,
-                timbre_version, timbre_numero_cert_sat,
-                timbre_rfc_proveedor_cert, timbre_uuid, timbre_fecha,
-                nombre_archivo
-            )
-            SELECT
-                uuidv7(), n.id, n.id_registro_patronal, n.id_revision, n.id_empleado, n.version_nomina,
-                n.tipo_nomina, n.fecha_pago, n.fecha_inicial_pago,
-                n.fecha_final_pago,
-                CASE
-                    WHEN n.fecha_inicial_pago IS NOT NULL AND n.fecha_final_pago IS NOT NULL
-                        THEN (n.fecha_final_pago - n.fecha_inicial_pago) + 1
-                    ELSE COALESCE(n.num_dias_pagados, 0)
-                END,
-                n.total_sueldos,
-                n.total_gravado, n.total_exento, n.total_otras_deducciones,
-                n.total_impuestos_retenidos,
-                n.salario_base_cotizacion_aportacion,
-                n.salario_diario_integrado, n.salario_diario_calculado,
-                n.salario_base_cotizacion_aportacion_calculado,
-                n.salario_diario_integrado_calculado,
-                n.timbre_version, n.timbre_numero_cert_sat,
-                n.timbre_rfc_proveedor_cert, n.timbre_uuid, n.timbre_fecha,
-                n.nombre_archivo
-            FROM public.nominas n
-            WHERE EXISTS (
-                SELECT 1
-                FROM public.registros_obras ro
-                WHERE (ro.id_registro_patronal = n.id_registro_patronal OR ro.id_revision = n.id_revision)
-                  AND (ro.fecha_inicio IS NULL OR COALESCE(n.fecha_final_pago, n.fecha_pago, n.fecha_inicial_pago) >= ro.fecha_inicio)
-                  AND (ro.fecha_fin IS NULL OR COALESCE(n.fecha_inicial_pago, n.fecha_pago, n.fecha_final_pago) <= ro.fecha_fin)
+/// Condición SQL: la nómina (alias `a`) está dentro del alcance de las obras capturadas por el usuario
+/// para el target `$1` (revisión, RP o cliente). Sin obras de usuario, todo está en alcance (criterio vigente).
+fn sql_nomina_en_alcance(a: &str) -> String {
+    format!(r#"(
+            NOT EXISTS (
+                SELECT 1 FROM public.registros_obras ro
+                WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
+                  AND COALESCE(ro.creado_usuario, false) = true
             )
             OR EXISTS (
-                SELECT 1
-                FROM public.reportes_liquidaciones rl
-                LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
-                LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rv ON rv.id_reporte_liquidacion = rl.id
-                LEFT JOIN public.registros_obras ro ON ro.id = COALESCE(rdl.id_registro_obra, rv.id_registro_obra)
-                WHERE rl.id_empleado = n.id_empleado
+                SELECT 1 FROM public.registros_obras ro
+                WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
+                  AND COALESCE(ro.creado_usuario, false) = true
                   AND (
-                      ro.id IS NULL
-                      OR (
-                          (ro.fecha_inicio IS NULL OR COALESCE(n.fecha_final_pago, n.fecha_pago, n.fecha_inicial_pago) >= ro.fecha_inicio)
-                          AND (ro.fecha_fin IS NULL OR COALESCE(n.fecha_inicial_pago, n.fecha_pago, n.fecha_final_pago) <= ro.fecha_fin)
-                      )
+                      ({a}.fecha_final_pago IS NOT NULL AND {a}.fecha_inicial_pago IS NOT NULL AND {a}.fecha_final_pago >= ro.fecha_inicio AND {a}.fecha_inicial_pago <= ro.fecha_fin)
+                      OR ({a}.fecha_pago IS NOT NULL AND {a}.fecha_pago BETWEEN ro.fecha_inicio AND ro.fecha_fin)
                   )
             )
-            OR NOT EXISTS (
-                SELECT 1 FROM public.registros_obras ro WHERE ro.id_registro_patronal = n.id_registro_patronal OR ro.id_revision = n.id_revision
-            )
-                  )
-            )
-            OR NOT EXISTS (
-                SELECT 1 FROM public.registros_obras ro WHERE ro.id_revision = n.id_revision
-            )
-            "#,
-            &[],
-        )
-        .map_err(|e| {
-            format!("Error copiando nóminas a reportes: {}", e)
-        })?;
-
-    // Copia de los detalles (percepciones) de cada nómina copiada.
-    let detalles = client
-        .execute(
-            r#"
-            INSERT INTO public.reportes_detalles_nominas (
-                id_reporte_nomina, id_concepto, clave, concepto,
-                importe_gravado, importe_exento, importe
-            )
-            SELECT
-                rn.id, dn.id_concepto, dn.clave, dn.concepto,
-                dn.importe_gravado, dn.importe_exento, dn.importe
-            FROM public.reportes_nominas rn
-            JOIN public.detalles_nominas dn ON dn.id_nomina = rn.id_nomina
-            "#,
-            &[],
-        )
-        .map_err(|e| {
-            format!("Error copiando detalles a reportes: {}", e)
-        })?;
-
-    log::info!(
-        "Copia a reportes de nóminas: {} nóminas, {} detalles",
-        nominas,
-        detalles
-    );
-
-    Ok((nominas as usize, detalles as usize))
+        )"#)
 }
 
-/// Sincroniza las nóminas maestras pertenecientes a un registro patronal, revisión o cliente
-/// hacia las tablas de trabajo (reportes_nominas y reportes_detalles_nominas).
-/// Permite que al abrir otra revisión del mismo registro patronal no se tengan que reingresar
-/// los XMLs y se reutilicen inmediatamente de la base de datos.
-pub fn sync_reportes_nominas_for_target(
-    client: &mut Client,
-    target_id: Uuid,
-) -> Result<usize, String> {
-    let sql_nominas = r#"
+/// Condición SQL: la fila de `reportes_nominas` (alias `rn`) pertenece al target `$1` (revisión, RP o cliente).
+fn sql_reporte_nomina_en_target() -> &'static str {
+    r#"(
+            rn.id_revision = $1
+            OR rn.id_registro_patronal = $1
+            OR EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = $1 AND (r.id_registro_patronal = rn.id_registro_patronal OR r.id = rn.id_revision))
+            OR EXISTS (SELECT 1 FROM public.registros_patronales rp WHERE rp.id_cliente = $1 AND rp.id = rn.id_registro_patronal)
+        )"#
+}
+
+/// INSERT ... SELECT de nóminas maestras del target hacia `reportes_nominas` (solo las que faltan y que
+/// están dentro del alcance de las obras de usuario).
+fn sql_insert_sync_nominas() -> String {
+    format!(
+        r#"
         INSERT INTO public.reportes_nominas (
             id, id_nomina, id_registro_patronal, id_revision, id_empleado, version_nomina,
             tipo_nomina, fecha_pago, fecha_inicial_pago,
@@ -589,28 +480,67 @@ pub fn sync_reportes_nominas_for_target(
         AND NOT EXISTS (
             SELECT 1 FROM public.reportes_nominas rn WHERE rn.id_nomina = n.id
         )
-        AND (
-            -- Si no hay obras creadas por el usuario en la revisión correspondiente, incluir todas las nóminas
-            NOT EXISTS (
-                SELECT 1 FROM public.registros_obras ro
-                WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
-                  AND COALESCE(ro.creado_usuario, false) = true
-            )
-            -- Si existen obras creadas por el usuario, incluir sólo las nóminas cuyas fechas se traslapan con el periodo de las obras
-            OR EXISTS (
-                SELECT 1 FROM public.registros_obras ro
-                WHERE (ro.id_revision = $1 OR ro.id_revision IN (SELECT r.id FROM public.revisiones r WHERE r.id_registro_patronal = $1 OR r.id = $1))
-                  AND COALESCE(ro.creado_usuario, false) = true
-                  AND (
-                      (n.fecha_final_pago IS NOT NULL AND n.fecha_inicial_pago IS NOT NULL AND n.fecha_final_pago >= ro.fecha_inicio AND n.fecha_inicial_pago <= ro.fecha_fin)
-                      OR (n.fecha_pago IS NOT NULL AND n.fecha_pago BETWEEN ro.fecha_inicio AND ro.fecha_fin)
-                  )
-            )
-        )
-    "#;
+        AND {alcance}
+        ON CONFLICT DO NOTHING
+        "#,
+        alcance = sql_nomina_en_alcance("n")
+    )
+}
 
-    let inserted_nom = client
-        .execute(sql_nominas, &[&target_id])
+/// Marca como `FUERA_ALCANCE` las filas del target que ya no están dentro del alcance de las obras
+/// de usuario. Nunca toca filas editadas por el usuario ni sintéticas.
+fn sql_marcar_fuera_alcance() -> String {
+    format!(
+        r#"
+        UPDATE public.reportes_nominas rn
+        SET estado = 'FUERA_ALCANCE'
+        WHERE {target}
+          AND rn.estado = 'ACTIVO'
+          AND rn.editado_usuario = false
+          AND rn.sintetica = false
+          AND rn.id_nomina IS NOT NULL
+          AND NOT {alcance}
+        "#,
+        target = sql_reporte_nomina_en_target(),
+        alcance = sql_nomina_en_alcance("rn")
+    )
+}
+
+/// Regresa a `ACTIVO` las filas del target que vuelven a estar dentro del alcance de las obras de usuario.
+fn sql_marcar_activo() -> String {
+    format!(
+        r#"
+        UPDATE public.reportes_nominas rn
+        SET estado = 'ACTIVO'
+        WHERE {target}
+          AND rn.estado = 'FUERA_ALCANCE'
+          AND rn.editado_usuario = false
+          AND rn.sintetica = false
+          AND rn.id_nomina IS NOT NULL
+          AND {alcance}
+        "#,
+        target = sql_reporte_nomina_en_target(),
+        alcance = sql_nomina_en_alcance("rn")
+    )
+}
+
+/// Resultado de sincronizar el papel de trabajo de nóminas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyncNominasResumen {
+    pub insertadas: usize,
+    pub a_fuera_alcance: usize,
+    pub a_activo: usize,
+}
+
+/// Sincroniza (dentro de `tx`) las nóminas maestras del target hacia `reportes_nominas`.
+/// Incremental y NO destructiva: inserta las que faltan, y las que salen del alcance se marcan
+/// `FUERA_ALCANCE` (o regresan a `ACTIVO`). Nunca toca filas `editado_usuario` ni `sintetica`.
+pub fn sync_reportes_nominas_for_target_tx(
+    tx: &mut postgres::Transaction<'_>,
+    target_id: Uuid,
+) -> Result<SyncNominasResumen, String> {
+    let insertadas = tx
+        .execute(sql_insert_sync_nominas().as_str(), &[&target_id])
         .map_err(|e| format!("Error sincronizando nóminas a reportes: {}", e))?;
 
     let sql_detalles = r#"
@@ -626,15 +556,51 @@ pub fn sync_reportes_nominas_for_target(
         WHERE NOT EXISTS (
             SELECT 1 FROM public.reportes_detalles_nominas rdn WHERE rdn.id_reporte_nomina = rn.id
         )
+        AND rn.id_nomina IS NOT NULL AND rn.sintetica = false
     "#;
 
-    let _ = client.execute(sql_detalles, &[]);
+    tx.execute(sql_detalles, &[])
+        .map_err(|e| format!("Error copiando detalles de nóminas a reportes: {}", e))?;
 
-    if inserted_nom > 0 {
-        log::info!("Sincronizadas {} nóminas maestras hacia papel de trabajo de nóminas para target {}", inserted_nom, target_id);
+    let a_fuera_alcance = tx
+        .execute(sql_marcar_fuera_alcance().as_str(), &[&target_id])
+        .map_err(|e| format!("Error marcando nóminas fuera de alcance: {}", e))?;
+
+    let a_activo = tx
+        .execute(sql_marcar_activo().as_str(), &[&target_id])
+        .map_err(|e| format!("Error reactivando nóminas en alcance: {}", e))?;
+
+    let resumen = SyncNominasResumen {
+        insertadas: insertadas as usize,
+        a_fuera_alcance: a_fuera_alcance as usize,
+        a_activo: a_activo as usize,
+    };
+
+    if resumen != SyncNominasResumen::default() {
+        log::info!(
+            "Papel de trabajo de nóminas (target {}): {} insertadas, {} fuera de alcance, {} reactivadas",
+            target_id,
+            resumen.insertadas,
+            resumen.a_fuera_alcance,
+            resumen.a_activo
+        );
     }
 
-    Ok(inserted_nom as usize)
+    Ok(resumen)
+}
+
+/// Igual que `sync_reportes_nominas_for_target_tx`, en su propia transacción.
+pub fn sync_reportes_nominas_for_target(
+    client: &mut Client,
+    target_id: Uuid,
+) -> Result<SyncNominasResumen, String> {
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("Error iniciando sincronización de nóminas: {}", e))?;
+    let resumen = sync_reportes_nominas_for_target_tx(&mut tx, target_id)?;
+    tx.commit()
+        .map_err(|e| format!("Error confirmando sincronización de nóminas: {}", e))?;
+    Ok(resumen)
 }
 
 /// Nombres distintos de conceptos de percepción del reporte,
@@ -656,6 +622,7 @@ pub fn fetch_percepcion_conceptos(
             JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
             WHERE UPPER(TRIM(t.nombre)) = 'PERCEPCIONES'
               AND TRIM(rdn.concepto) <> ''
+              AND rn.estado = 'ACTIVO'
             ORDER BY 1 ASC
             "#,
             &[],
@@ -691,6 +658,7 @@ pub fn fetch_percepciones_por_nomina(
             JOIN public.tipos_conceptos t ON t.id = c.id_tipo_concepto
             WHERE UPPER(TRIM(t.nombre)) = 'PERCEPCIONES'
               AND TRIM(rdn.concepto) <> ''
+              AND rn.estado = 'ACTIVO'
             "#,
             &[],
         )
@@ -1113,29 +1081,35 @@ pub fn update_dias_y_conceptos_nomina(
     nuevos_dias: f64,
     conceptos: &[(Uuid, f64)],
 ) -> Result<(), String> {
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("Error iniciando transacción de edición de nómina: {}", e))?;
+
     let mut total: f64 = 0.0;
     for (id_det, nuevo_imp) in conceptos {
         total += *nuevo_imp;
-        client
-            .execute(
-                "UPDATE public.reportes_detalles_nominas SET importe = $2 WHERE id = $1",
-                &[id_det, nuevo_imp],
-            )
-            .map_err(|e| format!("Error actualizando detalle de percepción {}: {}", id_det, e))?;
+        tx.execute(
+            "UPDATE public.reportes_detalles_nominas SET importe = $2 WHERE id = $1",
+            &[id_det, nuevo_imp],
+        )
+        .map_err(|e| format!("Error actualizando detalle de percepción {}: {}", id_det, e))?;
     }
 
-    client
-        .execute(
-            r#"
-            UPDATE public.reportes_nominas
-            SET num_dias_pagados = $2,
-                total_sueldos = $3,
-                total_gravado = $3
-            WHERE id = $1
-            "#,
-            &[&id_reporte_nomina, &nuevos_dias, &total],
-        )
-        .map_err(|e| format!("Error actualizando reporte de nómina: {}", e))?;
+    tx.execute(
+        r#"
+        UPDATE public.reportes_nominas
+        SET num_dias_pagados = $2,
+            total_sueldos = $3,
+            total_gravado = $3,
+            editado_usuario = true
+        WHERE id = $1
+        "#,
+        &[&id_reporte_nomina, &nuevos_dias, &total],
+    )
+    .map_err(|e| format!("Error actualizando reporte de nómina: {}", e))?;
+
+    tx.commit()
+        .map_err(|e| format!("Error confirmando edición de nómina: {}", e))?;
 
     Ok(())
 }
@@ -1199,6 +1173,7 @@ pub fn fetch_nominas_faltantes(
                 SUM(COALESCE(rn.num_dias_pagados, 0))::float8 AS dias_nomina
             FROM public.reportes_nominas rn
             WHERE (rn.fecha_final_pago IS NOT NULL OR rn.fecha_pago IS NOT NULL OR rn.fecha_inicial_pago IS NOT NULL)
+              AND rn.estado = 'ACTIVO'
               AND ($1::uuid IS NULL 
                    OR rn.id_revision = $1 
                    OR rn.id_registro_patronal = $1 
@@ -1247,6 +1222,7 @@ pub fn fetch_nominas_faltantes(
                    COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago)
             FROM public.reportes_nominas rn
             WHERE rn.id_empleado = $1
+              AND rn.estado = 'ACTIVO'
             ORDER BY COALESCE(rn.fecha_final_pago, rn.fecha_pago, rn.fecha_inicial_pago) DESC NULLS LAST
             LIMIT 1
             "#,
@@ -1381,9 +1357,9 @@ pub fn create_nomina_from_template(
                 total_impuestos_retenidos,
                 salario_base_cotizacion_aportacion,
                 salario_diario_integrado, salario_diario_calculado,
-                nombre_archivo
+                nombre_archivo, sintetica, editado_usuario
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, 0.0, 0.0, 0.0, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, 0.0, 0.0, 0.0, $12, $13, $14, $15, true, true)
             "#,
             &[
                 &new_id,
@@ -2007,5 +1983,44 @@ mod tests {
             *acc.entry(e).or_default() += d;
         }
         assert_eq!(acc[&e], 75.0);
+    }
+}
+#[cfg(test)]
+mod tests_sync_nominas {
+    use super::*;
+
+    fn balance(sql: &str) -> i64 {
+        sql.matches('(').count() as i64 - sql.matches(')').count() as i64
+    }
+
+    #[test]
+    fn parentesis_balanceados() {
+        assert_eq!(balance(&sql_insert_sync_nominas()), 0);
+        assert_eq!(balance(&sql_marcar_fuera_alcance()), 0);
+        assert_eq!(balance(&sql_marcar_activo()), 0);
+        assert_eq!(balance(&sql_nomina_en_alcance("n")), 0);
+        assert_eq!(balance(sql_reporte_nomina_en_target()), 0);
+    }
+
+    #[test]
+    fn sin_delete() {
+        assert!(!sql_insert_sync_nominas().contains("DELETE"));
+        assert!(!sql_marcar_fuera_alcance().contains("DELETE"));
+        assert!(!sql_marcar_activo().contains("DELETE"));
+        assert!(!sql_nomina_en_alcance("n").contains("DELETE"));
+        assert!(!sql_reporte_nomina_en_target().contains("DELETE"));
+    }
+
+    #[test]
+    fn marcar_fuera_alcance_protege_ediciones_y_sinteticas() {
+        let sql = sql_marcar_fuera_alcance();
+        assert!(sql.contains("editado_usuario = false"));
+        assert!(sql.contains("sintetica = false"));
+        assert!(sql.contains("NOT ("));
+    }
+
+    #[test]
+    fn insert_sync_es_idempotente() {
+        assert!(sql_insert_sync_nominas().contains("ON CONFLICT DO NOTHING"));
     }
 }

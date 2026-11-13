@@ -181,6 +181,64 @@ BEGIN
 END $$;
 "#;
 
+/// Correcciones IMSS/SIROC F0: el papel de trabajo de nóminas deja de borrarse; se marca su estado
+/// y se protegen las ediciones del analista y las nóminas sintéticas.
+pub(crate) const SQL_CORRECCIONES_F0_NOMINAS: &str = r#"
+ALTER TABLE public.reportes_nominas ADD COLUMN IF NOT EXISTS estado varchar(20) NOT NULL DEFAULT 'ACTIVO';
+ALTER TABLE public.reportes_nominas ADD COLUMN IF NOT EXISTS editado_usuario boolean NOT NULL DEFAULT false;
+ALTER TABLE public.reportes_nominas ADD COLUMN IF NOT EXISTS sintetica boolean NOT NULL DEFAULT false;
+ALTER TABLE IF EXISTS revision_history.reportes_nominas ADD COLUMN IF NOT EXISTS estado varchar(20);
+ALTER TABLE IF EXISTS revision_history.reportes_nominas ADD COLUMN IF NOT EXISTS editado_usuario boolean;
+ALTER TABLE IF EXISTS revision_history.reportes_nominas ADD COLUMN IF NOT EXISTS sintetica boolean;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_reportes_nominas_estado') THEN
+        ALTER TABLE public.reportes_nominas ADD CONSTRAINT chk_reportes_nominas_estado CHECK (estado IN ('ACTIVO','FUERA_ALCANCE'));
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_reportes_nominas_rev_estado ON public.reportes_nominas(id_revision, estado);
+
+-- Una sola copia por (revisión, nómina). Solo se crea si no hay duplicados; si los hay, solo avisa.
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_reportes_nominas_rev_nomina') THEN
+        SELECT COUNT(*) INTO n FROM (
+            SELECT 1 FROM public.reportes_nominas
+            WHERE id_nomina IS NOT NULL
+            GROUP BY id_revision, id_nomina
+            HAVING COUNT(*) > 1
+        ) g;
+        IF n = 0 THEN
+            CREATE UNIQUE INDEX uq_reportes_nominas_rev_nomina ON public.reportes_nominas(id_revision, id_nomina)
+                WHERE id_nomina IS NOT NULL;
+        ELSE
+            RAISE WARNING 'uq_reportes_nominas_rev_nomina omitida: existen % grupos duplicados en reportes_nominas', n;
+        END IF;
+    END IF;
+END $$;
+
+-- Marcado inicial (una sola vez): sintéticas = sin nómina maestra; editadas = días o sueldos distintos de la maestra.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.migraciones_aplicadas WHERE nombre = 'f0_reportes_nominas_marcas') THEN
+        UPDATE public.reportes_nominas SET sintetica = true WHERE id_nomina IS NULL AND sintetica = false;
+        UPDATE public.reportes_nominas rn
+        SET editado_usuario = true
+        FROM public.nominas n
+        WHERE n.id = rn.id_nomina
+          AND rn.editado_usuario = false
+          AND (
+              (
+                  ABS(COALESCE(rn.num_dias_pagados, 0) - COALESCE(n.num_dias_pagados, 0)) > 0.005
+                  AND ABS(COALESCE(rn.num_dias_pagados, 0) - COALESCE((n.fecha_final_pago - n.fecha_inicial_pago) + 1, n.num_dias_pagados, 0)) > 0.005
+              )
+              OR ABS(COALESCE(rn.total_sueldos, 0) - COALESCE(n.total_sueldos, 0)) > 0.005
+          );
+        INSERT INTO public.migraciones_aplicadas (nombre) VALUES ('f0_reportes_nominas_marcas');
+    END IF;
+END $$;
+"#;
+
 pub(crate) const SQL_FASE1_RESTRICCIONES: &str = r#"
 -- a) Empleados: NSS único por cliente (solo NSS no vacíos)
 DO $$
@@ -2188,6 +2246,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     // 13. Migraciones de datos de una sola vez (registradas en public.migraciones_aplicadas)
     exec_schema_step(client, "5_migraciones_unicas", SQL_MIGRACIONES_UNICAS)?;
 
+    // 14. Correcciones F0: estado/editado/sintética en reportes_nominas (no destructivo)
+    exec_schema_step(client, "6_correcciones_f0_nominas", SQL_CORRECCIONES_F0_NOMINAS)?;
+
     match restricciones_fase1_pendientes(client) {
         Ok(lista) if !lista.is_empty() => log::warn!(
             "Restricciones de integridad pendientes (hay duplicados por depurar): {}",
@@ -2351,6 +2412,31 @@ mod tests_fase1_ddl {
         assert!(SQL_FASE1_RESTRICCIONES.contains("RAISE WARNING"));
         assert!(!SQL_FASE1_RESTRICCIONES.contains("RAISE EXCEPTION"));
         assert!(!SQL_FASE1_RESTRICCIONES.contains("DROP TABLE"));
+    }
+
+    #[test]
+    fn correcciones_f0_nominas_es_aditiva_y_no_destructiva() {
+        for fragmento in [
+            "ADD COLUMN IF NOT EXISTS estado",
+            "ADD COLUMN IF NOT EXISTS editado_usuario",
+            "ADD COLUMN IF NOT EXISTS sintetica",
+            "uq_reportes_nominas_rev_nomina",
+            "RAISE WARNING",
+            "f0_reportes_nominas_marcas",
+        ] {
+            assert!(
+                SQL_CORRECCIONES_F0_NOMINAS.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F0_NOMINAS",
+                fragmento
+            );
+        }
+        for prohibido in ["RAISE EXCEPTION", "DROP TABLE", "DELETE FROM", "TRUNCATE"] {
+            assert!(
+                !SQL_CORRECCIONES_F0_NOMINAS.contains(prohibido),
+                "SQL_CORRECCIONES_F0_NOMINAS no debe contener {}",
+                prohibido
+            );
+        }
     }
 
     #[test]

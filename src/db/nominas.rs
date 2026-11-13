@@ -1033,107 +1033,162 @@ pub fn save_nominas_to_db(
     Ok(stats)
 }
 
-/// Elimina TODAS las nóminas y sus detalles de la base de
-/// datos, junto con las copias de las tablas de reporte.
-///
-/// Orden de borrado (respeta FKs):
-///   1. `reportes_detalles_nominas` / `reportes_nominas`
-///   2. `detalles_nominas` / `nominas`
-///   3. Purga de huérfanos: `lista_conceptos_cfdis`,
-///      `conceptos_cfdis`, `contratos` y `cfdis` que ya
-///      no referen ninguna nómina restante.
-///
-/// Los catálogos (`tipos_conceptos`, `conceptos`) son
-/// inmutables y nunca se tocan.
-pub fn delete_all_nominas(client: &mut Client) -> Result<u64, String> {
-    let rd = client
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConteoNominasRevision {
+    pub nominas: i64,
+    pub reportes: i64,
+}
+
+/// Cuenta las nóminas de una revisión y sus filas en el reporte de nóminas (para la confirmación de borrado).
+pub fn contar_nominas_de_revision(client: &mut Client, id_revision: Uuid) -> Result<ConteoNominasRevision, String> {
+    let nominas: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM public.nominas WHERE id_revision = $1",
+            &[&id_revision],
+        )
+        .map_err(|e| format!("Error contando nóminas de la revisión: {}", e))?
+        .get(0);
+    let reportes: i64 = client
+        .query_one(
+            r#"
+            SELECT COUNT(*) FROM public.reportes_nominas
+            WHERE id_revision = $1
+               OR id_nomina IN (SELECT id FROM public.nominas WHERE id_revision = $1)
+            "#,
+            &[&id_revision],
+        )
+        .map_err(|e| format!("Error contando reportes de nóminas de la revisión: {}", e))?
+        .get(0);
+    Ok(ConteoNominasRevision { nominas, reportes })
+}
+
+/// Elimina las nóminas de UNA revisión (y sus copias en el reporte de nóminas), en una transacción.
+/// Las nóminas de otras revisiones y clientes no se tocan. Solo se purgan los CFDI/contratos/conceptos
+/// de CFDI que pertenecían a las nóminas borradas y quedaron sin referencias.
+pub fn delete_nominas_de_revision(client: &mut Client, id_revision: Uuid) -> Result<u64, String> {
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("Error iniciando transacción de borrado: {}", e))?;
+    let total = delete_nominas_de_revision_tx(&mut tx, id_revision)?;
+    tx.commit()
+        .map_err(|e| format!("Error confirmando borrado de nóminas: {}", e))?;
+    Ok(total)
+}
+
+/// Versión transaccional: ejecuta el borrado dentro de una transacción ya abierta (sin begin/commit).
+pub fn delete_nominas_de_revision_tx(
+    tx: &mut postgres::Transaction<'_>,
+    id_revision: Uuid,
+) -> Result<u64, String> {
+    let cfdis: Vec<Uuid> = tx
+        .query(
+            "SELECT DISTINCT id_cfdi FROM public.nominas WHERE id_revision = $1 AND id_cfdi IS NOT NULL",
+            &[&id_revision],
+        )
+        .map_err(|e| format!("Error consultando CFDI de la revisión: {}", e))?
+        .iter()
+        .map(|r| r.get::<_, Uuid>(0))
+        .collect();
+
+    let conceptos: Vec<Uuid> = if cfdis.is_empty() {
+        Vec::new()
+    } else {
+        tx.query(
+            "SELECT DISTINCT id_concepto_cfdi FROM public.lista_conceptos_cfdis WHERE id_cfdi = ANY($1)",
+            &[&cfdis],
+        )
+        .map_err(|e| format!("Error consultando conceptos de CFDI: {}", e))?
+        .iter()
+        .map(|r| r.get::<_, Uuid>(0))
+        .collect()
+    };
+
+    let rd = tx
         .execute(
             r#"
             DELETE FROM public.reportes_detalles_nominas
             WHERE id_reporte_nomina IN (
                 SELECT id FROM public.reportes_nominas
+                WHERE id_revision = $1
+                   OR id_nomina IN (SELECT id FROM public.nominas WHERE id_revision = $1)
             )
             "#,
-            &[],
+            &[&id_revision],
         )
-        .map_err(|e| {
-            format!("Error eliminando reportes_detalles_nominas: {}", e)
-        })?;
-    let rn = client
-        .execute("DELETE FROM public.reportes_nominas", &[])
+        .map_err(|e| format!("Error eliminando reportes_detalles_nominas: {}", e))?;
+    let rn = tx
+        .execute(
+            r#"
+            DELETE FROM public.reportes_nominas
+            WHERE id_revision = $1
+               OR id_nomina IN (SELECT id FROM public.nominas WHERE id_revision = $1)
+            "#,
+            &[&id_revision],
+        )
         .map_err(|e| format!("Error eliminando reportes_nominas: {}", e))?;
-    let dn = client
-        .execute("DELETE FROM public.detalles_nominas", &[])
+    let dn = tx
+        .execute(
+            "DELETE FROM public.detalles_nominas WHERE id_nomina IN (SELECT id FROM public.nominas WHERE id_revision = $1)",
+            &[&id_revision],
+        )
         .map_err(|e| format!("Error eliminando detalles de nóminas: {}", e))?;
-    let n = client
-        .execute("DELETE FROM public.nominas", &[])
+    let n = tx
+        .execute("DELETE FROM public.nominas WHERE id_revision = $1", &[&id_revision])
         .map_err(|e| format!("Error eliminando nóminas: {}", e))?;
 
-    // Purga de CFDI, contratos y conceptos de CFDI que
-    // quedaron huérfanos tras borrar las nóminas.
-    let lc = client
-        .execute(
-            r#"
-            DELETE FROM public.lista_conceptos_cfdis
-            WHERE id_cfdi IN (
-                SELECT cf.id FROM public.cfdis cf
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM public.nominas n2
-                    WHERE n2.id_cfdi = cf.id
-                )
+    // Purga de CFDI, contratos y conceptos de CFDI que quedaron sin referencias
+    // por las nóminas borradas. Solo aplica a los CFDI que pertenecían a la revisión.
+    let (lc, cc, ct, cf) = if cfdis.is_empty() {
+        (0, 0, 0, 0)
+    } else {
+        let lc = tx
+            .execute(
+                r#"
+                DELETE FROM public.lista_conceptos_cfdis lc
+                WHERE lc.id_cfdi = ANY($1)
+                  AND NOT EXISTS (SELECT 1 FROM public.nominas n2 WHERE n2.id_cfdi = lc.id_cfdi)
+                "#,
+                &[&cfdis],
             )
-            "#,
-            &[],
-        )
-        .map_err(|e| {
-            format!("Error eliminando lista_conceptos_cfdis: {}", e)
-        })?;
-    let cc = client
-        .execute(
-            r#"
-            DELETE FROM public.conceptos_cfdis cc
-            WHERE NOT EXISTS (
-                SELECT 1 FROM public.lista_conceptos_cfdis lc
-                WHERE lc.id_concepto_cfdi = cc.id
+            .map_err(|e| format!("Error eliminando lista_conceptos_cfdis: {}", e))?;
+        let cc = tx
+            .execute(
+                r#"
+                DELETE FROM public.conceptos_cfdis cc
+                WHERE cc.id = ANY($1)
+                  AND NOT EXISTS (SELECT 1 FROM public.lista_conceptos_cfdis lc WHERE lc.id_concepto_cfdi = cc.id)
+                "#,
+                &[&conceptos],
             )
-            "#,
-            &[],
-        )
-        .map_err(|e| {
-            format!("Error eliminando conceptos_cfdis: {}", e)
-        })?;
-    let ct = client
-        .execute(
-            r#"
-            DELETE FROM public.contratos ct
-            WHERE NOT EXISTS (
-                SELECT 1 FROM public.cfdis cf
-                WHERE cf.id = ct.id_cfdi
+            .map_err(|e| format!("Error eliminando conceptos_cfdis: {}", e))?;
+        let ct = tx
+            .execute(
+                r#"
+                DELETE FROM public.contratos ct
+                WHERE ct.id_cfdi = ANY($1)
+                  AND NOT EXISTS (SELECT 1 FROM public.nominas n WHERE n.id_cfdi = ct.id_cfdi)
+                "#,
+                &[&cfdis],
             )
-            "#,
-            &[],
-        )
-        .map_err(|e| {
-            format!("Error eliminando contratos: {}", e)
-        })?;
-    let cf = client
-        .execute(
-            r#"
-            DELETE FROM public.cfdis cf
-            WHERE NOT EXISTS (
-                SELECT 1 FROM public.nominas n3
-                WHERE n3.id_cfdi = cf.id
+            .map_err(|e| format!("Error eliminando contratos: {}", e))?;
+        let cf = tx
+            .execute(
+                r#"
+                DELETE FROM public.cfdis cf
+                WHERE cf.id = ANY($1)
+                  AND NOT EXISTS (SELECT 1 FROM public.nominas n3 WHERE n3.id_cfdi = cf.id)
+                "#,
+                &[&cfdis],
             )
-            "#,
-            &[],
-        )
-        .map_err(|e| format!("Error eliminando CFDI: {}", e))?;
+            .map_err(|e| format!("Error eliminando CFDI: {}", e))?;
+        (lc, cc, ct, cf)
+    };
 
     log::info!(
-        "Borrado total de nóminas: {} reportes_detalles, {} reportes, \
+        "Borrado de nóminas de la revisión {}: {} reportes_detalles, {} reportes, \
          {} detalles, {} nominas, {} lista_cfdi, {} conceptos_cfdi, \
          {} contratos, {} cfdi",
-        rd, rn, dn, n, lc, cc, ct, cf
+        id_revision, rd, rn, dn, n, lc, cc, ct, cf
     );
     Ok(rd + rn + dn + n + lc + cc + ct + cf)
 }

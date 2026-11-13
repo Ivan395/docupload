@@ -2214,7 +2214,6 @@ pub fn batch_save_reporte_row_updates(
             return Err(format!("Error en commit de actualización: {}", e));
         }
     }
-    let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(client);
     Ok(updated_count)
 }
 
@@ -3671,7 +3670,6 @@ pub fn batch_assign_multiple_obras_to_employees(
         .map_err(|e| format!("Error cerrando bitácora de edición: {}", e))?;
 
     tx.commit().map_err(|e| format!("Error en commit de asignación masiva de obras: {}", crate::db::schema::format_pg_error(&e)))?;
-    let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(client);
 
     Ok(BatchAssignMultiObrasResult {
         employees_updated,
@@ -3860,7 +3858,6 @@ pub fn batch_update_reporte_rows(
         &format!("Transacción por lote completada con éxito. Filas actualizadas: {}", updated_count),
         "tx.commit()",
     );
-    let _ = crate::db::nominas_reporte::copy_nominas_a_reportes(client);
     Ok(updated_count)
 }
 
