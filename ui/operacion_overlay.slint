@@ -27,14 +27,13 @@ export component OperacionEnCursoOverlay inherits Rectangle {
                 spacing: 12px;
                 alignment: start;
 
-                // Indicador giratorio de texto (cambia cada 150 ms)
-                Text {
-                    property <int> paso: Math.mod(Math.floor(animation-tick() / 150ms), 8);
-                    text: paso == 0 ? "⠋" : paso == 1 ? "⠙" : paso == 2 ? "⠹" : paso == 3 ? "⠸"
-                        : paso == 4 ? "⠼" : paso == 5 ? "⠴" : paso == 6 ? "⠦" : "⠧";
-                    font-size: 26px;
-                    color: #1d4ed8;
-                    vertical-alignment: center;
+                // Indicador de carga: icono que gira continuamente (una vuelta cada 900 ms)
+                Image {
+                    source: @image-url("assets/icons/loader.svg");
+                    colorize: #1d4ed8;
+                    width: 22px;
+                    height: 22px;
+                    transform-rotation: Math.mod(animation-tick() / 1ms, 900) / 900 * 360deg;
                 }
 
                 Text {

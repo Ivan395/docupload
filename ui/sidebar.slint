@@ -44,13 +44,7 @@ export component Sidebar inherits Rectangle {
                         border-radius: 8px;
                         background: #1e3a8a;
 
-                        Text {
-                            text: "🏛";
-                            font-size: 20px;
-                            color: #ffffff;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                        Image { source: @image-url("assets/icons/landmark.svg"); colorize: #ffffff; width: 22px; height: 22px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                     }
 
                     VerticalLayout {
@@ -73,14 +67,7 @@ export component Sidebar inherits Rectangle {
                     border-radius: 6px;
                     background: btn_collapse_sb.has-hover ? #f1f5f9 : transparent;
 
-                    Text {
-                        text: "◀";
-                        font-size: 12px;
-                        font-weight: 800;
-                        color: btn_collapse_sb.has-hover ? #1e3a8a : #94a3b8;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+                    Image { source: @image-url("assets/icons/chevrons-left.svg"); colorize: btn_collapse_sb.has-hover ? #1e3a8a : #94a3b8; width: 14px; height: 14px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
 
                     btn_collapse_sb := TouchArea {
                         mouse-cursor: pointer;
@@ -113,7 +100,8 @@ export component Sidebar inherits Rectangle {
                     HorizontalLayout {
                         spacing: 8px;
                         alignment: center;
-                        Text { text: "←"; font-size: 14px; color: AppData.current_view == 0 ? #1d4ed8 : #475569; font-weight: 700; }
+                        cross-axis-alignment: center;
+                        Image { source: @image-url("assets/icons/home.svg"); colorize: AppData.current_view == 0 ? #1d4ed8 : #475569; width: 16px; height: 16px; }
                         Text {
                             text: "Auditoría General";
                             font-size: 12.5px;
@@ -172,11 +160,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "🏢";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/users.svg"); colorize: AppData.current_view == 1 ? #ffffff : #1e293b; width: 17px; height: 17px; }
                             Text {
                                 text: "Clientes";
                                 font-size: 13.5px;
@@ -224,11 +209,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "📜";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/id-card.svg"); colorize: AppData.current_view == 2 ? #ffffff : (root.can_go_rp ? #1e293b : #94a3b8); width: 17px; height: 17px; }
                             Text {
                                 text: "Registros Patronales";
                                 font-size: 13.5px;
@@ -282,11 +264,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "📋";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/clipboard-list.svg"); colorize: AppData.current_view == 3 ? #ffffff : (root.can_go_revisiones ? #1e293b : #94a3b8); width: 17px; height: 17px; }
                             Text {
                                 text: "Revisiones";
                                 font-size: 13.5px;
@@ -340,11 +319,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "🏗";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/building.svg"); colorize: AppData.current_view == 4 ? #ffffff : (root.can_go_obras ? #1e293b : #94a3b8); width: 17px; height: 17px; }
                             Text {
                                 text: "Registros de Obras";
                                 font-size: 13.5px;
@@ -398,11 +374,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "👥";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/user.svg"); colorize: AppData.current_view == 5 ? #ffffff : (root.can_go_empleados ? #1e293b : #94a3b8); width: 17px; height: 17px; }
                             Text {
                                 text: "Empleados";
                                 font-size: 13.5px;
@@ -456,11 +429,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "📑";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/file-text.svg"); colorize: AppData.current_view == 6 ? #ffffff : (root.can_go_cedulas ? #1e293b : #94a3b8); width: 17px; height: 17px; }
                             Text {
                                 text: "Cédula de Cuotas";
                                 font-size: 13.5px;
@@ -514,11 +484,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "📊";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/chart-bar.svg"); colorize: AppData.current_view == 7 ? #ffffff : (root.can_go_reporte ? #1e293b : #94a3b8); width: 17px; height: 17px; }
                             Text {
                                 text: "Reporte Liquidaciones";
                                 font-size: 13.5px;
@@ -571,11 +538,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "📅";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/calendar.svg"); colorize: AppData.current_view == 8 ? #ffffff : #1e293b; width: 17px; height: 17px; }
                             Text {
                                 text: "Calendario Fiscal";
                                 font-size: 13.5px;
@@ -625,11 +589,8 @@ export component Sidebar inherits Rectangle {
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
-                            Text {
-                                text: "💵";
-                                font-size: 15px;
-                                vertical-alignment: center;
-                            }
+                            cross-axis-alignment: center;
+                            Image { source: @image-url("assets/icons/receipt.svg"); colorize: AppData.current_view == 9 ? #ffffff : (root.can_go_nominas ? #1e293b : #94a3b8); width: 17px; height: 17px; }
                             Text {
                                 text: "Reporte Nóminas";
                                 font-size: 13.5px;

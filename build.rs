@@ -1,5 +1,8 @@
 fn main() {
-    slint_build::compile("ui/main_view.slint").unwrap();
+    // Estilo fijo claro: evita que los widgets estándar sigan el modo oscuro del SO (Windows/macOS/GNOME/KDE)
+    // y queden ilegibles sobre los fondos claros de la aplicación.
+    let config = slint_build::CompilerConfiguration::new().with_style("fluent-light".into());
+    slint_build::compile_with_config("ui/main_view.slint", config).unwrap();
 
     #[cfg(windows)]
     {

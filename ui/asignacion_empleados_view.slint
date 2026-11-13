@@ -45,7 +45,8 @@ component AsigChip inherits Rectangle {
 // variante: 0 neutro, 1 primario, 2 ámbar (destacado)
 component AsigBoton inherits Rectangle {
     in property <string> texto;
-    in property <string> icono: "";
+    in property <image> icono;
+    in property <bool> tiene_icono: false;
     in property <int> variante: 0;
     in property <bool> pequeno: false;
     in property <bool> habilitado: true;
@@ -67,17 +68,17 @@ component AsigBoton inherits Rectangle {
     HorizontalLayout {
         alignment: center;
         spacing: 5px;
-        padding-left: 8px;
-        padding-right: 8px;
+        padding-left: root.texto == "" ? 4px : 8px;
+        padding-right: root.texto == "" ? 4px : 8px;
 
-        if root.icono != "" : Text {
-            text: root.icono;
-            font-size: 12px;
-            color: root.variante == 1 ? #ffffff : #475569;
-            vertical-alignment: center;
+        if root.tiene_icono : Image {
+            source: root.icono;
+            colorize: root.variante == 1 ? #ffffff : #475569;
+            width: 14px;
+            height: 14px;
         }
 
-        Text {
+        if root.texto != "" : Text {
             text: root.texto;
             font-size: root.pequeno ? 11px : 12px;
             font-weight: 700;
@@ -141,11 +142,11 @@ component AsigObraPicker inherits Rectangle {
             horizontal-stretch: 1;
         }
 
-        Text {
-            text: "▾";
-            font-size: 10px;
-            color: #64748b;
-            vertical-alignment: center;
+        Image {
+            source: @image-url("assets/icons/chevron-down.svg");
+            colorize: #64748b;
+            width: 12px;
+            height: 12px;
         }
     }
 
@@ -333,12 +334,15 @@ export component AsignacionEmpleadosView inherits FocusScope {
                         }
                         AsigBoton {
                             texto: "Cédula actualizada (" + AppData.asig_cedula_actualizada + ")";
-                            icono: "📄";
+                            icono: @image-url("assets/icons/file-text.svg");
+                            tiene_icono: true;
                             pequeno: true;
                             clicked => { AppLogic.asig_filtrar(5); }
                         }
                         AsigBoton {
-                            texto: "🪄 Asistente de asignación";
+                            texto: "Asistente de asignación";
+                            icono: @image-url("assets/icons/wand.svg");
+                            tiene_icono: true;
                             pequeno: true;
                             variante: 1;
                             clicked => { AppLogic.asig_asistente_abrir(); }
@@ -360,14 +364,17 @@ export component AsignacionEmpleadosView inherits FocusScope {
                     spacing: 4px;
 
                     AsigBoton {
-                        texto: "🪄 Asistente de asignación";
+                        texto: "Asistente de asignación";
+                            icono: @image-url("assets/icons/wand.svg");
+                            tiene_icono: true;
                         variante: 1;
                         clicked => { AppLogic.asig_asistente_abrir(); }
                     }
 
                     AsigBoton {
                         texto: "Deshacer";
-                        icono: "↶";
+                        icono: @image-url("assets/icons/undo.svg");
+                        tiene_icono: true;
                         habilitado: AppData.asig_puede_deshacer;
                         clicked => { AppLogic.asig_deshacer(); }
                     }
@@ -495,17 +502,18 @@ export component AsignacionEmpleadosView inherits FocusScope {
                                         horizontal-stretch: 1;
                                     }
 
-                                    if f.tiene_inconsistencia : Text {
-                                        text: "⚠";
-                                        font-size: 12px;
-                                        color: #dc2626;
-                                        vertical-alignment: center;
+                                    if f.tiene_inconsistencia : Image {
+                                        source: @image-url("assets/icons/alert-triangle.svg");
+                                        colorize: #dc2626;
+                                        width: 14px;
+                                        height: 14px;
                                     }
 
-                                    if f.cedula_actualizada : Text {
-                                        text: "📄";
-                                        font-size: 11px;
-                                        vertical-alignment: center;
+                                    if f.cedula_actualizada : Image {
+                                        source: @image-url("assets/icons/file-text.svg");
+                                        colorize: #000000;
+                                        width: 13px;
+                                        height: 13px;
                                     }
                                 }
 
@@ -546,7 +554,7 @@ export component AsignacionEmpleadosView inherits FocusScope {
                                 }
 
                                 if c.es_baja : Text {
-                                    text: "🔒 Baja";
+                                    text: "Baja";
                                     font-size: 11px;
                                     color: #64748b;
                                     horizontal-alignment: center;
@@ -608,7 +616,8 @@ export component AsignacionEmpleadosView inherits FocusScope {
                     AsigBoton {
                         width: 230px;
                         texto: "Revertir empleado a cédula";
-                        icono: "↺";
+                        icono: @image-url("assets/icons/undo.svg");
+                        tiene_icono: true;
                         clicked => { AppLogic.asig_revertir_empleado(AppData.asig_empleado_sel_id); }
                     }
                 }
@@ -688,7 +697,7 @@ export component AsignacionEmpleadosView inherits FocusScope {
                                         AsigObraPicker {
                                             width: 100px;
                                             opciones: AppData.asig_obras;
-                                            placeholder: "↔ Cambiar";
+                                            placeholder: "Cambiar";
                                             fijo: true;
                                             mostrar_numero: true;
                                             ancho_lista: 180px;
@@ -700,7 +709,9 @@ export component AsignacionEmpleadosView inherits FocusScope {
                                         AsigBoton {
                                             width: 26px;
                                             pequeno: true;
-                                            texto: "✕";
+                                            texto: "";
+                                            icono: @image-url("assets/icons/x.svg");
+                                            tiene_icono: true;
                                             clicked => { AppLogic.asig_quitar(c.id_reporte, ch.id_obra); }
                                         }
                                     }
@@ -756,7 +767,8 @@ export component AsignacionEmpleadosView inherits FocusScope {
 
                                     AsigBoton {
                                         texto: "Copiar mes anterior";
-                                        icono: "⇤";
+                                        icono: @image-url("assets/icons/skip-back.svg");
+                                        tiene_icono: true;
                                         pequeno: true;
                                         clicked => { AppLogic.asig_copiar_mes_anterior(c.id_reporte); }
                                     }

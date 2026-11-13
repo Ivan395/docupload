@@ -56,16 +56,14 @@ component ObraCasilla inherits Rectangle {
     border-color: root.marcado ? #1d4ed8 : #94a3b8;
     background: root.marcado ? #1d4ed8 : #ffffff;
 
-    Text {
-        width: parent.width;
-        height: parent.height;
+    Image {
         visible: root.marcado;
-        text: "✓";
-        color: #ffffff;
-        font-size: 12px;
-        font-weight: 700;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+        source: @image-url("assets/icons/check.svg");
+        colorize: #ffffff;
+        width: 14px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
     }
 
     casilla_touch := TouchArea {
@@ -118,11 +116,21 @@ component TarjetaObraItem inherits Rectangle {
             overflow: elide;
         }
 
-        Text {
-            text: root.t.sin_monto ? "⚠ Sin monto" : "Monto: $" + root.t.monto;
-            font-size: 11px;
-            font-weight: 600;
-            color: root.t.sin_monto ? #b45309 : #334155;
+        HorizontalLayout {
+            spacing: 4px;
+            alignment: start;
+            if root.t.sin_monto : Image {
+                source: @image-url("assets/icons/alert-triangle.svg");
+                colorize: #b45309;
+                width: 13px;
+                height: 13px;
+            }
+            Text {
+                text: root.t.sin_monto ? "Sin monto" : "Monto: $" + root.t.monto;
+                font-size: 11px;
+                font-weight: 600;
+                color: root.t.sin_monto ? #b45309 : #334155;
+            }
         }
 
         Text {
@@ -138,15 +146,31 @@ component TarjetaObraItem inherits Rectangle {
             border-radius: 5px;
             background: root.t.supera_18 ? #fee2e2 : #dcfce7;
 
-            Text {
+            HorizontalLayout {
                 width: parent.width;
                 height: parent.height;
-                text: root.t.supera_18 ? "⚠ Supera 18%" : "✓ Dentro del 18%";
-                font-size: 11px;
-                font-weight: 700;
-                color: root.t.supera_18 ? #991b1b : #166534;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+                alignment: center;
+                spacing: 4px;
+                if root.t.supera_18 : Image {
+                    source: @image-url("assets/icons/alert-triangle.svg");
+                    colorize: #991b1b;
+                    width: 13px;
+                    height: 13px;
+                }
+                if !root.t.supera_18 : Image {
+                    source: @image-url("assets/icons/check.svg");
+                    colorize: #166534;
+                    width: 13px;
+                    height: 13px;
+                }
+                Text {
+                    text: root.t.supera_18 ? "Supera 18%" : "Dentro del 18%";
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: root.t.supera_18 ? #991b1b : #166534;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
 

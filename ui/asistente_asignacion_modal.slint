@@ -58,11 +58,25 @@ component AstOpcion inherits Rectangle {
         padding-right: 10px;
         spacing: 8px;
 
-        Text {
-            text: root.seleccionada ? "●" : "○";
-            font-size: 13px;
-            color: #1d4ed8;
-            vertical-alignment: center;
+        Rectangle {
+            width: 14px;
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 7px;
+                border-width: 2px;
+                border-color: #1d4ed8;
+                background: #ffffff;
+                if root.seleccionada : Rectangle {
+                    width: 6px;
+                    height: 6px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 3px;
+                    background: #1d4ed8;
+                }
+            }
         }
 
         VerticalLayout {
@@ -124,13 +138,23 @@ export component AsistenteAsignacionModal inherits Rectangle {
                 height: 28px;
                 spacing: 8px;
 
-                Text {
-                    text: "🪄 Asistente de asignación masiva";
-                    font-size: 15px;
-                    font-weight: 800;
-                    color: #0f172a;
-                    vertical-alignment: center;
+                HorizontalLayout {
+                    spacing: 8px;
                     horizontal-stretch: 1;
+                    Image {
+                        source: @image-url("assets/icons/wand.svg");
+                        colorize: #0f172a;
+                        width: 17px;
+                        height: 17px;
+                    }
+                    Text {
+                        text: "Asistente de asignación masiva";
+                        font-size: 15px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
                 }
 
                 Text {

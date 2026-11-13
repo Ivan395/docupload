@@ -6,6 +6,11 @@ export component TopBar inherits Rectangle {
     border-width: 1px;
     border-color: #e2e8f0;
 
+    // Ancho copiado desde un callback (no un binding) para decidir qué textos mostrar sin ciclos de layout
+    property <length> ancho_barra: 1200px;
+    changed width => { root.ancho_barra = root.width; }
+    init => { root.ancho_barra = root.width; }
+
     HorizontalLayout {
         padding-left: 24px;
         padding-right: 24px;
@@ -28,14 +33,7 @@ export component TopBar inherits Rectangle {
                 HorizontalLayout {
                     alignment: center;
                     cross-axis-alignment: center;
-                    Text {
-                        text: "☰";
-                        font-size: 17px;
-                        font-weight: 800;
-                        color: #1e3a8a;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+                    Image { source: @image-url("assets/icons/menu.svg"); colorize: #1e3a8a; width: 19px; height: 19px; }
                 }
 
                 btn_burger := TouchArea {
@@ -60,13 +58,16 @@ export component TopBar inherits Rectangle {
                     spacing: 6px;
                     alignment: center;
 
-                    Text { text: "←"; font-size: 14px; font-weight: 800; color: #1d4ed8; }
+                    cross-axis-alignment: center;
+
+                    Image { source: @image-url("assets/icons/chevron-left.svg"); colorize: #1d4ed8; width: 16px; height: 16px; }
                     Text {
                         text: "Volver a Clientes (F2)";
                         font-size: 13px;
                         font-weight: 700;
                         color: #1d4ed8;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
 
@@ -86,6 +87,7 @@ export component TopBar inherits Rectangle {
                     color: #475569;
                     letter-spacing: 0.5px;
                     vertical-alignment: center;
+                    overflow: elide;
                 }
                 Rectangle {
                     height: 20px;
@@ -100,6 +102,7 @@ export component TopBar inherits Rectangle {
                             font-weight: 700;
                             color: #64748b;
                             vertical-alignment: center;
+                            overflow: elide;
                         }
                     }
                 }
@@ -116,12 +119,16 @@ export component TopBar inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                 }
 
+                // Nombre del cliente: se recorta con elipsis y cede espacio antes que los demás elementos
                 Text {
                     text: AppData.selected_cliente_nombre != "" ? AppData.selected_cliente_nombre : "Cliente Seleccionado";
                     font-size: 15px;
                     font-weight: 800;
                     color: #0f172a;
                     vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    min-width: 0px;
                 }
 
                 if AppData.selected_cliente_rfc != "" : Rectangle {
@@ -139,6 +146,7 @@ export component TopBar inherits Rectangle {
                             font-weight: 700;
                             color: #1d4ed8;
                             vertical-alignment: center;
+                            overflow: elide;
                         }
                     }
                 }
@@ -154,6 +162,7 @@ export component TopBar inherits Rectangle {
                     color: #475569;
                     letter-spacing: 0.5px;
                     vertical-alignment: center;
+                    overflow: elide;
                 }
                 Rectangle {
                     height: 20px;
@@ -168,6 +177,7 @@ export component TopBar inherits Rectangle {
                             font-weight: 700;
                             color: #64748b;
                             vertical-alignment: center;
+                            overflow: elide;
                         }
                     }
                 }
@@ -175,6 +185,9 @@ export component TopBar inherits Rectangle {
         }
 
         // Derecha: Quick Info, DB Status, Usuario
+        // Modos compactos según root.ancho_barra:
+        //   < 1500px: botón Actualizaciones solo icono; pill de BD solo punto + "BD"
+        //   < 1250px: "Elegir analista" solo icono; bloque nombre/rol del auditor oculto
         HorizontalLayout {
             spacing: 12px;
             alignment: center;
@@ -193,17 +206,16 @@ export component TopBar inherits Rectangle {
                     spacing: 6px;
                     alignment: center;
 
-                    Text {
-                        text: "🚀";
-                        font-size: 13px;
-                        vertical-alignment: center;
-                    }
+                    cross-axis-alignment: center;
+
+                    Image { source: @image-url("assets/icons/download.svg"); colorize: #1d4ed8; width: 15px; height: 15px; }
                     Text {
                         text: "Actualización " + AppData.update_version + " disponible";
                         font-size: 12px;
                         font-weight: 800;
                         color: #1d4ed8;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
 
@@ -214,6 +226,7 @@ export component TopBar inherits Rectangle {
             }
 
             // Analista en sesión (ADD-05): clic para elegir o cambiar
+            // En modo compacto (< 1250px) solo se muestra el icono
             Rectangle {
                 height: 30px;
                 border-radius: 15px;
@@ -222,16 +235,23 @@ export component TopBar inherits Rectangle {
                 border-color: analista_touch.has-hover ? #3b82f6 : #cbd5e1;
 
                 HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
+                    padding-left: root.ancho_barra < 1250px ? 10px : 12px;
+                    padding-right: root.ancho_barra < 1250px ? 10px : 12px;
                     alignment: center;
 
-                    Text {
-                        text: "👤 " + (AppData.analista_actual_nombre != "" ? AppData.analista_actual_nombre : "Elegir analista");
+                    spacing: 6px;
+
+                    cross-axis-alignment: center;
+
+                    Image { source: @image-url("assets/icons/user.svg"); colorize: #1e3a8a; width: 14px; height: 14px; }
+
+                    if root.ancho_barra >= 1250px : Text {
+                        text: (AppData.analista_actual_nombre != "" ? AppData.analista_actual_nombre : "Elegir analista");
                         font-size: 12px;
                         font-weight: 700;
                         color: #1e3a8a;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
 
@@ -242,30 +262,31 @@ export component TopBar inherits Rectangle {
             }
 
             // Botón manual de comprobación de actualizaciones
+            // En modo compacto (< 1500px) solo se muestra el icono, con tamaño ≈ 34×34
             Rectangle {
-                height: 30px;
+                height: root.ancho_barra < 1500px ? 34px : 30px;
+                min-width: root.ancho_barra < 1500px ? 34px : 0px;
                 border-radius: 6px;
                 background: btn_check_touch.has-hover ? #f1f5f9 : transparent;
                 border-width: 1px;
                 border-color: btn_check_touch.has-hover ? #cbd5e1 : #e2e8f0;
 
                 HorizontalLayout {
-                    padding-left: 8px;
-                    padding-right: 8px;
+                    padding-left: root.ancho_barra < 1500px ? 10px : 8px;
+                    padding-right: root.ancho_barra < 1500px ? 10px : 8px;
                     spacing: 6px;
                     alignment: center;
 
-                    Text {
-                        text: AppData.update_checking ? "⏳" : "🔄";
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
-                    Text {
+                    cross-axis-alignment: center;
+
+                    Image { source: @image-url("assets/icons/refresh.svg"); colorize: #475569; width: 14px; height: 14px; }
+                    if root.ancho_barra >= 1500px : Text {
                         text: AppData.update_checking ? "Buscando..." : "Actualizaciones";
                         font-size: 11px;
                         font-weight: 700;
                         color: #475569;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
 
@@ -280,6 +301,7 @@ export component TopBar inherits Rectangle {
             }
 
             // DB Sincronizada badge (Verificación dinámica en tiempo real)
+            // En modo compacto (< 1500px) muestra solo el punto de color y "BD"
             Rectangle {
                 height: 30px;
                 border-radius: 15px;
@@ -301,11 +323,12 @@ export component TopBar inherits Rectangle {
                         y: (parent.height - self.height) / 2;
                     }
                     Text {
-                        text: AppData.db_status_text;
+                        text: root.ancho_barra < 1500px ? "BD" : AppData.db_status_text;
                         font-size: 12px;
                         font-weight: 700;
                         color: AppData.db_connected ? #065f46 : #991b1b;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
 
@@ -322,7 +345,8 @@ export component TopBar inherits Rectangle {
                 spacing: 8px;
                 alignment: center;
 
-                VerticalLayout {
+                // Nombre y rol del auditor: se oculta en modo compacto (< 1250px); el avatar permanece
+                if root.ancho_barra >= 1250px : VerticalLayout {
                     alignment: center;
                     spacing: 1px;
                     Text {
@@ -331,12 +355,14 @@ export component TopBar inherits Rectangle {
                         font-weight: 700;
                         color: #1e293b;
                         horizontal-alignment: right;
+                        overflow: elide;
                     }
                     Text {
                         text: "Auditor Sr. IMSS";
                         font-size: 11px;
                         color: #64748b;
                         horizontal-alignment: right;
+                        overflow: elide;
                     }
                 }
 
@@ -346,13 +372,7 @@ export component TopBar inherits Rectangle {
                     border-radius: 16px;
                     background: #1e3a8a;
 
-                    Text {
-                        text: "👤";
-                        font-size: 14px;
-                        color: #ffffff;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+                    Image { source: @image-url("assets/icons/user.svg"); colorize: #ffffff; width: 16px; height: 16px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                 }
             }
         }

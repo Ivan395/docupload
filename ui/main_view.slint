@@ -1,4 +1,11 @@
 import { ScrollView } from "std-widgets.slint";
+import "fonts/NotoSans-Regular.ttf";
+import "fonts/NotoSans-Medium.ttf";
+import "fonts/NotoSans-SemiBold.ttf";
+import "fonts/NotoSans-Bold.ttf";
+import "fonts/NotoSans-ExtraBold.ttf";
+import "fonts/NotoSansMono-Regular.ttf";
+import "fonts/NotoSansMono-Bold.ttf";
 import { NavBar } from "navbar.slint";
 import { Sidebar } from "sidebar.slint";
 import { TopBar } from "topbar.slint";
@@ -26,19 +33,42 @@ import { OperacionEnCursoOverlay } from "operacion_overlay.slint";
 export component MainWindow inherits Window {
     title: "Firma Fiscal ACD v0.5.0 - IMSS Correcciones Patronales";
     icon: @image-url("assets/app_icon.png");
-    min-width: 1240px;
-    min-height: 820px;
+    min-width: 1024px;
+    min-height: 640px;
     preferred-width: 1440px;
     preferred-height: 900px;
     background: #f4f6fa;
-    default-font-family: "Segoe UI, sans-serif";
+    default-font-family: "Noto Sans";
+
+    // Ancho de la ventana copiado desde un callback `changed` (no desde un binding) para no crear un
+    // ciclo entre el ancho de la ventana y el layout que depende de si el sidebar está anclado.
+    property <length> ancho_ventana: 1440px;
+    // Ancho mínimo de ventana para anclar el sidebar; por debajo se muestra superpuesto y no le quita ancho al contenido.
+    property <bool> sidebar_overlay: root.ancho_ventana < 1280px;
+    changed width => { root.ancho_ventana = root.width; }
+
+    // Al pasar a modo superpuesto se cierra el sidebar para no tapar el contenido.
+    changed sidebar_overlay => {
+        if (root.sidebar_overlay) { AppData.is_sidebar_open = false; }
+    }
+
+    // En modo superpuesto, navegar a otra vista cierra el sidebar.
+    property <int> vista_actual: AppData.current_view;
+    changed vista_actual => {
+        if (root.sidebar_overlay) { AppData.is_sidebar_open = false; }
+    }
+
+    init => {
+        root.ancho_ventana = root.width;
+        if (root.sidebar_overlay) { AppData.is_sidebar_open = false; }
+    }
 
     HorizontalLayout {
         padding: 0px;
         spacing: 0px;
 
         // 1. Barra Lateral de Navegación (Sidebar Colapsable)
-        if AppData.is_sidebar_open : Sidebar {}
+        if AppData.is_sidebar_open && !root.sidebar_overlay : Sidebar {}
 
         // 2. Contenedor Principal Derecho (TopBar + Vista Activa + BottomBar)
         VerticalLayout {
@@ -288,6 +318,31 @@ export component MainWindow inherits Window {
         }
     }
 
+    // Sidebar superpuesto (ventanas angostas): fondo semitransparente que cierra al hacer clic fuera.
+    if AppData.is_sidebar_open && root.sidebar_overlay : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        background: #0f172a59;
+        z: 500;
+
+        TouchArea {
+            clicked => {
+                AppData.is_sidebar_open = false;
+                AppLogic.set_sidebar_open(false);
+            }
+        }
+
+        Sidebar {
+            x: 0px;
+            y: 0px;
+            height: parent.height;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000055;
+        }
+    }
+
     // TOAST FLOTANTE GLOBAL PARA NOTIFICACIONES Y ALERTAS (Visible por encima de todas las vistas y modales)
     if AppData.show_toast : Rectangle {
         y: 20px;
@@ -313,13 +368,9 @@ export component MainWindow inherits Window {
                 spacing: 10px;
                 alignment: start;
 
-                Text {
-                    text: AppData.toast_icon != "" ? AppData.toast_icon : (AppData.toast_type == "error" ? "⛔" : (AppData.toast_type == "warning" ? "⚠️" : (AppData.toast_type == "success" ? "✓" : "ℹ")));
-                    font-size: 16px;
-                    font-weight: 800;
-                    color: AppData.toast_type == "error" ? #fecaca : (AppData.toast_type == "warning" ? #fef08a : (AppData.toast_type == "success" ? #a7f3d0 : #bae6fd));
-                    vertical-alignment: center;
-                }
+                cross-axis-alignment: center;
+
+                Image { source: AppData.toast_type == "error" ? @image-url("assets/icons/circle-alert.svg") : (AppData.toast_type == "warning" ? @image-url("assets/icons/alert-triangle.svg") : (AppData.toast_type == "success" ? @image-url("assets/icons/check.svg") : @image-url("assets/icons/info.svg"))); colorize: AppData.toast_type == "error" ? #fecaca : (AppData.toast_type == "warning" ? #fef08a : (AppData.toast_type == "success" ? #a7f3d0 : #bae6fd)); width: 18px; height: 18px; }
 
                 toast_text := Text {
                     horizontal-stretch: 1;
@@ -339,14 +390,7 @@ export component MainWindow inherits Window {
                 background: btn_toast_close.has-hover ? #ffffff33 : transparent;
                 y: (parent.height - self.height) / 2;
 
-                Text {
-                    text: "✕";
-                    font-size: 13px;
-                    font-weight: 800;
-                    color: #ffffffcc;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
+                Image { source: @image-url("assets/icons/x.svg"); colorize: #ffffffcc; width: 15px; height: 15px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
 
                 btn_toast_close := TouchArea {
                     mouse-cursor: pointer;
@@ -413,12 +457,7 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: #fecaca;
 
-                        Text {
-                            text: "⚠️";
-                            font-size: 20px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                        Image { source: @image-url("assets/icons/alert-triangle.svg"); colorize: #dc2626; width: 22px; height: 22px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                     }
 
                     VerticalLayout {
@@ -476,7 +515,7 @@ export component MainWindow inherits Window {
                             err_detail_txt := Text {
                                 text: AppData.system_error_modal_detail;
                                 font-size: 12px;
-                                font-family: "monospace";
+                                font-family: "Noto Sans Mono";
                                 font-weight: 600;
                                 color: #7f1d1d;
                                 wrap: word-wrap;
