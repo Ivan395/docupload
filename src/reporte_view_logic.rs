@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -9,12 +9,12 @@ use slint::{Model, ModelRc, VecModel, ComponentHandle, SharedString};
 
 use crate::{
     MainWindow, AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem,
-    ReporteFilterOptionItem, ReporteMesTotalItem, ReporteGuarderiaObraItem,
+    ReporteFilterOptionItem, ReporteFiltroOpcion, ReporteFiltroEmpleado, ReporteMesTotalItem, ReporteGuarderiaObraItem,
     ReporteObraUsuarioItem, ReporteSuaObraItem, ReporteBatchWorkerItem,
     ReporteSelectedItem, ReporteBatchObraItem, ReporteEditObraItem,
     ReporteUniqueEmpleadoItem, InconsistenciaDetalle, EntregablePunto, EntregableVersion,
 };
-use crate::cedulas::business::month_to_num;
+use crate::cedulas::business::{month_num_to_name, month_to_num};
 use crate::db::DbPool;
 use crate::db::reporte_liquidaciones::{
     ReporteLiquidacionRowDb, ObraOptionDb,
@@ -38,6 +38,15 @@ use crate::entregable_logic::{
     evaluar_lista_verificacion, resumen_json, ListaVerificacion, ResumenEntregable, Severidad,
 };
 use crate::rustfs::{download_rustfs_file, upload_file_to_rustfs};
+
+/// Criterios del filtro avanzado. Conjunto vacío = sin restricción en ese criterio.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FiltroAvanzado {
+    pub anios: BTreeSet<i16>,
+    pub meses: BTreeSet<(i16, u32)>,
+    pub obras: BTreeSet<String>,      // uuid de obra o "sin_asignar"
+    pub empleados: BTreeSet<String>,  // clave única de empleado (ver `clave_empleado`)
+}
 
 #[derive(Clone)]
 pub struct ReporteSessionState {
@@ -72,21 +81,19 @@ pub struct ReporteSessionState {
     pub sort_by_rfc: bool,
     pub sort_rfc_asc: bool,
 
-    // Filtro por empleados seleccionados
-    pub emp_filter_active: bool,
-    pub emp_filter_all_months: bool,
-    pub emp_filter_all_obras: bool,
-    pub emp_filter_worker_ids: HashSet<Uuid>,
-    pub emp_filter_worker_rfcs: HashSet<String>,
-    pub emp_filter_selected_months: HashSet<String>,
-    pub emp_filter_selected_obras: HashSet<String>,
-
-    // Modal de empleados
-    pub emp_modal_worker_count: usize,
-    pub emp_modal_worker_names_str: String,
-    pub emp_modal_total_occurrences: usize,
-    pub emp_modal_meses: Vec<(String, String, usize, bool)>,
-    pub emp_modal_obras: Vec<(String, String, usize, bool)>,
+    // Filtro avanzado ("Filtrar…")
+    /// Criterios del filtro aplicado.
+    pub filtro: FiltroAvanzado,
+    pub filtro_activo: bool,
+    /// true si el filtro aplicado se creó en modo selección (false = general).
+    pub filtro_aplicado_seleccion: bool,
+    /// Borrador editado dentro del modal.
+    pub filtro_borrador: FiltroAvanzado,
+    /// true = sin selección (alcance: todas las filas); false = sobre la selección.
+    pub filtro_modo_general: bool,
+    /// Empleados del alcance en modo selección (vacío en modo general).
+    pub filtro_alcance_empleados: BTreeSet<String>,
+    pub filtro_busqueda_emp: String,
     pub quick_select_obras: Vec<(String, String, usize, bool)>,
 
     // Exportación SUA
@@ -137,19 +144,13 @@ impl Default for ReporteSessionState {
             sort_by_rfc: false,
             sort_rfc_asc: true,
 
-            emp_filter_active: false,
-            emp_filter_all_months: true,
-            emp_filter_all_obras: true,
-            emp_filter_worker_ids: HashSet::new(),
-            emp_filter_worker_rfcs: HashSet::new(),
-            emp_filter_selected_months: HashSet::new(),
-            emp_filter_selected_obras: HashSet::new(),
-
-            emp_modal_worker_count: 0,
-            emp_modal_worker_names_str: String::new(),
-            emp_modal_total_occurrences: 0,
-            emp_modal_meses: Vec::new(),
-            emp_modal_obras: Vec::new(),
+            filtro: FiltroAvanzado::default(),
+            filtro_activo: false,
+            filtro_aplicado_seleccion: false,
+            filtro_borrador: FiltroAvanzado::default(),
+            filtro_modo_general: true,
+            filtro_alcance_empleados: BTreeSet::new(),
+            filtro_busqueda_emp: String::new(),
             quick_select_obras: Vec::new(),
 
             sua_selected_obra_ids: HashSet::new(),
@@ -623,7 +624,307 @@ pub fn redistribute_batch_workers_days(
     }
 }
 
+/// Número de mes (1..=12) de una fila: usa el campo numérico y, si no es válido, el texto del mes.
+pub(crate) fn mes_num(r: &ReporteLiquidacionRowDb) -> u32 {
+    if (1..=12).contains(&r.mes_periodo_int) {
+        r.mes_periodo_int as u32
+    } else {
+        month_to_num(&r.mes_periodo)
+    }
+}
+
+/// Clave de empleado para el filtro: RFC limpio (agrupa duplicados con el mismo RFC),
+/// luego el id del empleado y, en último caso, el nombre. Los RFC genéricos nunca son clave.
+pub(crate) fn clave_empleado(r: &ReporteLiquidacionRowDb) -> String {
+    if let Some(rfc) = get_clean_non_generic_rfc(&r.rfc) {
+        rfc
+    } else if !r.id_empleado.is_nil() {
+        r.id_empleado.to_string()
+    } else {
+        r.nombre_trabajador.trim().to_uppercase()
+    }
+}
+
+/// Clave de obra para el filtro: uuid de la obra o "sin_asignar".
+pub(crate) fn clave_obra(r: &ReporteLiquidacionRowDb) -> String {
+    r.id_registro_obra
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "sin_asignar".to_string())
+}
+
+/// Normaliza texto para comparar: sin acentos, en mayúsculas y sin espacios en los extremos.
+pub(crate) fn normalizar(s: &str) -> String {
+    unidecode::unidecode(s).to_uppercase().trim().to_string()
+}
+
+/// Busca un empleado por NSS (dígitos, ignorando guiones y espacios), nombre (todas las
+/// palabras, sin acentos ni orden), RFC o CURP. Consulta vacía coincide con todo.
+pub(crate) fn coincide_busqueda_empleado(r: &ReporteLiquidacionRowDb, consulta: &str) -> bool {
+    let q = normalizar(consulta);
+    if q.is_empty() {
+        return true;
+    }
+
+    // Nombre: cada palabra de la consulta debe aparecer en el nombre
+    let nombre = normalizar(&r.nombre_trabajador);
+    if q.split_whitespace().all(|token| nombre.contains(token)) {
+        return true;
+    }
+
+    // NSS: solo si la consulta tiene al menos 3 dígitos
+    let digitos_q: String = consulta.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digitos_q.len() >= 3 {
+        let digitos_nss: String = r.nss.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digitos_nss.contains(&digitos_q) {
+            return true;
+        }
+    }
+
+    // RFC y CURP: consulta sin espacios
+    let q_sin_espacios: String = q.chars().filter(|c| !c.is_whitespace()).collect();
+    if !q_sin_espacios.is_empty() {
+        if r.rfc.to_uppercase().contains(&q_sin_espacios) || r.curp.to_uppercase().contains(&q_sin_espacios) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Indica si una fila cumple el filtro avanzado: AND entre criterios, OR dentro de cada uno.
+/// Un criterio vacío no restringe.
+pub(crate) fn fila_pasa_filtro(f: &FiltroAvanzado, r: &ReporteLiquidacionRowDb) -> bool {
+    if !f.anios.is_empty() && !f.anios.contains(&r.anio_periodo) {
+        return false;
+    }
+    if !f.meses.is_empty() && !f.meses.contains(&(r.anio_periodo, mes_num(r))) {
+        return false;
+    }
+    if !f.obras.is_empty() && !f.obras.contains(&clave_obra(r)) {
+        return false;
+    }
+    if !f.empleados.is_empty() && !f.empleados.contains(&clave_empleado(r)) {
+        return false;
+    }
+    true
+}
+
+/// Número de criterios no vacíos (año, mes, obra, empleado).
+pub(crate) fn criterios_no_vacios(f: &FiltroAvanzado) -> i32 {
+    [
+        !f.anios.is_empty(),
+        !f.meses.is_empty(),
+        !f.obras.is_empty(),
+        !f.empleados.is_empty(),
+    ]
+    .iter()
+    .filter(|activo| **activo)
+    .count() as i32
+}
+
+/// Interpreta una clave de mes "YYYY-MM". Mes 0 representa "sin mes" (texto no reconocible).
+pub(crate) fn parsear_clave_mes(clave: &str) -> Option<(i16, u32)> {
+    let (anio, mes) = clave.split_once('-')?;
+    let anio: i16 = anio.trim().parse().ok()?;
+    let mes: u32 = mes.trim().parse().ok()?;
+    if mes <= 12 {
+        Some((anio, mes))
+    } else {
+        None
+    }
+}
+
+/// Alterna un valor en un conjunto del borrador.
+fn toggle_en_conjunto<T: Ord>(conjunto: &mut BTreeSet<T>, valor: T) {
+    if !conjunto.remove(&valor) {
+        conjunto.insert(valor);
+    }
+}
+
+/// Claves de empleado de las filas seleccionadas (vacío = modo general).
+fn alcance_desde_seleccion(state: &ReporteSessionState) -> BTreeSet<String> {
+    state
+        .all_rows
+        .iter()
+        .filter(|r| state.selected_ids.contains(&r.id_reporte_liq))
+        .map(|r| clave_empleado(r))
+        .collect()
+}
+
+fn filtro_emp_item(r: &ReporteLiquidacionRowDb, conteo: usize, seleccionado: bool) -> ReporteFiltroEmpleado {
+    ReporteFiltroEmpleado {
+        clave: clave_empleado(r).into(),
+        nombre: r.nombre_trabajador.as_str().into(),
+        nss: r.nss.as_str().into(),
+        rfc: r.rfc.as_str().into(),
+        curp: r.curp.as_str().into(),
+        conteo: conteo as i32,
+        seleccionado,
+    }
+}
+
+/// Empuja al modal "Filtrar…" sus opciones, selecciones y contadores. El alcance son todas
+/// las filas en modo general, o las filas de los empleados seleccionados en modo selección.
+pub(crate) fn render_filtro_modal(ui: &MainWindow, state: &ReporteSessionState) {
+    let app_data = ui.global::<AppData>();
+    let borrador = &state.filtro_borrador;
+
+    let alcance: Vec<&ReporteLiquidacionRowDb> = state
+        .all_rows
+        .iter()
+        .filter(|r| state.filtro_modo_general || state.filtro_alcance_empleados.contains(&clave_empleado(r)))
+        .collect();
+
+    // Conteos por año, mes, obra y empleado dentro del alcance
+    let mut conteo_anios: BTreeMap<i16, usize> = BTreeMap::new();
+    let mut conteo_meses: BTreeMap<(i16, u32), usize> = BTreeMap::new();
+    let mut conteo_obras: HashMap<String, usize> = HashMap::new();
+    let mut conteo_emp: HashMap<String, usize> = HashMap::new();
+    for r in &alcance {
+        *conteo_anios.entry(r.anio_periodo).or_insert(0) += 1;
+        *conteo_meses.entry((r.anio_periodo, mes_num(r))).or_insert(0) += 1;
+        *conteo_obras.entry(clave_obra(r)).or_insert(0) += 1;
+        *conteo_emp.entry(clave_empleado(r)).or_insert(0) += 1;
+    }
+
+    // Años (ascendente)
+    let anios: Vec<ReporteFiltroOpcion> = conteo_anios
+        .iter()
+        .map(|(anio, n)| ReporteFiltroOpcion {
+            clave: anio.to_string().into(),
+            etiqueta: anio.to_string().into(),
+            grupo: "".into(),
+            conteo: *n as i32,
+            seleccionado: borrador.anios.contains(anio),
+        })
+        .collect();
+
+    // Meses (año y mes ascendentes); grupo = año
+    let meses: Vec<ReporteFiltroOpcion> = conteo_meses
+        .iter()
+        .map(|((anio, mes), n)| {
+            let nombre_mes = if *mes == 0 { "SIN MES" } else { month_num_to_name(*mes) };
+            ReporteFiltroOpcion {
+                clave: format!("{}-{:02}", anio, mes).into(),
+                etiqueta: format!("{} {}", nombre_mes, anio).into(),
+                grupo: anio.to_string().into(),
+                conteo: *n as i32,
+                seleccionado: borrador.meses.contains(&(*anio, *mes)),
+            }
+        })
+        .collect();
+
+    // Obras: etiqueta desde all_obras_options; "sin_asignar" siempre al final
+    let mut obras: Vec<(String, String, usize)> = Vec::new();
+    for (clave, n) in &conteo_obras {
+        if clave == "sin_asignar" {
+            continue;
+        }
+        let etiqueta = state
+            .all_obras_options
+            .iter()
+            .find(|o| o.id.to_string() == *clave)
+            .map(|o| o.label.clone())
+            .or_else(|| {
+                alcance
+                    .iter()
+                    .find(|r| clave_obra(r) == *clave)
+                    .map(|r| {
+                        if r.obra_label.trim().is_empty() {
+                            format!("Obra {}", r.obra_numero)
+                        } else {
+                            r.obra_label.clone()
+                        }
+                    })
+            })
+            .unwrap_or_else(|| format!("Obra {}", clave));
+        obras.push((clave.clone(), etiqueta, *n));
+    }
+    if let Some(n) = conteo_obras.get("sin_asignar") {
+        obras.push(("sin_asignar".to_string(), "Sin asignar (pendientes)".to_string(), *n));
+    }
+    obras.sort_by(|a, b| {
+        (a.0 == "sin_asignar")
+            .cmp(&(b.0 == "sin_asignar"))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    let obras_items: Vec<ReporteFiltroOpcion> = obras
+        .iter()
+        .map(|(clave, etiqueta, n)| ReporteFiltroOpcion {
+            clave: clave.as_str().into(),
+            etiqueta: etiqueta.as_str().into(),
+            grupo: "".into(),
+            conteo: *n as i32,
+            seleccionado: borrador.obras.contains(clave),
+        })
+        .collect();
+
+    // Representante de cada empleado (primera fila de toda la revisión) para nombre, NSS, RFC y CURP
+    let mut representante: HashMap<String, &ReporteLiquidacionRowDb> = HashMap::new();
+    for r in &state.all_rows {
+        representante.entry(clave_empleado(r)).or_insert(r);
+    }
+
+    // Empleados ya seleccionados en el borrador (ordenados por nombre)
+    let mut emp_sel: Vec<(String, ReporteFiltroEmpleado)> = borrador
+        .empleados
+        .iter()
+        .filter_map(|clave| {
+            representante.get(clave).map(|r| {
+                let conteo = *conteo_emp.get(clave).unwrap_or(&0);
+                (r.nombre_trabajador.clone(), filtro_emp_item(r, conteo, true))
+            })
+        })
+        .collect();
+    emp_sel.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Resultados de búsqueda: empleados únicos del alcance, máximo 50, ordenados por nombre
+    let busqueda = state.filtro_busqueda_emp.trim().to_string();
+    let mut emp_resultados: Vec<(String, ReporteFiltroEmpleado)> = Vec::new();
+    if !busqueda.is_empty() {
+        let mut vistos: HashSet<String> = HashSet::new();
+        for r in &alcance {
+            if !coincide_busqueda_empleado(r, &busqueda) {
+                continue;
+            }
+            let clave = clave_empleado(r);
+            if !vistos.insert(clave.clone()) {
+                continue;
+            }
+            let conteo = *conteo_emp.get(&clave).unwrap_or(&0);
+            let seleccionado = borrador.empleados.contains(&clave);
+            emp_resultados.push((r.nombre_trabajador.clone(), filtro_emp_item(r, conteo, seleccionado)));
+        }
+        emp_resultados.sort_by(|a, b| a.0.cmp(&b.0));
+        emp_resultados.truncate(50);
+    }
+
+    // Vista previa: filas del alcance que cumplen el borrador
+    let coinciden = alcance
+        .iter()
+        .filter(|r| fila_pasa_filtro(borrador, r))
+        .count();
+
+    app_data.set_reporte_filtro_modo_general(state.filtro_modo_general);
+    app_data.set_reporte_filtro_coinciden(coinciden as i32);
+    app_data.set_reporte_filtro_aviso("".into());
+    app_data.set_reporte_filtro_busqueda_emp(state.filtro_busqueda_emp.as_str().into());
+    app_data.set_reporte_filtro_anios(ModelRc::new(VecModel::from(anios)));
+    app_data.set_reporte_filtro_meses(ModelRc::new(VecModel::from(meses)));
+    app_data.set_reporte_filtro_obras(ModelRc::new(VecModel::from(obras_items)));
+    app_data.set_reporte_filtro_emp_seleccionados(ModelRc::new(VecModel::from(
+        emp_sel.into_iter().map(|(_, e)| e).collect::<Vec<_>>(),
+    )));
+    app_data.set_reporte_filtro_emp_resultados(ModelRc::new(VecModel::from(
+        emp_resultados.into_iter().map(|(_, e)| e).collect::<Vec<_>>(),
+    )));
+}
+
 pub fn apply_reporte_filtering(state: &mut ReporteSessionState) {
+    // El filtro "Fuera de periodo" ya no existe: un índice fuera de rango (opciones 0..=2) vuelve a "Todos"
+    if state.filter_estado_idx > 2 {
+        state.filter_estado_idx = 0;
+    }
     // Filtrar obras_options: Solo conservar obras creadas por el usuario (creado_usuario = true)
     // o aquellas que se encuentran en la tabla de liquidaciones del reporte.
     state.obras_options.retain(|o| {
@@ -712,29 +1013,9 @@ pub fn apply_reporte_filtering(state: &mut ReporteSessionState) {
                 }
             }
 
-            // Filtro por empleados seleccionados
-            if state.emp_filter_active {
-                let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
-                let is_target = state.emp_filter_worker_ids.contains(&r.id_empleado)
-                    || clean_rfc.map_or(false, |clean| state.emp_filter_worker_rfcs.contains(&clean));
-                if !is_target {
-                    return false;
-                }
-
-                // Filtrar por meses
-                if !state.emp_filter_all_months {
-                    if !state.emp_filter_selected_months.contains(&r.periodo_str) {
-                        return false;
-                    }
-                }
-
-                // Filtrar por obras
-                if !state.emp_filter_all_obras {
-                    let obra_key = r.id_registro_obra.map(|u| u.to_string()).unwrap_or_else(|| "sin_asignar".to_string());
-                    if !state.emp_filter_selected_obras.contains(&obra_key) {
-                        return false;
-                    }
-                }
+            // Filtro avanzado ("Filtrar…"): AND entre criterios, OR dentro de cada uno
+            if state.filtro_activo && !fila_pasa_filtro(&state.filtro, r) {
+                return false;
             }
 
             // Filtro Multi-Selección de Empleados Únicos (Menú Principal)
@@ -1242,33 +1523,9 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
     if state.sort_by_rfc { active_sort_count += 1; }
     app_data.set_reporte_active_sort_count(active_sort_count);
 
-    // Sincronizar estado de filtro de empleados seleccionados
-    app_data.set_reporte_emp_modal_worker_count(state.emp_modal_worker_count as i32);
-    app_data.set_reporte_emp_modal_worker_names_str(state.emp_modal_worker_names_str.as_str().into());
-    app_data.set_reporte_emp_modal_total_occurrences(state.emp_modal_total_occurrences as i32);
-    app_data.set_reporte_emp_filter_all_months(state.emp_filter_all_months);
-    app_data.set_reporte_emp_filter_all_obras(state.emp_filter_all_obras);
-    app_data.set_reporte_emp_filter_active(state.emp_filter_active);
-
-    let meses_models: Vec<ReporteFilterOptionItem> = state.emp_modal_meses.iter().map(|(id, lbl, count, sel)| {
-        ReporteFilterOptionItem {
-            id: id.as_str().into(),
-            label: lbl.as_str().into(),
-            count: *count as i32,
-            selected: *sel,
-        }
-    }).collect();
-    app_data.set_reporte_emp_modal_meses(ModelRc::new(VecModel::from(meses_models)));
-
-    let obras_models: Vec<ReporteFilterOptionItem> = state.emp_modal_obras.iter().map(|(id, lbl, count, sel)| {
-        ReporteFilterOptionItem {
-            id: id.as_str().into(),
-            label: lbl.as_str().into(),
-            count: *count as i32,
-            selected: *sel,
-        }
-    }).collect();
-    app_data.set_reporte_emp_modal_obras(ModelRc::new(VecModel::from(obras_models)));
+    // Sincronizar estado del filtro avanzado ("Filtrar…")
+    app_data.set_reporte_filtro_activo(state.filtro_activo);
+    app_data.set_reporte_filtro_criterios(if state.filtro_activo { criterios_no_vacios(&state.filtro) } else { 0 });
 
     // 7. Totales para el Pie de Tabla Fijo (calculados sobre filtered_rows)
     let mut total_dias_ced: i32 = 0;
@@ -1418,14 +1675,8 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
     crate::asignacion_obra_logic::render_asignacion_obra_ui(ui, state);
 }
 
-/// Separa las filas por estado: `ACTIVO` (primer elemento) y `FUERA_PERIODO`/`EXCLUIDO` (segundo).
-pub fn separar_filas_por_estado(
-    rows: Vec<ReporteLiquidacionRowDb>,
-) -> (Vec<ReporteLiquidacionRowDb>, Vec<ReporteLiquidacionRowDb>) {
-    rows.into_iter().partition(|r| r.estado == "ACTIVO")
-}
-
 /// Carga el reporte de la revisión. Solo sincroniza con las cédulas si `sincronizar` es true.
+/// Sin sincronización completa, reevalúa antes el universo de la revisión (meses de los Registros de Obra).
 /// Devuelve el número de filas sincronizadas (0 si no se sincronizó o falló).
 pub fn sync_and_load_reporte_data(
     ui: &MainWindow,
@@ -1654,19 +1905,14 @@ pub fn sync_and_load_reporte_data(
         state.filter_periodo_idx = 0;
         state.filter_estado_idx = 0;
 
-        // Reset filtros de empleados y modales
-        state.emp_filter_active = false;
-        state.emp_filter_all_months = true;
-        state.emp_filter_all_obras = true;
-        state.emp_filter_worker_ids.clear();
-        state.emp_filter_worker_rfcs.clear();
-        state.emp_filter_selected_months.clear();
-        state.emp_filter_selected_obras.clear();
-        state.emp_modal_worker_count = 0;
-        state.emp_modal_worker_names_str.clear();
-        state.emp_modal_total_occurrences = 0;
-        state.emp_modal_meses.clear();
-        state.emp_modal_obras.clear();
+        // Reset del filtro avanzado y de su modal
+        state.filtro = FiltroAvanzado::default();
+        state.filtro_activo = false;
+        state.filtro_aplicado_seleccion = false;
+        state.filtro_borrador = FiltroAvanzado::default();
+        state.filtro_modo_general = true;
+        state.filtro_alcance_empleados.clear();
+        state.filtro_busqueda_emp.clear();
 
         state.selected_unique_emp_ids.clear();
         state.unique_emp_search_query.clear();
@@ -2138,6 +2384,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     &format!("target_id={}", target_id),
                 );
                 if target_id.is_empty() {
+                    crate::show_toast_message(&ui, "Selecciona primero una revisión para ver el Reporte de Liquidaciones.");
                     return;
                 }
                 let Ok(target_uuid) = Uuid::parse_str(&target_id) else {
@@ -4865,7 +5112,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 27. Abrir modal de explorar y filtrar empleados seleccionados
+    // 27. Abrir modal "Filtrar…": modo selección si hay filas seleccionadas, modo general si no
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
@@ -4873,119 +5120,24 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
 
-                let (worker_ids, worker_rfcs, worker_names) = if !state.selected_ids.is_empty() {
-                    let mut w_ids = HashSet::new();
-                    let mut w_rfcs = HashSet::new();
-                    let mut w_names = Vec::new();
-                    let mut seen = HashSet::new();
-                    for r in &state.all_rows {
-                        if state.selected_ids.contains(&r.id_reporte_liq) {
-                            w_ids.insert(r.id_empleado);
-                            if let Some(clean) = get_clean_non_generic_rfc(&r.rfc) {
-                                w_rfcs.insert(clean);
-                            }
-                            if seen.insert(r.nombre_trabajador.clone()) {
-                                w_names.push(r.nombre_trabajador.clone());
-                            }
-                        }
-                    }
-                    (w_ids, w_rfcs, w_names)
-                } else if state.emp_filter_active && !state.emp_filter_worker_ids.is_empty() {
-                    let mut w_names = Vec::new();
-                    let mut seen = HashSet::new();
-                    for r in &state.all_rows {
-                        let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
-                        if state.emp_filter_worker_ids.contains(&r.id_empleado)
-                            || clean_rfc.map_or(false, |clean| state.emp_filter_worker_rfcs.contains(&clean))
-                        {
-                            if seen.insert(r.nombre_trabajador.clone()) {
-                                w_names.push(r.nombre_trabajador.clone());
-                            }
-                        }
-                    }
-                    (state.emp_filter_worker_ids.clone(), state.emp_filter_worker_rfcs.clone(), w_names)
+                // Alcance = empleados de las filas seleccionadas (vacío = modo general)
+                let alcance = alcance_desde_seleccion(&state);
+                let modo_general = alcance.is_empty();
+
+                // Reutilizar el filtro aplicado solo si es compatible con el modo actual
+                let borrador = if state.filtro_activo && (modo_general || state.filtro_aplicado_seleccion) {
+                    state.filtro.clone()
                 } else {
-                    crate::show_toast_message(&ui, "Selecciona al menos una casilla de empleado en la tabla.");
-                    return;
+                    FiltroAvanzado { empleados: alcance.clone(), ..Default::default() }
                 };
 
-                let mut total_occurrences = 0;
-                let mut month_counts: std::collections::BTreeMap<(i16, u32, String), usize> = std::collections::BTreeMap::new();
-                let mut obra_counts_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                state.filtro_modo_general = modo_general;
+                state.filtro_alcance_empleados = alcance;
+                state.filtro_borrador = borrador;
+                state.filtro_busqueda_emp.clear();
 
-                for r in &state.all_rows {
-                    let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
-                    let matches = worker_ids.contains(&r.id_empleado)
-                        || clean_rfc.map_or(false, |clean| worker_rfcs.contains(&clean));
-                    if matches {
-                        total_occurrences += 1;
-
-                        let m_num = month_to_num(&r.mes_periodo);
-                        let entry = month_counts.entry((r.anio_periodo, m_num, r.periodo_str.clone())).or_insert(0);
-                        *entry += 1;
-
-                        let obra_key = if let Some(oid) = r.id_registro_obra {
-                            oid.to_string()
-                        } else {
-                            "sin_asignar".to_string()
-                        };
-                        *obra_counts_map.entry(obra_key).or_insert(0) += 1;
-                    }
-                }
-
-                state.emp_modal_worker_count = worker_names.len();
-                state.emp_modal_worker_names_str = worker_names.join(", ");
-                state.emp_modal_total_occurrences = total_occurrences;
-                state.emp_filter_worker_ids = worker_ids;
-                state.emp_filter_worker_rfcs = worker_rfcs;
-
-                state.emp_modal_meses = month_counts.into_iter().map(|((anio, _m_num, periodo_str), count)| {
-                    let label = if periodo_str.contains('/') {
-                        periodo_str.clone()
-                    } else {
-                        format!("{} {}", periodo_str, anio)
-                    };
-                    let is_sel = if state.emp_filter_selected_months.is_empty() {
-                        true
-                    } else {
-                        state.emp_filter_selected_months.contains(&periodo_str)
-                    };
-                    (periodo_str, label, count, is_sel)
-                }).collect();
-
-                let mut emp_modal_obras = Vec::new();
-                for o in &state.all_obras_options {
-                    let count = *obra_counts_map.get(&o.id.to_string()).unwrap_or(&0);
-                    let is_sel = if state.emp_filter_selected_obras.is_empty() {
-                        true
-                    } else {
-                        state.emp_filter_selected_obras.contains(&o.id.to_string())
-                    };
-                    emp_modal_obras.push((o.id.to_string(), o.label.clone(), count, is_sel));
-                }
-                let unassigned_count = *obra_counts_map.get("sin_asignar").unwrap_or(&0);
-                let is_sel = if state.emp_filter_selected_obras.is_empty() {
-                    true
-                } else {
-                    state.emp_filter_selected_obras.contains("sin_asignar")
-                };
-                emp_modal_obras.push(("sin_asignar".to_string(), "⚠️ Sin Asignar (Pendientes)".to_string(), unassigned_count, is_sel));
-
-                for (k, cnt) in &obra_counts_map {
-                    if k != "sin_asignar" && !state.all_obras_options.iter().any(|o| o.id.to_string() == *k) {
-                        let is_sel = if state.emp_filter_selected_obras.is_empty() {
-                            true
-                        } else {
-                            state.emp_filter_selected_obras.contains(k)
-                        };
-                        emp_modal_obras.push((k.clone(), format!("Obra {}", k), *cnt, is_sel));
-                    }
-                }
-
-                state.emp_modal_obras = emp_modal_obras;
-
+                render_filtro_modal(&ui, &state);
                 ui.global::<AppData>().set_show_reporte_emp_modal(true);
-                render_reporte_ui(&ui, &state);
             }
         });
     }
@@ -5000,24 +5152,19 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 29. Seleccionar todas las apariciones en todos los meses
+    // 29. Seleccionar todas las apariciones en todos los meses de los empleados del alcance (modo selección)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_select_all_months_for_selected_employees(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                let worker_ids = state.emp_filter_worker_ids.clone();
-                let worker_rfcs = state.emp_filter_worker_rfcs.clone();
+                let alcance = state.filtro_alcance_empleados.clone();
 
                 let target_ids: Vec<Uuid> = state.all_rows.iter()
                     .filter(|r| {
-                        if r.clave.trim().eq_ignore_ascii_case("baja") {
-                            return false;
-                        }
-                        let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
-                        worker_ids.contains(&r.id_empleado)
-                            || clean_rfc.map_or(false, |clean| worker_rfcs.contains(&clean))
+                        !r.clave.trim().eq_ignore_ascii_case("baja")
+                            && alcance.contains(&clave_empleado(r))
                     })
                     .map(|r| r.id_reporte_liq)
                     .collect();
@@ -5035,142 +5182,178 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 30. Set filtro todos los meses (true = todos, false = algunos)
+    // 30. Filtro avanzado: alternar año en el borrador
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
-        app_logic.on_reporte_set_emp_filter_all_months(move |all_m| {
+        app_logic.on_reporte_filtro_toggle_anio(move |valor| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                state.emp_filter_all_months = all_m;
-                if all_m {
-                    for m in state.emp_modal_meses.iter_mut() {
-                        m.3 = true;
-                    }
+                if let Ok(anio) = valor.as_str().trim().parse::<i16>() {
+                    toggle_en_conjunto(&mut state.filtro_borrador.anios, anio);
                 }
-                render_reporte_ui(&ui, &state);
+                render_filtro_modal(&ui, &state);
             }
         });
     }
 
-    // 31. Set filtro todas las obras (true = todas, false = algunas)
+    // 31. Filtro avanzado: alternar mes ("YYYY-MM") en el borrador
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
-        app_logic.on_reporte_set_emp_filter_all_obras(move |all_o| {
+        app_logic.on_reporte_filtro_toggle_mes(move |valor| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                state.emp_filter_all_obras = all_o;
-                if all_o {
-                    for o in state.emp_modal_obras.iter_mut() {
-                        o.3 = true;
-                    }
+                if let Some(mes) = parsear_clave_mes(valor.as_str()) {
+                    toggle_en_conjunto(&mut state.filtro_borrador.meses, mes);
                 }
-                render_reporte_ui(&ui, &state);
+                render_filtro_modal(&ui, &state);
             }
         });
     }
 
-    // 32. Toggle mes en modal
+    // 32. Filtro avanzado: alternar obra (uuid o "sin_asignar") en el borrador
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
-        app_logic.on_reporte_toggle_emp_filter_month(move |m_id| {
+        app_logic.on_reporte_filtro_toggle_obra(move |valor| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                let m_id_str = m_id.as_str();
-                for m in state.emp_modal_meses.iter_mut() {
-                    if m.0 == m_id_str {
-                        m.3 = !m.3;
-                        break;
-                    }
-                }
-                render_reporte_ui(&ui, &state);
+                toggle_en_conjunto(&mut state.filtro_borrador.obras, valor.to_string());
+                render_filtro_modal(&ui, &state);
             }
         });
     }
 
-    // 33. Toggle obra en modal
+    // 33. Filtro avanzado: alternar empleado en el borrador (en modo selección debe quedar al menos uno)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
-        app_logic.on_reporte_toggle_emp_filter_obra(move |o_id| {
+        app_logic.on_reporte_filtro_toggle_empleado(move |valor| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                let o_id_str = o_id.as_str();
-                for o in state.emp_modal_obras.iter_mut() {
-                    if o.0 == o_id_str {
-                        o.3 = !o.3;
-                        break;
+                let clave = valor.to_string();
+                let mut aviso_minimo = false;
+                if state.filtro_borrador.empleados.remove(&clave) {
+                    if !state.filtro_modo_general && state.filtro_borrador.empleados.is_empty() {
+                        state.filtro_borrador.empleados.insert(clave);
+                        aviso_minimo = true;
                     }
+                } else {
+                    state.filtro_borrador.empleados.insert(clave);
                 }
-                render_reporte_ui(&ui, &state);
+                render_filtro_modal(&ui, &state);
+                if aviso_minimo {
+                    ui.global::<AppData>().set_reporte_filtro_aviso(
+                        "En modo selección debe quedar al menos un empleado.".into(),
+                    );
+                }
             }
         });
     }
 
-    // 34. Aplicar filtro de empleados
+    // 33b. Filtro avanzado: buscar empleado (NSS, nombre, RFC, CURP)
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_filtro_buscar_empleado(move |texto| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                state.filtro_busqueda_emp = texto.to_string();
+                render_filtro_modal(&ui, &state);
+            }
+        });
+    }
+
+    // 33c. Filtro avanzado: limpiar el borrador (general: vacío; selección: solo los empleados seleccionados)
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_filtro_limpiar_borrador(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                state.filtro_borrador = FiltroAvanzado {
+                    empleados: state.filtro_alcance_empleados.clone(),
+                    ..Default::default()
+                };
+                render_filtro_modal(&ui, &state);
+            }
+        });
+    }
+
+    // 33d. Filtro avanzado: seleccionar las filas resultantes del filtro aplicado (excluye bajas)
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_filtro_seleccionar_resultados(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                let ids: HashSet<Uuid> = state.filtered_rows.iter()
+                    .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                    .map(|r| r.id_reporte_liq)
+                    .collect();
+                let count = ids.len();
+                state.selected_ids = ids;
+
+                render_reporte_ui(&ui, &state);
+                crate::show_toast_message(&ui, &format!("Se seleccionaron {} filas.", count));
+            }
+        });
+    }
+
+    // 34. Aplicar filtro avanzado (NO modifica la selección de filas)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_apply_emp_filter(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                let sel_months: HashSet<String> = state.emp_modal_meses.iter()
-                    .filter(|(_, _, _, sel)| *sel)
-                    .map(|(id, _, _, _)| id.clone())
-                    .collect();
-                let sel_obras: HashSet<String> = state.emp_modal_obras.iter()
-                    .filter(|(_, _, _, sel)| *sel)
-                    .map(|(id, _, _, _)| id.clone())
-                    .collect();
 
-                state.emp_filter_selected_months = sel_months;
-                state.emp_filter_selected_obras = sel_obras;
+                // En modo general hace falta al menos un criterio; en selección el empleado ya viene prellenado
+                if state.filtro_modo_general && criterios_no_vacios(&state.filtro_borrador) == 0 {
+                    ui.global::<AppData>().set_reporte_filtro_aviso(
+                        "Selecciona al menos un criterio (año, mes, obra o empleado).".into(),
+                    );
+                    return;
+                }
 
-                state.emp_filter_active = true;
+                state.filtro = state.filtro_borrador.clone();
+                state.filtro_activo = true;
+                state.filtro_aplicado_seleccion = !state.filtro_modo_general;
+                // Obra y Periodo son de valor único: con el filtro avanzado activo se reinician
+                state.filter_obra_idx = 0;
+                state.filter_periodo_idx = 0;
                 state.current_page = 1;
                 ui.global::<AppData>().set_show_reporte_emp_modal(false);
 
                 apply_reporte_filtering(&mut state);
-
-                // Seleccionar automáticamente las filas resultantes del filtro (excluyendo bajas)
-                state.selected_ids = state.filtered_rows.iter()
-                    .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
-                    .map(|r| r.id_reporte_liq)
-                    .collect();
-
                 render_reporte_ui(&ui, &state);
 
                 crate::show_toast_message(
                     &ui,
-                    &format!("Filtro de empleados activo: {} filas encontradas.", state.filtered_rows.len()),
+                    &format!("Filtro activo: {} filas.", state.filtered_rows.len()),
                 );
             }
         });
     }
 
-    // 35. Limpiar filtro de empleados
+    // 35. Quitar el filtro avanzado aplicado (no modifica la selección de filas)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_clear_emp_filter(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                state.emp_filter_active = false;
-                state.emp_filter_all_months = true;
-                state.emp_filter_all_obras = true;
-                state.emp_filter_selected_months.clear();
-                state.emp_filter_selected_obras.clear();
-                state.emp_filter_worker_ids.clear();
-                state.emp_filter_worker_rfcs.clear();
-                state.selected_ids.clear();
+                state.filtro = FiltroAvanzado::default();
+                state.filtro_activo = false;
+                state.filtro_aplicado_seleccion = false;
+                state.filtro_borrador = FiltroAvanzado::default();
                 ui.global::<AppData>().set_show_reporte_emp_modal(false);
 
                 apply_reporte_filtering(&mut state);
                 render_reporte_ui(&ui, &state);
 
-                crate::show_toast_message(&ui, "Filtro de empleados removido y selección limpiada.");
+                crate::show_toast_message(&ui, "Filtro avanzado removido.");
             }
         });
     }
@@ -5186,13 +5369,13 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 state.filter_obra_idx = 0;
                 state.filter_periodo_idx = 0;
                 state.filter_estado_idx = 0;
-                state.emp_filter_active = false;
-                state.emp_filter_all_months = true;
-                state.emp_filter_all_obras = true;
-                state.emp_filter_selected_months.clear();
-                state.emp_filter_selected_obras.clear();
-                state.emp_filter_worker_ids.clear();
-                state.emp_filter_worker_rfcs.clear();
+                state.filtro = FiltroAvanzado::default();
+                state.filtro_activo = false;
+                state.filtro_aplicado_seleccion = false;
+                state.filtro_borrador = FiltroAvanzado::default();
+                state.filtro_modo_general = true;
+                state.filtro_alcance_empleados.clear();
+                state.filtro_busqueda_emp.clear();
                 state.selected_ids.clear();
                 state.selected_unique_emp_ids.clear();
                 state.unique_emp_search_query.clear();
@@ -5205,7 +5388,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 app_data.set_reporte_filter_obra_idx(0);
                 app_data.set_reporte_filter_periodo_idx(0);
                 app_data.set_reporte_filter_estado_idx(0);
-                app_data.set_reporte_emp_filter_active(false);
                 app_data.set_reporte_unique_empleados_search("".into());
                 app_data.set_show_reporte_emp_modal(false);
 
@@ -6628,91 +6810,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests_separacion_estado {
-    use super::*;
-
-    fn fila_prueba(estado: &str) -> ReporteLiquidacionRowDb {
-        ReporteLiquidacionRowDb {
-            id_reporte_liq: Uuid::nil(),
-            id_parent_reporte_liq: Uuid::nil(),
-            id_liquidacion: Uuid::nil(),
-            id_revision: Uuid::nil(),
-            id_empleado: Uuid::nil(),
-            nombre_trabajador: String::new(),
-            rfc: String::new(),
-            curp: String::new(),
-            nss: String::new(),
-            pensionado: String::new(),
-            registro_patronal: String::new(),
-            mes_periodo: String::new(),
-            mes_periodo_int: 1,
-            anio_periodo: 2026,
-            periodo_str: String::new(),
-            dias_cedula: 0,
-            id_registro_obra: None,
-            obra_numero: String::new(),
-            obra_label: String::new(),
-            dias_obra: 0,
-            obra_creado_usuario: false,
-            clave: String::new(),
-            fecha: None,
-            fecha_str: String::new(),
-            sdi: 0.0,
-            lic: 0.0,
-            inc: 0.0,
-            aus: 0.0,
-            cf: 0.0,
-            exc_pat: 0.0,
-            exc_obr: 0.0,
-            pd_pat: 0.0,
-            pd_obr: 0.0,
-            gmp_pat: 0.0,
-            gmp_obr: 0.0,
-            rt: 0.0,
-            iv_pat: 0.0,
-            iv_obr: 0.0,
-            gps: 0.0,
-            patronal: 0.0,
-            obrera: 0.0,
-            subtotal: 0.0,
-            cf_orig: 0.0,
-            exc_pat_orig: 0.0,
-            exc_obr_orig: 0.0,
-            pd_pat_orig: 0.0,
-            pd_obr_orig: 0.0,
-            gmp_pat_orig: 0.0,
-            gmp_obr_orig: 0.0,
-            rt_orig: 0.0,
-            iv_pat_orig: 0.0,
-            iv_obr_orig: 0.0,
-            gps_orig: 0.0,
-            patronal_orig: 0.0,
-            obrera_orig: 0.0,
-            subtotal_orig: 0.0,
-            tiene_inconsistencia: false,
-            observacion_validacion: String::new(),
-            estado: estado.to_string(),
-            cedula_actualizada: false,
-            editado_usuario: false,
-        }
-    }
-
-    #[test]
-    fn separar_filas_por_estado_separa_activas_de_fuera_periodo() {
-        let rows = vec![
-            fila_prueba("ACTIVO"),
-            fila_prueba("ACTIVO"),
-            fila_prueba("FUERA_PERIODO"),
-        ];
-        let (activas, fuera) = separar_filas_por_estado(rows);
-        assert_eq!(activas.len(), 2, "deben quedar 2 filas ACTIVO");
-        assert_eq!(fuera.len(), 1, "debe quedar 1 fila FUERA_PERIODO");
-        assert!(activas.iter().all(|r| r.estado == "ACTIVO"));
-        assert!(fuera.iter().all(|r| r.estado != "ACTIVO"));
-    }
-}
-
-#[cfg(test)]
 mod tests_entregable_flujo {
     use super::*;
 
@@ -6772,5 +6869,178 @@ mod tests_entregable_flujo {
         assert_eq!(codigo_severidad(&Severidad::Bloqueante), 0);
         assert_eq!(codigo_severidad(&Severidad::Advertencia), 1);
         assert_eq!(codigo_severidad(&Severidad::Info), 2);
+    }
+}
+
+#[cfg(test)]
+mod tests_filtro_avanzado {
+    use super::*;
+
+    /// Fila de prueba con valores neutros; los campos relevantes se ajustan después.
+    fn fila(anio: i16, mes: u32, obra: Option<Uuid>, nombre: &str, nss: &str, rfc: &str, curp: &str) -> ReporteLiquidacionRowDb {
+        ReporteLiquidacionRowDb {
+            id_reporte_liq: Uuid::now_v7(),
+            id_parent_reporte_liq: Uuid::now_v7(),
+            id_liquidacion: Uuid::now_v7(),
+            id_revision: Uuid::now_v7(),
+            id_empleado: Uuid::now_v7(),
+            nombre_trabajador: nombre.into(),
+            rfc: rfc.into(),
+            curp: curp.into(),
+            nss: nss.into(),
+            pensionado: String::new(),
+            registro_patronal: String::new(),
+            mes_periodo: String::new(),
+            mes_periodo_int: mes as i16,
+            anio_periodo: anio,
+            periodo_str: format!("{:02}/{}", mes, anio),
+            dias_cedula: 30,
+            id_registro_obra: obra,
+            obra_numero: String::new(),
+            obra_label: String::new(),
+            dias_obra: 0,
+            obra_creado_usuario: false,
+            clave: String::new(),
+            fecha: None,
+            fecha_str: String::new(),
+            sdi: 0.0,
+            lic: 0.0,
+            inc: 0.0,
+            aus: 0.0,
+            cf: 0.0,
+            exc_pat: 0.0,
+            exc_obr: 0.0,
+            pd_pat: 0.0,
+            pd_obr: 0.0,
+            gmp_pat: 0.0,
+            gmp_obr: 0.0,
+            rt: 0.0,
+            iv_pat: 0.0,
+            iv_obr: 0.0,
+            gps: 0.0,
+            patronal: 0.0,
+            obrera: 0.0,
+            subtotal: 0.0,
+            cf_orig: 0.0,
+            exc_pat_orig: 0.0,
+            exc_obr_orig: 0.0,
+            pd_pat_orig: 0.0,
+            pd_obr_orig: 0.0,
+            gmp_pat_orig: 0.0,
+            gmp_obr_orig: 0.0,
+            rt_orig: 0.0,
+            iv_pat_orig: 0.0,
+            iv_obr_orig: 0.0,
+            gps_orig: 0.0,
+            patronal_orig: 0.0,
+            obrera_orig: 0.0,
+            subtotal_orig: 0.0,
+            tiene_inconsistencia: false,
+            observacion_validacion: String::new(),
+            estado: String::new(),
+            cedula_actualizada: false,
+            editado_usuario: false,
+        }
+    }
+
+    fn filtro_con<F: FnOnce(&mut FiltroAvanzado)>(f: F) -> FiltroAvanzado {
+        let mut filtro = FiltroAvanzado::default();
+        f(&mut filtro);
+        filtro
+    }
+
+    #[test]
+    fn filtro_por_anio() {
+        let f = filtro_con(|f| {
+            f.anios.insert(2014);
+        });
+        assert!(fila_pasa_filtro(&f, &fila(2014, 3, None, "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2015, 3, None, "A", "", "", "")));
+    }
+
+    #[test]
+    fn filtro_por_mes_distingue_anios() {
+        let f = filtro_con(|f| {
+            f.meses.insert((2014, 5));
+        });
+        assert!(fila_pasa_filtro(&f, &fila(2014, 5, None, "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2015, 5, None, "A", "", "", "")));
+    }
+
+    #[test]
+    fn filtro_por_obra_y_sin_asignar() {
+        let obra = Uuid::now_v7();
+        let otra = Uuid::now_v7();
+        let f = filtro_con(|f| {
+            f.obras.insert(obra.to_string());
+            f.obras.insert("sin_asignar".to_string());
+        });
+        assert!(fila_pasa_filtro(&f, &fila(2024, 1, Some(obra), "A", "", "", "")));
+        assert!(fila_pasa_filtro(&f, &fila(2024, 1, None, "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2024, 1, Some(otra), "A", "", "", "")));
+    }
+
+    #[test]
+    fn clave_empleado_agrupa_por_rfc_real() {
+        let mut a = fila(2024, 1, None, "PEREZ JOSE", "", "PEJO800101AB1", "");
+        let mut b = fila(2024, 2, None, "PEREZ JOSE", "", "pejo800101ab1", "");
+        a.id_empleado = Uuid::now_v7();
+        b.id_empleado = Uuid::now_v7();
+        assert_ne!(a.id_empleado, b.id_empleado);
+        assert_eq!(clave_empleado(&a), clave_empleado(&b));
+        assert_eq!(clave_empleado(&a), "PEJO800101AB1");
+
+        let f = filtro_con(|f| {
+            f.empleados.insert(clave_empleado(&a));
+        });
+        assert!(fila_pasa_filtro(&f, &a));
+        assert!(fila_pasa_filtro(&f, &b));
+    }
+
+    #[test]
+    fn rfc_generico_no_se_usa_como_clave() {
+        let a = fila(2024, 1, None, "UNO", "", "XAXX010101000", "");
+        let b = fila(2024, 1, None, "DOS", "", "XAXX010101000", "");
+        assert_ne!(clave_empleado(&a), "XAXX010101000");
+        assert_ne!(clave_empleado(&a), clave_empleado(&b));
+        assert_eq!(clave_empleado(&a), a.id_empleado.to_string());
+    }
+
+    #[test]
+    fn busqueda_nss_ignora_guiones_y_espacios() {
+        let r = fila(2024, 1, None, "GARCIA LOPEZ MARIA", "12345678901", "", "");
+        assert!(coincide_busqueda_empleado(&r, "1234-5678"));
+        assert!(coincide_busqueda_empleado(&r, "123 456 78"));
+        assert!(!coincide_busqueda_empleado(&r, "1234-9999"));
+    }
+
+    #[test]
+    fn busqueda_nombre_sin_acentos_ni_orden() {
+        let r = fila(2024, 1, None, "PÉREZ LÓPEZ JOSÉ", "", "", "");
+        assert!(coincide_busqueda_empleado(&r, "jose perez"));
+        assert!(coincide_busqueda_empleado(&r, "PEREZ jose"));
+        assert!(!coincide_busqueda_empleado(&r, "jose garcia"));
+    }
+
+    #[test]
+    fn criterios_se_combinan_con_and() {
+        let obra_x = Uuid::now_v7();
+        let obra_y = Uuid::now_v7();
+        let f = filtro_con(|f| {
+            f.anios.insert(2014);
+            f.obras.insert(obra_x.to_string());
+        });
+        assert!(fila_pasa_filtro(&f, &fila(2014, 1, Some(obra_x), "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2014, 1, Some(obra_y), "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2015, 1, Some(obra_x), "A", "", "", "")));
+        assert_eq!(criterios_no_vacios(&f), 2);
+    }
+
+    #[test]
+    fn filtro_vacio_deja_pasar_todo() {
+        let f = FiltroAvanzado::default();
+        assert!(fila_pasa_filtro(&f, &fila(2014, 1, None, "A", "", "", "")));
+        assert!(fila_pasa_filtro(&f, &fila(2030, 12, Some(Uuid::now_v7()), "B", "", "", "")));
+        assert_eq!(criterios_no_vacios(&f), 0);
     }
 }

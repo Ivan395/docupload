@@ -68,6 +68,7 @@ pub mod updater;
 pub mod validation;
 #[cfg(test)]
 mod pruebas_golden_excel;
+#[cfg(test)] mod captura_ui;
 
 use crate::calendario_view_logic::*;
 use crate::db::{create_pool, ensure_schema, DbPool, CedulasDbStats};
@@ -8314,6 +8315,27 @@ mod tests_ui {
         // Ahora todos tienen factor = 1.0 (subtotal == subtotal_orig)
         for r in &state.all_rows {
             assert_eq!(r.subtotal, r.subtotal_orig);
+        }
+
+        // Atajo Ctrl/⌘+F en Reporte de Liquidaciones
+        // Reutiliza la misma ventana: no se crea un segundo event loop (winit solo permite uno por proceso).
+        {
+            use slint::platform::{Key, WindowEvent};
+            let ad = win.global::<AppData>();
+            ad.set_current_view(7);
+            ad.set_reporte_tab_idx(0);
+            slint::platform::update_timers_and_animations();
+
+            let antes = ad.get_reporte_focus_buscar();
+            let ventana = win.window();
+            ventana.dispatch_event(WindowEvent::WindowActiveChanged(true));
+            ventana.dispatch_event(WindowEvent::KeyPressed { text: Key::Control.into() });
+            ventana.dispatch_event(WindowEvent::KeyPressed { text: "f".into() });
+            ventana.dispatch_event(WindowEvent::KeyReleased { text: "f".into() });
+            ventana.dispatch_event(WindowEvent::KeyReleased { text: Key::Control.into() });
+            slint::platform::update_timers_and_animations();
+
+            assert_eq!(ad.get_reporte_focus_buscar(), antes + 1);
         }
     }
 }

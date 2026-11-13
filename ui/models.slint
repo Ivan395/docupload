@@ -255,6 +255,26 @@ export struct ReporteFilterOptionItem {
     selected: bool,
 }
 
+// Opción de un criterio del filtro avanzado (año, mes, obra)
+export struct ReporteFiltroOpcion {
+    clave: string,
+    etiqueta: string,
+    grupo: string,
+    conteo: int,
+    seleccionado: bool,
+}
+
+// Empleado del filtro avanzado (resultados de búsqueda y seleccionados)
+export struct ReporteFiltroEmpleado {
+    clave: string,
+    nombre: string,
+    nss: string,
+    rfc: string,
+    curp: string,
+    conteo: int,
+    seleccionado: bool,
+}
+
 export struct ReporteObraUsuarioItem {
     id: string,
     numero: string,
@@ -1406,14 +1426,19 @@ export global AppData {
 
     // Filtro y selección de empleados seleccionados
     in-out property <bool> show_reporte_emp_modal: false;
-    in-out property <int> reporte_emp_modal_worker_count: 0;
-    in-out property <string> reporte_emp_modal_worker_names_str: "";
-    in-out property <int> reporte_emp_modal_total_occurrences: 0;
-    in-out property <[ReporteFilterOptionItem]> reporte_emp_modal_meses: [];
-    in-out property <[ReporteFilterOptionItem]> reporte_emp_modal_obras: [];
-    in-out property <bool> reporte_emp_filter_all_months: true;
-    in-out property <bool> reporte_emp_filter_all_obras: true;
-    in-out property <bool> reporte_emp_filter_active: false;
+
+    // Filtro avanzado (Filtrar…)
+    in-out property <bool> reporte_filtro_activo: false;          // filtro avanzado aplicado
+    in-out property <bool> reporte_filtro_modo_general: true;     // true = sin selección (filtro normal); false = sobre la selección
+    in-out property <int> reporte_filtro_criterios: 0;            // nº de criterios no vacíos del filtro aplicado
+    in-out property <int> reporte_filtro_coinciden: 0;            // vista previa: filas que coinciden con el borrador
+    in-out property <string> reporte_filtro_aviso: "";            // mensaje de validación dentro del modal
+    in-out property <string> reporte_filtro_busqueda_emp: "";
+    in-out property <[ReporteFiltroOpcion]> reporte_filtro_anios: [];
+    in-out property <[ReporteFiltroOpcion]> reporte_filtro_meses: [];   // grupo = año ("2014"), etiqueta = "ENERO 2014", clave = "2014-01"
+    in-out property <[ReporteFiltroOpcion]> reporte_filtro_obras: [];   // clave = uuid o "sin_asignar"
+    in-out property <[ReporteFiltroEmpleado]> reporte_filtro_emp_resultados: [];
+    in-out property <[ReporteFiltroEmpleado]> reporte_filtro_emp_seleccionados: [];
 
     // Selección rápida por Registro de Obra
     in-out property <bool> show_reporte_select_obras_modal: false;
@@ -1878,12 +1903,17 @@ callback recargar_cedulas_view();
     callback reporte_open_empleados_filter_modal();
     callback reporte_close_empleados_filter_modal();
     callback reporte_select_all_months_for_selected_employees();
-    callback reporte_toggle_emp_filter_month(string);
-    callback reporte_toggle_emp_filter_obra(string);
-    callback reporte_set_emp_filter_all_months(bool);
-    callback reporte_set_emp_filter_all_obras(bool);
     callback reporte_apply_emp_filter();
     callback reporte_clear_emp_filter();
+
+    // Callbacks del filtro avanzado (Filtrar…)
+    callback reporte_filtro_toggle_anio(string);
+    callback reporte_filtro_toggle_mes(string);
+    callback reporte_filtro_toggle_obra(string);
+    callback reporte_filtro_toggle_empleado(string);
+    callback reporte_filtro_buscar_empleado(string);
+    callback reporte_filtro_limpiar_borrador();
+    callback reporte_filtro_seleccionar_resultados();
 
     // Callbacks de selección rápida por Registro de Obra
     callback reporte_open_select_obras_modal();
