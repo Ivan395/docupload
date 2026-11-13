@@ -1,6 +1,7 @@
 import { ScrollView, LineEdit, Button, ComboBox } from "std-widgets.slint";
 import { AppData, AppLogic, RegistroObraData } from "models.slint";
 import { DatePickerField } from "date_picker.slint";
+import { ObrasLoteModal } from "obras_lote_modal.slint";
 
 export component RegistrosObrasView inherits Rectangle {
     background: #f8fafc;
@@ -176,6 +177,58 @@ export component RegistrosObrasView inherits Rectangle {
                     btn_load_cedulas := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { AppLogic.open_resumen_cedulas_from_obras(); }
+                    }
+                }
+
+                // Alta masiva de obras (ADD-01/ADD-02)
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: btn_varias_obras.has-hover ? #047857 : #065f46;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: center;
+                        Text {
+                            text: "+ Varias obras";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_varias_obras := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.obras_lote_abrir(); }
+                    }
+                }
+
+                // Alta masiva de obras (ADD-01/ADD-02)
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: btn_adoptar_cedula.has-hover ? #e2e8f0 : #ffffff;
+                    border-width: 1px;
+                    border-color: #cbd5e1;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: center;
+                        Text {
+                            text: "Adoptar de cédula";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #334155;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_adoptar_cedula := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.obras_lote_adoptar_detectadas(); }
                     }
                 }
 
@@ -1156,6 +1209,9 @@ export component RegistrosObrasView inherits Rectangle {
             }
         }
     }
+
+    // Alta masiva de obras (ADD-01/ADD-02)
+    if AppData.show_obras_lote_modal : ObrasLoteModal { }
 
     // ==========================================
     // MODAL CARD: CONFIRMAR ELIMINACIÓN OBRA

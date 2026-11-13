@@ -1,9 +1,9 @@
 {
   "host": "127.0.0.1",
   "port": 5432,
-  "database": "firma_fiscal_acd",
-  "user": "ivan395",
-  "password": "ABCabc123",
+  "database": "nombre_base_de_datos",
+  "user": "usuario_postgres",
+  "password": "CAMBIAR_CONTRASENA",
   "ssl_mode": "disable",
   "connection_url": ""
 }

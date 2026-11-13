@@ -201,8 +201,8 @@ pub fn registrar_archivo_staged<C: GenericClient>(
             "INSERT INTO public.archivos_cedulas
                 (id_registro_patronal, id_revision_carga, sha256, nombre_original,
                  rustfs_key, staging_key, tipo, anio_periodo, mes_periodo_int,
-                 paginas, trabajadores, estado)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'STAGED')
+                 paginas, trabajadores, estado, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'STAGED', $12)
              ON CONFLICT ON CONSTRAINT uq_archivos_cedulas_rp_sha DO UPDATE SET
                 estado = CASE WHEN public.archivos_cedulas.estado = 'ACTIVO'
                               THEN 'ACTIVO' ELSE 'STAGED' END,
@@ -224,6 +224,7 @@ pub fn registrar_archivo_staged<C: GenericClient>(
                 &a.mes,
                 &a.paginas,
                 &a.trabajadores,
+                &crate::db::analistas::id_analista_actual(),
             ],
         )
         .map_err(|e| format!("Error registrando archivo STAGED '{}': {}", a.nombre_original, crate::db::schema::format_pg_error(&e)))?;

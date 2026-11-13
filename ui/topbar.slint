@@ -213,6 +213,34 @@ export component TopBar inherits Rectangle {
                 }
             }
 
+            // Analista en sesión (ADD-05): clic para elegir o cambiar
+            Rectangle {
+                height: 30px;
+                border-radius: 15px;
+                background: analista_touch.has-hover ? #eff6ff : #f8fafc;
+                border-width: 1px;
+                border-color: analista_touch.has-hover ? #3b82f6 : #cbd5e1;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    alignment: center;
+
+                    Text {
+                        text: "👤 " + (AppData.analista_actual_nombre != "" ? AppData.analista_actual_nombre : "Elegir analista");
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #1e3a8a;
+                        vertical-alignment: center;
+                    }
+                }
+
+                analista_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { AppLogic.analista_abrir_selector(); }
+                }
+            }
+
             // Botón manual de comprobación de actualizaciones
             Rectangle {
                 height: 30px;

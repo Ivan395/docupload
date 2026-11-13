@@ -321,6 +321,39 @@ BEGIN
 END $$;
 "#;
 
+pub(crate) const SQL_CORRECCIONES_F6_EMPLEADOS: &str = r#"
+-- D-8 c: true cuando el analista fijó a mano el estado (esta_activo) y debe prevalecer sobre la cédula.
+ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS estado_manual boolean NOT NULL DEFAULT false;
+ALTER TABLE IF EXISTS revision_history.empleados ADD COLUMN IF NOT EXISTS estado_manual boolean;
+CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_empleado ON public.reportes_liquidaciones(id_empleado);
+CREATE INDEX IF NOT EXISTS idx_liquidaciones_empleado ON public.liquidaciones(id_empleado);
+"#;
+
+pub(crate) const SQL_CORRECCIONES_F7_ANALISTAS: &str = r#"
+-- ADD-05 niveles 1 y 2 (D-6 a): catálogo de analistas, autoría y bloqueo optimista. Solo aditivo.
+CREATE TABLE IF NOT EXISTS public.analistas (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    nombre varchar(150) NOT NULL UNIQUE,
+    activo boolean NOT NULL DEFAULT true,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+);
+ALTER TABLE public.registros_obras  ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.registros_obras  ADD COLUMN IF NOT EXISTS updated_by uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.revisiones       ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.revisiones       ADD COLUMN IF NOT EXISTS id_analista_responsable uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.archivos_cedulas ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.reportes_cambios ADD COLUMN IF NOT EXISTS id_analista uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 0;
+-- Historial: mismas columnas sin restricciones (el trigger de historial copia por nombre de columna).
+ALTER TABLE IF EXISTS revision_history.registros_obras  ADD COLUMN IF NOT EXISTS created_by uuid;
+ALTER TABLE IF EXISTS revision_history.registros_obras  ADD COLUMN IF NOT EXISTS updated_by uuid;
+ALTER TABLE IF EXISTS revision_history.revisiones       ADD COLUMN IF NOT EXISTS created_by uuid;
+ALTER TABLE IF EXISTS revision_history.revisiones       ADD COLUMN IF NOT EXISTS id_analista_responsable uuid;
+ALTER TABLE IF EXISTS revision_history.archivos_cedulas ADD COLUMN IF NOT EXISTS created_by uuid;
+ALTER TABLE IF EXISTS revision_history.reportes_cambios ADD COLUMN IF NOT EXISTS id_analista uuid;
+ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones ADD COLUMN IF NOT EXISTS version integer;
+"#;
+
 pub(crate) const SQL_FASE1_RESTRICCIONES: &str = r#"
 -- a) Empleados: NSS único por cliente (solo NSS no vacíos)
 DO $$
@@ -2337,6 +2370,12 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     // 16. Correcciones F5: RP de obra normalizado a su revisión y FK nómina→revisión NOT VALID (no destructivo)
     exec_schema_step(client, "8_correcciones_f5_integridad", SQL_CORRECCIONES_F5_INTEGRIDAD)?;
 
+    // 17. Correcciones F6: estado manual del empleado (D-8 c) e índices de histórico (no destructivo)
+    exec_schema_step(client, "9_correcciones_f6_empleados", SQL_CORRECCIONES_F6_EMPLEADOS)?;
+
+    // 18. Correcciones F7: analistas, autoría (created_by/updated_by/id_analista) y versión de reportes (D-6 a)
+    exec_schema_step(client, "10_correcciones_f7_analistas", SQL_CORRECCIONES_F7_ANALISTAS)?;
+
     match restricciones_fase1_pendientes(client) {
         Ok(lista) if !lista.is_empty() => log::warn!(
             "Restricciones de integridad pendientes (hay duplicados por depurar): {}",
@@ -2576,6 +2615,52 @@ mod tests_fase1_ddl {
             assert!(
                 !SQL_CORRECCIONES_F5_INTEGRIDAD.contains(prohibido),
                 "SQL_CORRECCIONES_F5_INTEGRIDAD no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn correcciones_f6_empleados_es_aditiva() {
+        for fragmento in ["estado_manual", "idx_liquidaciones_empleado"] {
+            assert!(
+                SQL_CORRECCIONES_F6_EMPLEADOS.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F6_EMPLEADOS",
+                fragmento
+            );
+        }
+        for prohibido in [
+            "DELETE FROM",
+            "UPDATE public.",
+            "DROP ",
+            "TRUNCATE",
+        ] {
+            assert!(
+                !SQL_CORRECCIONES_F6_EMPLEADOS.contains(prohibido),
+                "SQL_CORRECCIONES_F6_EMPLEADOS no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn correcciones_f7_analistas_es_aditiva() {
+        for fragmento in ["CREATE TABLE IF NOT EXISTS public.analistas", "version integer NOT NULL DEFAULT 0", "id_analista uuid"] {
+            assert!(
+                SQL_CORRECCIONES_F7_ANALISTAS.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F7_ANALISTAS",
+                fragmento
+            );
+        }
+        for prohibido in [
+            "DELETE FROM",
+            "UPDATE public.",
+            "DROP ",
+            "TRUNCATE",
+        ] {
+            assert!(
+                !SQL_CORRECCIONES_F7_ANALISTAS.contains(prohibido),
+                "SQL_CORRECCIONES_F7_ANALISTAS no debe contener {}",
                 prohibido
             );
         }

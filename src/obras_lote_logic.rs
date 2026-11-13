@@ -1,5 +1,3 @@
-// Se conecta a la UI en la tarea de modal de alta masiva
-#![allow(dead_code)]
 
 //! Alta masiva de registros de obra: interpretación de la tabla, clasificación frente a las obras
 //! existentes de la revisión y resumen de la vista previa. Funciones puras (sin BD).

@@ -1,5 +1,3 @@
-// Se conecta a la UI en la tarea de modal de alta masiva
-#![allow(dead_code)]
 
 //! Lectura de tablas para cargas masivas (pegado desde Excel, CSV o XLSX).
 //!

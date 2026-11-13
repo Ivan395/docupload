@@ -1,4 +1,4 @@
-use postgres::Client;
+use postgres::{Client, GenericClient};
 use uuid::Uuid;
 use crate::validation::*;
 
@@ -95,6 +95,40 @@ pub struct EmpleadoItem {
     pub sbc_diario: f64,
     pub pensionado: String,
     pub esta_activo: bool,
+    /// D-8 c: true si el analista fijó el estado a mano; prevalece sobre la cédula.
+    pub estado_manual: bool,
+    /// Fecha del último movimiento BAJA de cédula (None si el último movimiento no es baja).
+    pub baja_fecha: Option<chrono::NaiveDate>,
+    /// None si no hay movimientos de cédula; Some(false) si el último es BAJA; Some(true) en otro caso.
+    pub activo_segun_cedula: Option<bool>,
+    /// Obras con días > 0 en el último mes cargado del empleado.
+    pub obras_actuales: i64,
+    /// Número de la obra (orden alfabético, la primera) del último mes cargado; "" si no tiene.
+    pub ultima_obra: String,
+}
+
+/// D-8: estado efectivo del empleado. Devuelve (activo, etiqueta).
+/// Prioridad: fijado a mano > último movimiento de cédula > `esta_activo` (sin cédula).
+pub fn estado_empleado_efectivo(e: &EmpleadoItem) -> (bool, String) {
+    if e.estado_manual {
+        return if e.esta_activo {
+            (true, "Activo (manual)".to_string())
+        } else {
+            (false, "Baja (manual)".to_string())
+        };
+    }
+    match e.activo_segun_cedula {
+        Some(false) => {
+            let etiqueta = match e.baja_fecha {
+                Some(f) => format!("Baja {}", f.format("%d/%m/%Y")),
+                None => "Baja".to_string(),
+            };
+            (false, etiqueta)
+        }
+        Some(true) => (true, "Activo".to_string()),
+        None if e.esta_activo => (true, "Activo (sin cédula)".to_string()),
+        None => (false, "Baja (sin cédula)".to_string()),
+    }
 }
 
 pub fn count_words(text: &str) -> usize {
@@ -984,6 +1018,14 @@ pub fn fetch_empleados_by_cliente(
     client: &mut Client,
     id_cliente: &str,
 ) -> Result<Vec<EmpleadoItem>, String> {
+    fetch_empleados_by_cliente_con(client, id_cliente)
+}
+
+/// Igual que `fetch_empleados_by_cliente`, genérica sobre `Client` o `Transaction` (pruebas de integración).
+pub fn fetch_empleados_by_cliente_con<C: GenericClient>(
+    client: &mut C,
+    id_cliente: &str,
+) -> Result<Vec<EmpleadoItem>, String> {
     let cliente_uuid = Uuid::parse_str(id_cliente.trim())
         .map_err(|_| "ID de cliente inválido".to_string())?;
 
@@ -998,23 +1040,52 @@ pub fn fetch_empleados_by_cliente(
                 COALESCE(TRIM(e.rfc), ''),
                 COALESCE(TRIM(e.curp), ''),
                 COALESCE(TRIM(e.nss), ''),
-                COALESCE(
-                    (SELECT TRIM(rp.registro) FROM public.nominas n 
-                     JOIN public.registros_patronales rp ON rp.id = COALESCE(n.id_registro_patronal, (SELECT rev.id_registro_patronal FROM public.revisiones rev WHERE rev.id = n.id_revision))
-                     WHERE n.id_empleado = e.id LIMIT 1),
-                    (SELECT TRIM(rp.registro) FROM public.liquidaciones l 
-                     JOIN public.registros_patronales rp ON l.id_registro_patronal = rp.id 
-                     WHERE l.id_empleado = e.id LIMIT 1),
-                    ''
-                ) AS registro_patronal,
+                -- FIX-09: todos los RP distintos del empleado (liquidaciones y nóminas), no solo el primero
+                COALESCE((SELECT string_agg(DISTINCT TRIM(rp.registro), ', ' ORDER BY TRIM(rp.registro))
+                          FROM public.registros_patronales rp
+                          WHERE rp.id IN (
+                              SELECT l.id_registro_patronal FROM public.liquidaciones l WHERE l.id_empleado = e.id
+                              UNION
+                              SELECT COALESCE(n.id_registro_patronal, rev.id_registro_patronal)
+                              FROM public.nominas n LEFT JOIN public.revisiones rev ON rev.id = n.id_revision
+                              WHERE n.id_empleado = e.id)), '') AS registro_patronal,
                 COALESCE(
                     (SELECT n.salario_diario_integrado FROM public.nominas n WHERE n.id_empleado = e.id ORDER BY n.fecha_pago DESC NULLS LAST LIMIT 1),
                     0.0
                 ) AS sbc_diario,
                 COALESCE(e.esta_activo, true) AS esta_activo,
-                COALESCE(TRIM(e.pensionado), '') AS pensionado
+                COALESCE(TRIM(e.pensionado), '') AS pensionado,
+                COALESCE(e.estado_manual, false) AS estado_manual,
+                mov.clave AS mov_clave,
+                mov.fecha AS mov_fecha,
+                COALESCE(oa.n, 0) AS obras_actuales,
+                COALESCE(oa.ultima, '') AS ultima_obra
             FROM public.empleados e
             JOIN public.clientes c ON e.id_cliente = c.id
+            -- D-8: último movimiento de cédula (BAJA / ALTA / REINGRESO) con fecha
+            LEFT JOIN LATERAL (
+                SELECT UPPER(BTRIM(d.clave)) AS clave, d.fecha
+                FROM public.detalles_liquidaciones d
+                JOIN public.liquidaciones l ON l.id = d.id_liquidacion
+                WHERE l.id_empleado = e.id AND d.fecha IS NOT NULL
+                  AND (UPPER(BTRIM(d.clave)) = 'BAJA' OR UPPER(BTRIM(d.clave)) LIKE 'ALTA%' OR UPPER(BTRIM(d.clave)) LIKE 'REING%')
+                ORDER BY d.fecha DESC, (UPPER(BTRIM(d.clave)) = 'BAJA') DESC
+                LIMIT 1
+            ) mov ON true
+            -- Obras del último mes cargado del empleado (reportes ACTIVO, obras activas, con días > 0)
+            LEFT JOIN LATERAL (
+                SELECT COUNT(DISTINCT d.id_registro_obra) AS n, MIN(TRIM(ro.numero)) AS ultima
+                FROM public.reportes_liquidaciones rl
+                JOIN public.reportes_detalles_liquidaciones d ON d.id_reporte_liquidacion = rl.id
+                JOIN public.registros_obras ro ON ro.id = d.id_registro_obra AND ro.activa
+                WHERE rl.id_empleado = e.id AND rl.estado = 'ACTIVO' AND COALESCE(d.dias_registro_obra, 0) > 0
+                  AND (rl.anio_periodo, rl.mes_periodo_int) = (
+                      SELECT rl2.anio_periodo, rl2.mes_periodo_int
+                      FROM public.reportes_liquidaciones rl2
+                      WHERE rl2.id_empleado = e.id AND rl2.estado = 'ACTIVO'
+                      ORDER BY rl2.anio_periodo DESC, rl2.mes_periodo_int DESC
+                      LIMIT 1)
+            ) oa ON true
             WHERE e.id_cliente = $1
             ORDER BY e.nombre
             "#,
@@ -1035,6 +1106,15 @@ pub fn fetch_empleados_by_cliente(
         let sbc: f64 = r.get(8);
         let activo: bool = r.get(9);
         let pensionado: String = r.get(10);
+        let estado_manual: bool = r.get(11);
+        let mov_clave: Option<String> = r.get(12);
+        let mov_fecha: Option<chrono::NaiveDate> = r.get(13);
+        let obras_actuales: i64 = r.get(14);
+        let ultima_obra: String = r.get(15);
+
+        // Último movimiento BAJA => baja con su fecha; cualquier otro (ALTA/REINGRESO) => activo.
+        let activo_segun_cedula = mov_clave.as_deref().map(|c| c != "BAJA");
+        let baja_fecha = if mov_clave.as_deref() == Some("BAJA") { mov_fecha } else { None };
 
         list.push(EmpleadoItem {
             id: id.to_string(),
@@ -1048,6 +1128,11 @@ pub fn fetch_empleados_by_cliente(
             sbc_diario: sbc,
             pensionado,
             esta_activo: activo,
+            estado_manual,
+            baja_fecha,
+            activo_segun_cedula,
+            obras_actuales,
+            ultima_obra,
         });
     }
 
@@ -1093,6 +1178,8 @@ pub fn update_empleado(
         if n.is_empty() { None } else { Some(n) }
     };
 
+    // D-8 c: en PostgreSQL todas las expresiones del SET leen los valores ANTERIORES de la fila,
+    // así que `esta_activo IS DISTINCT FROM $6` compara contra el estado guardado.
     client
         .execute(
             r#"
@@ -1101,6 +1188,7 @@ pub fn update_empleado(
                 rfc = $3,
                 curp = $4,
                 nss = $5,
+                estado_manual = estado_manual OR (esta_activo IS DISTINCT FROM $6),
                 esta_activo = $6
             WHERE id = $1
             "#,
@@ -1172,6 +1260,11 @@ pub fn create_empleado(
         sbc_diario: 0.0,
         pensionado: "".to_string(),
         esta_activo,
+        estado_manual: false,
+        baja_fecha: None,
+        activo_segun_cedula: None,
+        obras_actuales: 0,
+        ultima_obra: String::new(),
     })
 }
 
@@ -1285,6 +1378,63 @@ pub fn delete_registro_patronal(client: &mut Client, id: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn emp_estado(
+        esta_activo: bool,
+        estado_manual: bool,
+        segun_cedula: Option<bool>,
+        baja: Option<chrono::NaiveDate>,
+    ) -> EmpleadoItem {
+        EmpleadoItem {
+            esta_activo,
+            estado_manual,
+            activo_segun_cedula: segun_cedula,
+            baja_fecha: baja,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn estado_efectivo_manual_prevalece_sobre_cedula() {
+        let baja = chrono::NaiveDate::from_ymd_opt(2025, 2, 15);
+        assert_eq!(
+            estado_empleado_efectivo(&emp_estado(true, true, Some(false), baja)),
+            (true, "Activo (manual)".to_string())
+        );
+        assert_eq!(
+            estado_empleado_efectivo(&emp_estado(false, true, Some(true), None)),
+            (false, "Baja (manual)".to_string())
+        );
+    }
+
+    #[test]
+    fn estado_efectivo_desde_cedula() {
+        let baja = chrono::NaiveDate::from_ymd_opt(2025, 2, 15);
+        assert_eq!(
+            estado_empleado_efectivo(&emp_estado(true, false, Some(false), baja)),
+            (false, "Baja 15/02/2025".to_string())
+        );
+        assert_eq!(
+            estado_empleado_efectivo(&emp_estado(true, false, Some(false), None)),
+            (false, "Baja".to_string())
+        );
+        assert_eq!(
+            estado_empleado_efectivo(&emp_estado(false, false, Some(true), None)),
+            (true, "Activo".to_string())
+        );
+    }
+
+    #[test]
+    fn estado_efectivo_sin_cedula_usa_esta_activo() {
+        assert_eq!(
+            estado_empleado_efectivo(&emp_estado(true, false, None, None)),
+            (true, "Activo (sin cédula)".to_string())
+        );
+        assert_eq!(
+            estado_empleado_efectivo(&emp_estado(false, false, None, None)),
+            (false, "Baja (sin cédula)".to_string())
+        );
+    }
 
     #[test]
     fn test_count_words_empty_and_whitespace() {

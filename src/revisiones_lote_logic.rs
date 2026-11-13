@@ -1,6 +1,3 @@
-// Se conecta a la UI en la tarea de modal de alta masiva
-#![allow(dead_code)]
-
 //! Alta masiva de revisiones de un registro patronal: interpretación de la tabla (o generador por
 //! prefijo y consecutivo), clasificación frente a las revisiones existentes y vista previa.
 //! Funciones puras (sin BD).

@@ -100,6 +100,31 @@ export struct EmpleadoData {
     sbc_diario_str: string,
     pensionado: string,
     esta_activo: bool,
+    // D-8: estado derivado de la cédula (prevalece el fijado a mano)
+    estado_texto: string,
+    estado_es_baja: bool,
+    estado_manual: bool,
+    obras_actuales: int,
+    ultima_obra: string,
+}
+
+// D-10 b: histórico empleado × obra (periodos compactados y detalle mensual)
+export struct HistPeriodoUi {
+    revision: string,
+    obra: string,
+    inicio: string,
+    fin: string,
+    dias_calendario: int,
+    dias_obra: int,
+}
+
+export struct HistMesUi {
+    revision: string,
+    mes: string,
+    obra: string,
+    dias_obra: int,
+    rango: string,
+    estado: string,
 }
 
 export struct RevisionData {
@@ -655,6 +680,12 @@ export struct EntregablePunto { severidad: int, titulo: string, detalle: string 
 // Versión emitida del entregable IMSS con su huella de integridad
 export struct EntregableVersion { id: string, version: int, tipo: string, fecha: string, hash: string, resumen: string }
 
+// Alta masiva de obras (ADD-01/ADD-02)
+export struct ObraLoteFilaUi { renglon: int, numero: string, inicio: string, fin: string, monto: string, estado: string, es_error: bool, errores: string, accion: string, acciones: [string] }
+
+// Alta masiva de revisiones (ADD-03)
+export struct RevisionLoteFilaUi { renglon: int, nombre: string, folio: string, periodo: string, aprobacion: string, estado: string, es_error: bool, errores: string, incluir: bool, puede_incluir: bool }
+
 export global AppData {
     // Asignación por empleado (pestañas de Reporte)
     in-out property <int> reporte_tab_idx: 0; // 0 Detalle de cuotas, 1 Asignación por empleado, 2 Asignación por obra
@@ -737,6 +768,17 @@ export global AppData {
     in-out property <string> rp_search: "";
     in-out property <string> empleados_search: "";
     in-out property <bool> empleados_filter_active_only: false;
+    // 0 Todos, 1 Dados de baja, 2 Sin obra actual, 3 Con 2+ obras
+    in-out property <int> empleados_filtro: 0;
+
+    // Histórico empleado × obra (D-10 b)
+    in-out property <bool> show_historial_empleado: false;
+    in-out property <string> historial_empleado_id: "";
+    in-out property <string> historial_empleado_nombre: "";
+    in-out property <bool> historial_solo_revision: false;
+    in-out property <[HistPeriodoUi]> historial_periodos: [];
+    in-out property <[HistMesUi]> historial_meses: [];
+    in-out property <bool> historial_cargando: false;
 
     // Estadísticas globales para Barra Inferior
     in-out property <int> total_clientes_count: 0;
@@ -894,6 +936,12 @@ export global AppData {
 
     // Modal: Formulario Revisión
     in-out property <bool> show_revision_modal: false;
+    // Alta masiva de revisiones (ADD-03)
+    in-out property <bool> show_revisiones_lote_modal: false;
+    in-out property <string> revisiones_lote_texto: "";
+    in-out property <[RevisionLoteFilaUi]> revisiones_lote_filas: [];
+    in-out property <string> revisiones_lote_resumen: "";
+    in-out property <bool> revisiones_lote_procesando: false;
     in-out property <bool> revision_form_is_editing: false;
     in-out property <string> rev_form_id: "";
     in-out property <string> rev_form_nombre: "";
@@ -921,6 +969,12 @@ export global AppData {
 
     // Modal: Formulario Registro de Obra
     in-out property <bool> show_obra_modal: false;
+    // Alta masiva de obras (ADD-01/ADD-02)
+    in-out property <bool> show_obras_lote_modal: false;
+    in-out property <string> obras_lote_texto: "";
+    in-out property <[ObraLoteFilaUi]> obras_lote_filas: [];
+    in-out property <string> obras_lote_resumen: "";
+    in-out property <bool> obras_lote_procesando: false;
     in-out property <bool> obra_form_is_editing: false;
     in-out property <string> obra_form_id: "";
     in-out property <string> obra_form_numero: "";
@@ -984,6 +1038,12 @@ export global AppData {
     in-out property <bool> show_toast: false;
     in-out property <string> toast_type: "info";
     in-out property <string> toast_icon: "ℹ";
+
+    // Analista en sesión (ADD-05)
+    in-out property <string> analista_actual_nombre: "";
+    in-out property <bool> show_analista_modal: false;
+    in-out property <[string]> analistas_lista: [];
+    in-out property <string> analista_nuevo_nombre: "";
 
     // ==========================================
     // SISTEMA DE ACTUALIZACIÓN AUTOMÁTICA
@@ -1528,6 +1588,14 @@ export global AppData {
 }
 
 export global AppLogic {
+    // Alta masiva de obras (ADD-01/ADD-02)
+    callback obras_lote_abrir();
+    callback obras_lote_cerrar();
+    callback obras_lote_vista_previa(string);
+    callback obras_lote_elegir_archivo();
+    callback obras_lote_cambiar_accion(int, string);
+    callback obras_lote_aplicar();
+    callback obras_lote_adoptar_detectadas();
     // Asignación por empleado
     callback asig_buscar(string);
     callback asig_filtrar(int);
@@ -1557,6 +1625,14 @@ export global AppLogic {
     callback asig_asistente_vista_previa();
     callback asig_asistente_aplicar();
     callback asig_asistente_atras();
+    // Alta masiva de revisiones (ADD-03)
+    callback revisiones_lote_abrir();
+    callback revisiones_lote_cerrar();
+    callback revisiones_lote_vista_previa(string);
+    callback revisiones_lote_elegir_archivo();
+    callback revisiones_lote_generar(string, string, string, string); // prefijo nombre, prefijo folio, desde, cantidad
+    callback revisiones_lote_alternar(int);
+    callback revisiones_lote_aplicar();
     // Navegación
     callback navigate_view(int);
     callback toggle_sidebar();
@@ -1682,6 +1758,10 @@ callback recargar_cedulas_view();
     callback close_edit_empleado_panel();
     callback submit_edit_empleado(string, string, string, string, string, string, bool);
     callback toggle_empleados_filter_active();
+    callback empleados_cambiar_filtro(int);
+    callback historial_empleado_abrir(string, string);   // id_empleado, nombre
+    callback historial_empleado_cerrar();
+    callback historial_empleado_alternar_alcance();
     callback filter_empleados_search();
 
     // Validaciones en tiempo real (RFC, CURP, NSS, Registro Patronal, Registro de Obra)
@@ -1732,21 +1812,9 @@ callback recargar_cedulas_view();
     callback reporte_toggle_select_all(bool);
     callback reporte_limpiar_seleccion();
     callback reporte_toggle_expand_row(string);
-    callback reporte_open_obra_picker(string);
-    callback reporte_filter_obra_picker(string);
-    callback reporte_select_obra_picker(string, string);
-    callback reporte_close_obra_picker();
-    callback reporte_open_edit_dias(string);
-    callback reporte_submit_edit_dias(string, string, string);
-    callback reporte_close_edit_dias();
 
     // Callbacks del modal unificado de edición
     callback reporte_open_unified_modal(string);
-    callback reporte_filter_edit_obras(string);
-    callback reporte_select_edit_obra(string, string);
-    callback reporte_toggle_edit_dropdown();
-    callback reporte_edit_dias_cedula_changed(string);
-    callback reporte_submit_unified_edit(string, string, string, string);
     callback reporte_close_edit_modal();
     callback reporte_edit_toggle_obra(string);
     callback reporte_edit_obra_dias_changed(string, string);
@@ -1764,25 +1832,16 @@ callback recargar_cedulas_view();
     callback reporte_close_add_obra_modal();
     callback reporte_filter_add_obras(string);
     callback reporte_select_add_obra(string, string);
-    callback reporte_toggle_add_dropdown();
     callback reporte_submit_add_obra(string, string, string);
     callback reporte_delete_split_row(string);
 
     // Callbacks del modal masivo de edición en lote
     callback reporte_open_batch_edit_modal();
     callback reporte_close_batch_edit_modal();
-    callback reporte_filter_batch_edit_obras(string);
-    callback reporte_select_batch_edit_obra(string, string);
-    callback reporte_toggle_batch_edit_dropdown();
     callback reporte_batch_edit_dias_cedula_changed(string);
     callback reporte_batch_edit_toggle_obra(string);
-    callback reporte_batch_edit_set_multi_mode(bool);
     callback reporte_submit_batch_edit(string, bool, string, bool, string, bool);
 
-    callback reporte_batch_apply(int, string, string, bool);
-    callback reporte_batch_igualar_dias();
-    callback reporte_batch_poner_dias_cero();
-    callback reporte_batch_apply_dias_obra(string);
     callback reporte_batch_desvincular_obra();
     callback reporte_request_confirm_igualar_dias();
     callback reporte_cancel_confirm_igualar_dias();
@@ -1806,9 +1865,6 @@ callback recargar_cedulas_view();
     callback reporte_toggle_sort_criterion(string);
     callback reporte_toggle_sort_direction(string);
     callback reporte_reset_sorting();
-
-    // Verificación y autocorrección de días y obras
-    callback reporte_verificar_y_corregir_dias();
 
     // Side Drawer de Registros de Obra
     callback reporte_toggle_drawer_obras();
@@ -1836,7 +1892,6 @@ callback recargar_cedulas_view();
     callback reporte_abrir_modal_exportar_sua();
     callback reporte_cerrar_modal_exportar_sua();
     callback reporte_toggle_sua_obra(string);
-    callback reporte_sua_select_all_obras(bool);
     callback reporte_sua_select_preset(string);
     callback reporte_generar_sua();
 
@@ -1909,4 +1964,9 @@ callback recargar_cedulas_view();
     callback close_update_modal();
     callback start_update_download();
     callback install_update_now();
+
+    // Analista en sesión (ADD-05)
+    callback analista_abrir_selector();
+    callback analista_elegir(string);
+    callback analista_cerrar_selector();
 }

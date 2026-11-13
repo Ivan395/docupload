@@ -5,9 +5,12 @@
 //! `editado_usuario` y se guarda la foto "despues". Todas las operaciones usan el cliente
 //! recibido, por lo que se ejecutan dentro de la transacción del llamador.
 
+use std::collections::HashMap;
+
 use postgres::GenericClient;
 use uuid::Uuid;
 
+use crate::db::analistas;
 use crate::db::prorrateo::recalcular_prorrateo_tx;
 use crate::db::schema::format_pg_error;
 
@@ -132,16 +135,46 @@ pub fn iniciar_edicion<C: GenericClient>(
     if ids_reportes.is_empty() {
         return Ok(lote);
     }
+    // Bloquea los reportes del lote: serializa ediciones concurrentes sobre los mismos reportes.
+    let actuales: Vec<(Uuid, i32)> = c
+        .query(
+            "SELECT id, version FROM public.reportes_liquidaciones WHERE id = ANY($1) FOR UPDATE",
+            &[&ids_reportes],
+        )
+        .map_err(|e| format!("iniciar_edicion (bloqueo de reportes): {}", format_pg_error(&e)))?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    // Bloqueo optimista: DESHACER no verifica versiones (sí bloquea).
+    if accion != ACCION_DESHACER {
+        let esperadas: HashMap<Uuid, i32> = ids_reportes
+            .iter()
+            .filter_map(|id| analistas::version_esperada(*id).map(|v| (*id, v)))
+            .collect();
+        let en_conflicto = analistas::conflictos(&esperadas, &actuales);
+        if !en_conflicto.is_empty() {
+            return Err(format!(
+                "Otro analista modificó {} empleado-mes de este cambio después de que los cargaste. Recarga el reporte e inténtalo de nuevo.",
+                en_conflicto.len()
+            ));
+        }
+    }
+    let nombre_analista = analistas::nombre_analista_actual();
+    let id_analista = analistas::id_analista_actual();
     // El WHERE sobre reportes_liquidaciones produce una sola fila por reporte aunque el id se repita.
+    // usuario: nombre del analista de la sesión; si no hay, el usuario de la conexión.
     let sql = format!(
-        "INSERT INTO public.reportes_cambios (id_revision, id_reporte_liquidacion, lote_id, accion, antes, usuario) \
-         SELECT rl.id_revision, rl.id, $1, $2, {}, current_user \
+        "INSERT INTO public.reportes_cambios (id_revision, id_reporte_liquidacion, lote_id, accion, antes, usuario, id_analista) \
+         SELECT rl.id_revision, rl.id, $1, $2, {}, COALESCE(LEFT(NULLIF($4::text, ''), 100), current_user), $5::uuid \
          FROM public.reportes_liquidaciones rl \
          WHERE rl.id = ANY($3)",
         SQL_FOTO_REPORTE
     );
-    c.execute(sql.as_str(), &[&lote, &accion, &ids_reportes])
-        .map_err(|e| format!("iniciar_edicion ({}): {}", accion, format_pg_error(&e)))?;
+    c.execute(
+        sql.as_str(),
+        &[&lote, &accion, &ids_reportes, &nombre_analista, &id_analista],
+    )
+    .map_err(|e| format!("iniciar_edicion ({}): {}", accion, format_pg_error(&e)))?;
     Ok(lote)
 }
 
@@ -185,6 +218,19 @@ pub fn cerrar_edicion<C: GenericClient>(
 
     registrar_foto_despues(c, lote_id)?;
 
+    // Cada cierre de edición avanza la versión de los reportes y actualiza el registro de esta instancia.
+    let pares: Vec<(Uuid, i32)> = c
+        .query(
+            "UPDATE public.reportes_liquidaciones SET version = version + 1 \
+             WHERE id = ANY($1) RETURNING id, version",
+            &[&ids],
+        )
+        .map_err(|e| format!("cerrar_edicion (versiones): {}", format_pg_error(&e)))?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    analistas::registrar_versiones(&pares);
+
     Ok(ids.len() as u64)
 }
 
@@ -209,6 +255,10 @@ fn registrar_foto_despues<C: GenericClient>(c: &mut C, lote_id: Uuid) -> Result<
 pub fn deshacer_lote_tx<C: GenericClient>(c: &mut C, lote_id: Uuid) -> Result<u64, String> {
     const MSG_NO_DESHACIBLE: &str =
         "Este cambio no se puede deshacer automáticamente: el reporte fue reconstruido";
+
+    if lote_tiene_cambios_posteriores_de_otro(c, lote_id)? {
+        return Err("No se puede deshacer: otro analista modificó después esos empleado-mes.".to_string());
+    }
 
     let filas = c
         .query(
@@ -275,19 +325,51 @@ pub fn deshacer_lote(client: &mut postgres::Client, lote_id: Uuid) -> Result<u64
 }
 
 /// Devuelve el lote más reciente de la revisión que no sea de acción `DESHACER`, con su acción.
+/// Si hay analista en la sesión, considera solo los lotes de ese analista (FIX-08).
 pub fn ultimo_lote_revision(
     client: &mut postgres::Client,
     id_revision: Uuid,
 ) -> Result<Option<(Uuid, String)>, String> {
-    let fila = client
-        .query_opt(
+    let fila = match analistas::id_analista_actual() {
+        Some(id_analista) => client.query_opt(
+            "SELECT lote_id, MIN(accion) FROM public.reportes_cambios \
+             WHERE id_revision = $1 AND accion <> $2 AND deshecho_por IS NULL AND id_analista = $3 \
+             GROUP BY lote_id ORDER BY MAX(created_at) DESC LIMIT 1",
+            &[&id_revision, &ACCION_DESHACER, &id_analista],
+        ),
+        None => client.query_opt(
             "SELECT lote_id, MIN(accion) FROM public.reportes_cambios \
              WHERE id_revision = $1 AND accion <> $2 AND deshecho_por IS NULL \
              GROUP BY lote_id ORDER BY MAX(created_at) DESC LIMIT 1",
             &[&id_revision, &ACCION_DESHACER],
-        )
-        .map_err(|e| format!("ultimo_lote_revision: {}", format_pg_error(&e)))?;
+        ),
+    }
+    .map_err(|e| format!("ultimo_lote_revision: {}", format_pg_error(&e)))?;
     Ok(fila.map(|r| (r.get(0), r.get(1))))
+}
+
+/// SQL: existe un reporte del lote que aparece en un lote posterior, no deshecho, de OTRO analista.
+const SQL_CAMBIOS_POSTERIORES_DE_OTRO: &str = "SELECT EXISTS (\
+    SELECT 1 FROM public.reportes_cambios r \
+    JOIN public.reportes_cambios p \
+      ON p.id_reporte_liquidacion = r.id_reporte_liquidacion \
+     AND p.lote_id <> r.lote_id \
+     AND p.created_at > r.created_at \
+    WHERE r.lote_id = $1 \
+      AND r.id_reporte_liquidacion IS NOT NULL \
+      AND p.deshecho_por IS NULL \
+      AND p.id_analista IS DISTINCT FROM r.id_analista)";
+
+/// true si algún reporte del lote fue modificado después por otro analista (no deshecho).
+/// Un lote así no puede deshacerse sin pisar el trabajo de ese analista (FIX-08).
+pub fn lote_tiene_cambios_posteriores_de_otro<C: GenericClient>(
+    c: &mut C,
+    lote_id: Uuid,
+) -> Result<bool, String> {
+    let fila = c
+        .query_one(SQL_CAMBIOS_POSTERIORES_DE_OTRO, &[&lote_id])
+        .map_err(|e| format!("lote_tiene_cambios_posteriores_de_otro: {}", format_pg_error(&e)))?;
+    Ok(fila.get(0))
 }
 
 #[cfg(test)]
@@ -299,6 +381,18 @@ mod tests {
         assert!(SQL_FOTO_REPORTE.contains("tramos"));
         assert!(SQL_FOTO_REPORTE.contains("id_registro_obra"));
         assert!(SQL_FOTO_REPORTE.contains("dias_registro_obra"));
+    }
+
+    #[test]
+    fn bitacora_sql_de_concurrencia_y_autoria_presente() {
+        const CODIGO: &str = include_str!("bitacora_reportes.rs");
+        assert!(CODIGO.contains("WHERE id = ANY($1) FOR UPDATE"));
+        assert!(CODIGO.contains("SET version = version + 1"));
+        assert!(CODIGO.contains("COALESCE(LEFT(NULLIF($4::text, ''), 100), current_user)"));
+        assert!(CODIGO.contains("id_analista) \\"));
+        assert!(SQL_CAMBIOS_POSTERIORES_DE_OTRO.contains("p.deshecho_por IS NULL"));
+        assert!(SQL_CAMBIOS_POSTERIORES_DE_OTRO.contains("p.id_analista IS DISTINCT FROM r.id_analista"));
+        assert!(SQL_CAMBIOS_POSTERIORES_DE_OTRO.contains("p.lote_id <> r.lote_id"));
     }
 
     #[test]

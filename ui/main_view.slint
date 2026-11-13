@@ -18,6 +18,7 @@ import { UploadCard } from "upload_card.slint";
 import { ActionPanel } from "action_panel.slint";
 import { ResultsPanel } from "results_panel.slint";
 import { UpdateModal } from "update_modal.slint";
+import { AnalistaModal } from "analista_modal.slint";
 export { AppData, AppLogic, DateHelper, DateDmy, FileItemData, UnprocessedItemData, MismatchDetailItem, ProcessingSummary, ClienteCardData, RegistroPatronalData, EmpleadoData, RevisionData, RegistroObraData, CedulaFileItem, CedulaDetalleRow, CedulaSumatoriaRow, ReporteObraItem, ReporteLiquidacionRow, CalendarDayCell, CalendarHolidayItem, CalendarRevisionItem } from "models.slint";
 import { AppData, AppLogic } from "models.slint";
 import { OperacionEnCursoOverlay } from "operacion_overlay.slint";
@@ -357,6 +358,9 @@ export component MainWindow inherits Window {
 
     // MODAL DE ACTUALIZACIÓN DE SOFTWARE
     if AppData.show_update_modal : UpdateModal {}
+
+    // SELECTOR DE ANALISTA DE LA SESIÓN (ADD-05)
+    if AppData.show_analista_modal : AnalistaModal {}
 
     // MODAL GLOBAL DE ERROR DEL SISTEMA Y ROLLBACK ATÓMICO (PostgreSQL + rustfs)
     // Capa global de avance para operaciones largas

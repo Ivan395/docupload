@@ -379,8 +379,9 @@ pub fn create_revision_tx<C: GenericClient>(c: &mut C, item: &RevisionItem) -> R
             fecha_entrega_con_prorroga,
             pidio_prorroga,
             periodo_inicio,
-            periodo_fin
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            periodo_fin,
+            created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         RETURNING id, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS');
     "#;
 
@@ -391,6 +392,7 @@ pub fn create_revision_tx<C: GenericClient>(c: &mut C, item: &RevisionItem) -> R
     } else {
         Some(clean_folio.clone())
     };
+    let autor = crate::db::analistas::id_analista_actual();
 
     let row = c
         .query_one(
@@ -413,6 +415,7 @@ pub fn create_revision_tx<C: GenericClient>(c: &mut C, item: &RevisionItem) -> R
                 &item.pidio_prorroga,
                 &item.periodo_inicio,
                 &item.periodo_fin,
+                &autor,
             ],
         )
         .map_err(|e| {
@@ -599,6 +602,7 @@ pub fn create_obra_tx<C: GenericClient>(c: &mut C, item: &RegistroObraItem) -> R
     let clean_ubicacion = item.ubicacion.trim().to_uppercase();
     let clean_delegacion = item.delegacion.trim().to_uppercase();
     let clean_subdelegacion = item.subdelegacion.trim().to_uppercase();
+    let autor = crate::db::analistas::id_analista_actual();
 
     let query = r#"
         INSERT INTO public.registros_obras (
@@ -614,8 +618,9 @@ pub fn create_obra_tx<C: GenericClient>(c: &mut C, item: &RegistroObraItem) -> R
             monto,
             delegacion,
             subdelegacion,
-            creado_usuario
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true)
+            creado_usuario,
+            created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, $13)
         ON CONFLICT (id_revision, numero) DO UPDATE SET
             clase = EXCLUDED.clase,
             tipo_obra = EXCLUDED.tipo_obra,
@@ -627,7 +632,8 @@ pub fn create_obra_tx<C: GenericClient>(c: &mut C, item: &RegistroObraItem) -> R
             delegacion = EXCLUDED.delegacion,
             subdelegacion = EXCLUDED.subdelegacion,
             creado_usuario = true,
-            activa = true
+            activa = true,
+            updated_by = EXCLUDED.created_by
         RETURNING id, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS');
     "#;
 
@@ -647,6 +653,7 @@ pub fn create_obra_tx<C: GenericClient>(c: &mut C, item: &RegistroObraItem) -> R
                 &monto,
                 &clean_delegacion,
                 &clean_subdelegacion,
+                &autor,
             ],
         )
         .map_err(|e| {
@@ -722,9 +729,11 @@ pub fn update_obra_tx<C: GenericClient>(c: &mut C, item: &RegistroObraItem) -> R
             delegacion = $10,
             subdelegacion = $11,
             creado_usuario = true,
-            id_registro_patronal = $12
+            id_registro_patronal = $12,
+            updated_by = $13
         WHERE id = $1;
     "#;
+    let autor = crate::db::analistas::id_analista_actual();
 
     let filas = c
         .execute(
@@ -742,6 +751,7 @@ pub fn update_obra_tx<C: GenericClient>(c: &mut C, item: &RegistroObraItem) -> R
                 &clean_delegacion,
                 &clean_subdelegacion,
                 &rp_rev,
+                &autor,
             ],
         )
         .map_err(|e| {

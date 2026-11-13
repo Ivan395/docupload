@@ -1,3 +1,4 @@
+pub mod analistas;
 pub mod asignacion_ops;
 pub mod bitacora_reportes;
 pub mod calendario;
@@ -8,6 +9,7 @@ pub mod config;
 pub mod depuracion_fase1;
 pub mod entregables;
 pub mod diagnostico_integridad;
+pub mod historial_empleados;
 pub mod ingesta;
 pub mod nominas;
 pub mod nominas_reporte;
@@ -59,6 +61,12 @@ mod pruebas_integracion_revisiones_lote;
 
 #[cfg(test)]
 mod pruebas_integracion_topes;
+
+#[cfg(test)]
+mod pruebas_integracion_historial;
+
+#[cfg(test)]
+mod pruebas_integracion_analistas;
 
 #[cfg(test)]
 mod tests {

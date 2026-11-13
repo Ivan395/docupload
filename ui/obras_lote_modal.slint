@@ -1,0 +1,221 @@
+import { ScrollView, TextEdit, ComboBox } from "std-widgets.slint";
+import { AppData, AppLogic, ObraLoteFilaUi } from "models.slint";
+
+// Botón compacto del modal de alta masiva (primario o neutro).
+component LoteBoton inherits Rectangle {
+    in property <string> texto;
+    in property <bool> primario: false;
+    in property <bool> habilitado: true;
+    callback clicked();
+
+    height: 34px;
+    min-width: 110px;
+    border-radius: 6px;
+    background: root.primario
+        ? (toque.has-hover && root.habilitado ? #047857 : #065f46)
+        : (toque.has-hover && root.habilitado ? #e2e8f0 : #ffffff);
+    border-width: 1px;
+    border-color: root.primario ? #065f46 : #cbd5e1;
+    opacity: root.habilitado ? 1 : 0.5;
+
+    Text {
+        text: root.texto;
+        font-size: 12px;
+        font-weight: 700;
+        color: root.primario ? #ffffff : #334155;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    toque := TouchArea {
+        mouse-cursor: pointer;
+        enabled: root.habilitado;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ObrasLoteModal inherits Rectangle {
+    background: #00000077;
+    width: 100%;
+    height: 100%;
+
+    // Bloqueador de clics hacia la vista principal
+    TouchArea { }
+
+    Rectangle {
+        width: Math.min(parent.width - 40px, 900px);
+        height: Math.min(parent.height - 40px, 620px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 12px;
+        background: #ffffff;
+        clip: true;
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+
+            // Encabezado
+            HorizontalLayout {
+                alignment: space-between;
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: "Alta masiva de registros de obra";
+                        font-size: 17px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+                    Text {
+                        text: "Pega desde Excel (NÚMERO, INICIO, FIN, MONTO, CLASE, TIPO, UBICACIÓN…) o importa un .csv/.xlsx. Fechas DD/MM/AAAA, AAAA-MM-DD o fecha de Excel.";
+                        font-size: 11px;
+                        color: #64748b;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 14px;
+                    background: lote_cerrar.has-hover ? #fee2e2 : #f1f5f9;
+                    Text {
+                        text: "✕";
+                        font-size: 12px;
+                        font-weight: 800;
+                        color: lote_cerrar.has-hover ? #b91c1c : #64748b;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    lote_cerrar := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.obras_lote_cerrar(); }
+                    }
+                }
+            }
+
+            // Entrada: texto pegado + acciones de carga
+            TextEdit {
+                height: 120px;
+                font-size: 12px;
+                wrap: no-wrap;
+                text <=> AppData.obras_lote_texto;
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                LoteBoton {
+                    texto: "Vista previa";
+                    primario: true;
+                    habilitado: !AppData.obras_lote_procesando;
+                    clicked => { AppLogic.obras_lote_vista_previa(AppData.obras_lote_texto); }
+                }
+                LoteBoton {
+                    texto: "Importar archivo…";
+                    habilitado: !AppData.obras_lote_procesando;
+                    clicked => { AppLogic.obras_lote_elegir_archivo(); }
+                }
+            }
+
+            // Encabezado de la lista de vista previa
+            Rectangle {
+                height: 26px;
+                background: #f1f5f9;
+                border-radius: 4px;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 6px;
+                    alignment: start;
+                    Text { width: 40px; text: "Ren."; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                    Text { width: 110px; text: "Número"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                    Text { width: 86px; text: "Inicio"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                    Text { width: 86px; text: "Fin"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                    Text { width: 96px; text: "Monto"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                    Text { width: 150px; text: "Estado"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                    Text { width: 140px; text: "Acción"; font-size: 11px; font-weight: 700; color: #475569; vertical-alignment: center; }
+                }
+            }
+
+            // Lista de filas
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 4px;
+                    for fila[i] in AppData.obras_lote_filas : Rectangle {
+                        height: fila.errores != "" ? 46px : 34px;
+                        background: mod_fila.has-hover ? #f8fafc : transparent;
+                        border-radius: 4px;
+
+                        mod_fila := TouchArea { }
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 6px;
+                            alignment: start;
+                            Text { width: 40px; text: fila.renglon; font-size: 12px; color: #334155; vertical-alignment: center; }
+                            Text { width: 110px; text: fila.numero; font-size: 12px; font-weight: 700; color: #0f172a; vertical-alignment: center; overflow: elide; }
+                            Text { width: 86px; text: fila.inicio; font-size: 12px; color: #334155; vertical-alignment: center; }
+                            Text { width: 86px; text: fila.fin; font-size: 12px; color: #334155; vertical-alignment: center; }
+                            Text { width: 96px; text: fila.monto; font-size: 12px; color: #334155; vertical-alignment: center; overflow: elide; }
+                            VerticalLayout {
+                                width: 150px;
+                                alignment: center;
+                                Text {
+                                    text: fila.estado;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    color: fila.es_error ? #b91c1c : #0f172a;
+                                    overflow: elide;
+                                }
+                                if fila.errores != "" : Text {
+                                    text: fila.errores;
+                                    font-size: 10px;
+                                    color: #b91c1c;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            ComboBox {
+                                width: 140px;
+                                height: 28px;
+                                model: fila.acciones;
+                                current-value: fila.accion;
+                                enabled: !AppData.obras_lote_procesando;
+                                selected(v) => { AppLogic.obras_lote_cambiar_accion(i, v); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Resumen
+            Text {
+                text: AppData.obras_lote_resumen;
+                font-size: 12px;
+                font-weight: 600;
+                color: #334155;
+                wrap: word-wrap;
+            }
+
+            // Pie
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: end;
+                LoteBoton {
+                    texto: "Cancelar";
+                    habilitado: !AppData.obras_lote_procesando;
+                    clicked => { AppLogic.obras_lote_cerrar(); }
+                }
+                LoteBoton {
+                    texto: AppData.obras_lote_procesando ? "Aplicando…" : "Aplicar";
+                    primario: true;
+                    habilitado: !AppData.obras_lote_procesando;
+                    clicked => { AppLogic.obras_lote_aplicar(); }
+                }
+            }
+        }
+    }
+}

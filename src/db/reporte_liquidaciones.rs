@@ -692,19 +692,30 @@ pub fn check_missing_cedulas_for_revision(
 const SQL_MES_RL: &str = "LEAST(GREATEST(COALESCE(NULLIF(rl.mes_periodo_int, 0), CASE UPPER(TRIM(rl.mes_periodo)) WHEN 'ENERO' THEN 1 WHEN 'FEBRERO' THEN 2 WHEN 'MARZO' THEN 3 WHEN 'ABRIL' THEN 4 WHEN 'MAYO' THEN 5 WHEN 'JUNIO' THEN 6 WHEN 'JULIO' THEN 7 WHEN 'AGOSTO' THEN 8 WHEN 'SEPTIEMBRE' THEN 9 WHEN 'OCTUBRE' THEN 10 WHEN 'NOVIEMBRE' THEN 11 WHEN 'DICIEMBRE' THEN 12 ELSE 1 END)::int, 1), 12)";
 
 /// Condición SQL booleana: el mes (`anio`, `mes`, expresiones enteras) pertenece al universo de la
-/// revisión identificada por el parámetro `$3`. Prioridad:
-/// 1) si la revisión tiene `periodo_inicio` y `periodo_fin`, el mes debe traslapar ese rango;
-/// 2) si no, y existen obras creadas por el usuario en la revisión, el mes debe traslapar alguna obra;
-/// 3) si no, todos los meses pertenecen al universo.
+/// revisión identificada por el parámetro `$3`. Granularidad mensual (mes completo), INTERSECCIÓN de:
+/// - `en_periodo`: si la revisión tiene `periodo_inicio` y `periodo_fin`, el mes debe traslapar ese
+///   rango; si no, true.
+/// - `en_obras`: si existen obras `creado_usuario` y `activa` en la revisión, el mes debe traslapar la
+///   vigencia de alguna; si no, true.
+/// Resultado: `en_periodo AND en_obras`.
+///
+/// Los marcadores son comentarios de bloque (`/* ... */`) y no de línea, para no depender de los saltos
+/// de línea del SQL que se envía.
 fn sql_en_universo(anio: &str, mes: &str) -> String {
     let md = format!("MAKE_DATE(({anio})::int, ({mes})::int, 1)");
     let fin_mes = format!("({md} + INTERVAL '1 month' - INTERVAL '1 day')::date");
     format!(
         r#"(
+            /* en_periodo */
             CASE
                 WHEN (SELECT rv.periodo_inicio IS NOT NULL AND rv.periodo_fin IS NOT NULL FROM public.revisiones rv WHERE rv.id = $3) THEN
                     {md} <= (SELECT rv.periodo_fin FROM public.revisiones rv WHERE rv.id = $3)
                     AND {fin_mes} >= (SELECT rv.periodo_inicio FROM public.revisiones rv WHERE rv.id = $3)
+                ELSE true
+            END
+            AND
+            /* en_obras */
+            CASE
                 WHEN EXISTS (
                     SELECT 1 FROM public.registros_obras ro
                     WHERE ro.id_revision = $3 AND COALESCE(ro.creado_usuario, false) = true AND ro.activa
@@ -2011,6 +2022,23 @@ pub fn fetch_reporte_liquidaciones(
     } else {
         result
     };
+
+    // Registro de versiones para el bloqueo optimista (D-6 a). Un fallo aquí no rompe la carga.
+    if let Some(rev) = rev_uuid_opt {
+        match client.query(
+            "SELECT id, version FROM public.reportes_liquidaciones WHERE id_revision = $1",
+            &[&rev],
+        ) {
+            Ok(filas) => {
+                let pares: Vec<(Uuid, i32)> = filas.iter().map(|r| (r.get(0), r.get(1))).collect();
+                crate::db::analistas::registrar_versiones(&pares);
+            }
+            Err(e) => log::warn!(
+                "No se pudo registrar versiones de reportes para bloqueo optimista: {}",
+                crate::db::schema::format_pg_error(&e)
+            ),
+        }
+    }
 
     Ok(final_result)
 }
@@ -3683,187 +3711,6 @@ pub fn batch_assign_multiple_obras_to_employees(
         rows_updated,
         rows_deleted,
     })
-}
-
-/// Actualización masiva por lote para múltiples registros seleccionados
-pub fn batch_update_reporte_rows(
-    client: &mut Client,
-    ids: &[Uuid],
-    set_obra_id: Option<Uuid>,
-    set_dias_obra: Option<i16>,
-    match_dias_cedula: bool,
-) -> Result<usize, String> {
-    if ids.is_empty() {
-        return Ok(0);
-    }
-
-    let mut tx = client.transaction().map_err(|e| format!("Error iniciando tx masiva: {}", e))?;
-
-    // Bitácora: ids son ids de REPORTE; VINCULAR si se asigna obra, DIAS si solo cambian días
-    let accion = if set_obra_id.is_some() { ACCION_VINCULAR } else { ACCION_DIAS };
-    let lote = bitacora_reportes::iniciar_edicion(&mut tx, accion, ids)
-        .map_err(|e| format!("Error iniciando bitácora de edición: {}", e))?;
-
-    let mut updated_count = 0;
-
-    for &id_rep_liq in ids {
-        // Obtener días de cédula y estado actual sin COALESCE
-        let row_opt = tx.query_opt(
-            r#"
-            SELECT rdl.dias, rvol.id_registro_obra, rvol.dias_registro_obra,
-                   (COALESCE(rdl.lic, 0.0) + COALESCE(rdl.inc, 0.0) + COALESCE(rdl.aus, 0.0))::float8,
-                   rl.id_liquidacion
-            FROM public.reportes_liquidaciones rl
-            LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
-            LEFT JOIN public.reportes_vinculaciones_obras_liquidaciones rvol ON rvol.id_reporte_liquidacion = rl.id
-            WHERE rl.id = $1
-            LIMIT 1
-            "#,
-            &[&id_rep_liq],
-        ).map_err(|e| format!("Error consultando fila para actualización masiva: {}", e))?;
-
-        if let Some(r) = row_opt {
-            let dias_ced: i16 = row_get_i16(&r, 0, 0);
-            let curr_obra: Option<Uuid> = r.try_get(1).ok().flatten();
-            let curr_dias_obra: i16 = row_get_i16(&r, 2, 0);
-            let _sum_inc: f64 = row_get_f64(&r, 3, 0.0);
-            let _id_liq_opt: Option<Uuid> = r.try_get(4).ok().flatten();
-
-            let new_obra = if set_obra_id.is_some() {
-                set_obra_id
-            } else {
-                curr_obra
-            };
-
-            let new_dias_obra = if match_dias_cedula {
-                dias_ced
-            } else if let Some(d) = set_dias_obra {
-                d
-            } else {
-                curr_dias_obra
-            };
-
-            if let Some(obra_id) = new_obra {
-                let dias_obra_val = new_dias_obra.clamp(0, 31);
-
-                let vinc_exists = tx.query_opt(
-                    "SELECT id FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1 LIMIT 1",
-                    &[&id_rep_liq],
-                ).map_err(|e| format!("Error verificando vinculación reporte: {}", e))?;
-
-                if let Some(vr) = vinc_exists {
-                    let vid: Uuid = match vr.try_get(0) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    tx.execute(
-                        "UPDATE public.reportes_vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
-                        &[&vid, &Some(obra_id), &Some(dias_obra_val)],
-                    ).map_err(|e| format!("Error actualizando vinculación masiva reporte: {}", e))?;
-                    crate::app_logger::log_db_write(
-                        "public.reportes_vinculaciones_obras_liquidaciones",
-                        "UPDATE",
-                        &format!("id_registro_obra={}, dias_registro_obra={}", obra_id, dias_obra_val),
-                        "UPDATE public.reportes_vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
-                    );
-                } else {
-                    let new_vinc_id = Uuid::now_v7();
-                    tx.execute(
-                        "INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra) VALUES ($1, $2, $3, $4)",
-                        &[&new_vinc_id, &Some(obra_id), &id_rep_liq, &Some(dias_obra_val)],
-                    ).map_err(|e| format!("Error creando vinculación masiva reporte: {}", e))?;
-                    crate::app_logger::log_db_write(
-                        "public.reportes_vinculaciones_obras_liquidaciones",
-                        "INSERT",
-                        &format!("id={}, id_registro_obra={}, id_reporte_liquidacion={}, dias={}", new_vinc_id, obra_id, id_rep_liq, dias_obra_val),
-                        "INSERT INTO public.reportes_vinculaciones_obras_liquidaciones (id, id_registro_obra, id_reporte_liquidacion, dias_registro_obra) VALUES ($1, $2, $3, $4)",
-                    );
-                }
-
-                // La tabla MAESTRA vinculaciones_obras_liquidaciones no se modifica desde ediciones del reporte.
-            } else {
-                tx.execute(
-                    "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1",
-                    &[&id_rep_liq],
-                ).map_err(|e| format!("Error eliminando vinculación masiva: {}", e))?;
-                crate::app_logger::log_db_write(
-                    "public.reportes_vinculaciones_obras_liquidaciones",
-                    "DELETE",
-                    &format!("id_reporte_liquidacion={}", id_rep_liq),
-                    "DELETE FROM public.reportes_vinculaciones_obras_liquidaciones WHERE id_reporte_liquidacion = $1",
-                );
-
-                // La tabla MAESTRA vinculaciones_obras_liquidaciones no se modifica desde ediciones del reporte.
-            }
-
-            // Recalcular prorrateo: (Valor_Original / Días_Cédula) * Días_Obra
-            let dias_base = dias_ced as f64;
-            let factor = if dias_base > 0.0 && new_obra.is_some() {
-                (new_dias_obra as f64 / dias_base).clamp(0.0, 10.0)
-            } else {
-                1.0
-            };
-
-            tx.execute(
-                r#"
-                UPDATE public.reportes_detalles_liquidaciones rdl
-                SET 
-                    cf = ROUND((COALESCE(dl.cf, rdl.cf, 0.0) * $2)::numeric, 2)::float8,
-                    exc_pat = ROUND((COALESCE(dl.exc_pat, rdl.exc_pat, 0.0) * $2)::numeric, 2)::float8,
-                    exc_obr = ROUND((COALESCE(dl.exc_obr, rdl.exc_obr, 0.0) * $2)::numeric, 2)::float8,
-                    pd_pat = ROUND((COALESCE(dl.pd_pat, rdl.pd_pat, 0.0) * $2)::numeric, 2)::float8,
-                    pd_obr = ROUND((COALESCE(dl.pd_obr, rdl.pd_obr, 0.0) * $2)::numeric, 2)::float8,
-                    gmp_pat = ROUND((COALESCE(dl.gmp_pat, rdl.gmp_pat, 0.0) * $2)::numeric, 2)::float8,
-                    gmp_obr = ROUND((COALESCE(dl.gmp_obr, rdl.gmp_obr, 0.0) * $2)::numeric, 2)::float8,
-                    rt = ROUND((COALESCE(dl.rt, rdl.rt, 0.0) * $2)::numeric, 2)::float8,
-                    iv_pat = ROUND((COALESCE(dl.iv_pat, rdl.iv_pat, 0.0) * $2)::numeric, 2)::float8,
-                    iv_obr = ROUND((COALESCE(dl.iv_obr, rdl.iv_obr, 0.0) * $2)::numeric, 2)::float8,
-                    gps = ROUND((COALESCE(dl.gps, rdl.gps, 0.0) * $2)::numeric, 2)::float8,
-                    patronal = ROUND((COALESCE(dl.patronal, rdl.patronal, 0.0) * $2)::numeric, 2)::float8,
-                    obrera = ROUND((COALESCE(dl.obrera, rdl.obrera, 0.0) * $2)::numeric, 2)::float8,
-                    subtotal = ROUND((COALESCE(dl.subtotal, rdl.subtotal, 0.0) * $2)::numeric, 2)::float8
-                FROM public.reportes_liquidaciones rl
-                LEFT JOIN LATERAL (
-                    SELECT sub_dl.*
-                    FROM public.detalles_liquidaciones sub_dl
-                    WHERE sub_dl.id_liquidacion = rl.id_liquidacion
-                      AND (
-                          (COALESCE(TRIM(LOWER(sub_dl.clave)), '') = COALESCE(TRIM(LOWER(rdl.clave)), '')
-                           AND (sub_dl.fecha = rdl.fecha OR (sub_dl.fecha IS NULL AND rdl.fecha IS NULL)))
-                          OR (
-                              (SELECT COUNT(*) FROM public.detalles_liquidaciones count_dl WHERE count_dl.id_liquidacion = rl.id_liquidacion) = 1
-                          )
-                      )
-                    LIMIT 1
-                ) dl ON true
-                WHERE rdl.id_reporte_liquidacion = rl.id 
-                AND rl.id = $1
-                "#,
-                &[&id_rep_liq, &factor],
-            ).map_err(|e| format!("Error recalculando detalles en lote: {}", e))?;
-            crate::app_logger::log_db_write(
-                "public.reportes_detalles_liquidaciones",
-                "UPDATE",
-                &format!("id_reporte_liquidacion={}, factor={:.4}", id_rep_liq, factor),
-                "UPDATE public.reportes_detalles_liquidaciones rdl SET cf=..., subtotal=... WHERE rdl.id_reporte_liquidacion = $1",
-            );
-
-            updated_count += 1;
-        }
-    }
-
-    // Bitácora: foto "después" y prorrateo canónico antes del commit
-    bitacora_reportes::cerrar_edicion(&mut tx, lote, true)
-        .map_err(|e| format!("Error cerrando bitácora de edición: {}", e))?;
-
-    tx.commit().map_err(|e| format!("Error en commit de lote masivo: {}", e))?;
-    crate::app_logger::log_db_write(
-        "public.reportes_liquidaciones_tx",
-        "COMMIT",
-        &format!("Transacción por lote completada con éxito. Filas actualizadas: {}", updated_count),
-        "tx.commit()",
-    );
-    Ok(updated_count)
 }
 
 fn clean_rp_text(s: &str) -> &str {
@@ -6781,6 +6628,21 @@ pub fn verify_and_autocorrect_employee_obras(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn sql_en_universo_une_periodo_y_obras_con_and() {
+        let sql = sql_en_universo("rl.anio_periodo", SQL_MES_RL);
+        let pos_periodo = sql.find("/* en_periodo */").expect("falta el marcador en_periodo");
+        let pos_obras = sql.find("/* en_obras */").expect("falta el marcador en_obras");
+        assert!(pos_periodo < pos_obras, "en_periodo debe ir antes que en_obras");
+        let entre = &sql[pos_periodo..pos_obras];
+        assert!(
+            entre.trim_end().ends_with("END\n            AND"),
+            "en_periodo debe cerrar con END y unirse con AND a en_obras: {entre:?}"
+        );
+        assert_eq!(sql.matches("$3").count(), 5, "el parámetro $3 (revisión) debe usarse en ambas partes");
+        assert!(!sql.contains("--"), "el SQL no debe usar comentarios de línea");
+    }
 
     fn create_mock_row(emp_id: Uuid, nombre: &str, oid: Option<Uuid>, obra_num: &str, is_user: bool, mes: &str, anio: i16, dias: i16, sub: f64) -> ReporteLiquidacionRowDb {
         ReporteLiquidacionRowDb {

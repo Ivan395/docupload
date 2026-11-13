@@ -51,7 +51,15 @@ mod asistente_asignacion;
 mod carga_masiva;
 mod asignacion_obra_logic;
 mod obras_lote_logic;
+// Alta masiva de obras (ADD-01/ADD-02)
+mod obras_lote_view_logic;
+// Vista Empleados: estado laboral, filtros e histórico empleado × obra (D-8 / D-10 b)
+mod empleados_view_logic;
+// Selector de analista de la sesión (ADD-05, D-6 a)
+mod analista_view_logic;
 mod revisiones_lote_logic;
+// Alta masiva de revisiones (ADD-03)
+mod revisiones_lote_view_logic;
 mod entregable_logic;
 mod operacion_ui;
 pub mod sat;
@@ -730,12 +738,21 @@ fn load_empleados_ui(ui: &MainWindow, pool: &DbPool, client_id: &str) {
     let app_data = ui.global::<AppData>();
     let search = app_data.get_empleados_search().to_lowercase();
     let only_active = app_data.get_empleados_filter_active_only();
+    let filtro = app_data.get_empleados_filtro();
 
     let models: Vec<EmpleadoData> = emps
         .into_iter()
         .filter(|emp| {
-            if only_active && !emp.esta_activo {
+            // D-8: el filtro de activos usa el estado efectivo (cédula / fijado a mano).
+            let (activo_efectivo, _) = estado_empleado_efectivo(emp);
+            if only_active && !activo_efectivo {
                 return false;
+            }
+            match filtro {
+                1 if activo_efectivo => return false,
+                2 if emp.obras_actuales != 0 => return false,
+                3 if emp.obras_actuales < 2 => return false,
+                _ => {}
             }
             if !search.is_empty() {
                 let n = emp.nombre.to_lowercase();
@@ -754,7 +771,13 @@ fn load_empleados_ui(ui: &MainWindow, pool: &DbPool, client_id: &str) {
             } else {
                 "$0.00".to_string()
             };
+            let (activo_efectivo, estado_texto) = estado_empleado_efectivo(&emp);
             EmpleadoData {
+                estado_texto: estado_texto.into(),
+                estado_es_baja: !activo_efectivo,
+                estado_manual: emp.estado_manual,
+                obras_actuales: emp.obras_actuales as i32,
+                ultima_obra: emp.ultima_obra.clone().into(),
                 id: emp.id.into(),
                 id_cliente: emp.id_cliente.into(),
                 cliente_nombre: emp.cliente_nombre.into(),
@@ -6949,6 +6972,21 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // D-8: filtro por estado laboral / obras actuales (0 Todos, 1 Bajas, 2 Sin obra, 3 Con 2+ obras)
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        app_logic.on_empleados_cambiar_filtro(move |filtro| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_empleados_filtro(filtro);
+                if let Some(ref pool) = pool_clone {
+                    let client_id = ui.global::<AppData>().get_selected_cliente_id().to_string();
+                    load_empleados_ui(&ui, pool, &client_id);
+                }
+            }
+        });
+    }
+
     // 36. Toggle Filtro Solo Empleados Activos
     {
         let ui_weak = main_window.as_weak();
@@ -7511,11 +7549,18 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 55. Callbacks de Reporte Liquidaciones
     wire_reporte_liquidaciones_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
+    // Alta masiva de revisiones (ADD-03)
+    revisiones_lote_view_logic::wire_revisiones_lote_callbacks(&main_window, db_pool.clone(), imss_inhabiles.clone());
     // Texto de atajos según el sistema operativo (Ctrl en Windows/Linux, ⌘ en macOS)
     main_window.global::<AppData>().set_asig_atajos_texto(crate::operacion_ui::texto_atajos().into());
     crate::asignacion_view_logic::wire_asignacion_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
     crate::asistente_asignacion::wire_asistente_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
     crate::asignacion_obra_logic::wire_asignacion_obra_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
+    // Alta masiva de obras (ADD-01/ADD-02)
+    crate::obras_lote_view_logic::wire_obras_lote_callbacks(&main_window, db_pool.clone());
+    crate::empleados_view_logic::wire_empleados_callbacks(&main_window, db_pool.clone());
+    // Selector de analista de la sesión (ADD-05)
+    analista_view_logic::wire_analista_callbacks(&main_window, db_pool.clone());
 
     // 56. Callbacks de Calendario Fiscal & Revisiones IMSS
     register_calendar_callbacks(&main_window, db_pool.clone(), imss_inhabiles.clone());

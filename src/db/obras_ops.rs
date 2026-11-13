@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use postgres::{Client, GenericClient, Transaction};
 use uuid::Uuid;
 
@@ -402,6 +403,37 @@ pub fn aplicar_lote_obras(
     tx.commit()
         .map_err(|e| format!("No se pudo confirmar el lote de obras: {}", e))?;
     Ok(resumen)
+}
+
+/// Obras detectadas en cédula (no creadas por el usuario y activas) de la revisión, con la cantidad
+/// de empleados que las usan en el reporte de liquidaciones.
+pub fn fetch_obras_detectadas_cedula<C: GenericClient>(
+    c: &mut C,
+    id_revision: Uuid,
+) -> Result<Vec<(String, Option<NaiveDate>, Option<NaiveDate>, i64)>, String> {
+    let rows = c
+        .query(
+            "SELECT ro.numero, ro.fecha_inicio, ro.fecha_fin, COUNT(DISTINCT rl.id_empleado)
+             FROM public.registros_obras ro
+             LEFT JOIN public.reportes_detalles_liquidaciones d ON d.id_registro_obra = ro.id
+             LEFT JOIN public.reportes_liquidaciones rl ON rl.id = d.id_reporte_liquidacion
+             WHERE ro.id_revision = $1 AND COALESCE(ro.creado_usuario, false) = false AND ro.activa
+             GROUP BY 1, 2, 3
+             ORDER BY 1",
+            &[&id_revision],
+        )
+        .map_err(|e| format!("Error consultando obras detectadas en cédulas: {}", e))?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<_, Option<String>>(0).unwrap_or_default(),
+                r.get::<_, Option<NaiveDate>>(1),
+                r.get::<_, Option<NaiveDate>>(2),
+                r.get::<_, i64>(3),
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]

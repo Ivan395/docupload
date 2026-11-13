@@ -440,3 +440,59 @@ fn i6_acortar_vigencia_mueve_fuera_de_periodo_y_ampliar_regresa() {
 
     tx.rollback().unwrap();
 }
+
+#[test]
+#[ignore]
+fn i6b_universo_interseccion_periodo_y_obras() {
+    let mut client = conectar();
+    let mut tx = client.transaction().unwrap();
+
+    let (_c, rp, rev, emp) = crear_contexto(&mut tx, "I6B");
+    let liq_ene = crear_liquidacion(&mut tx, rp, emp, 2025, 1, "ENERO", d(2025, 1, 15), 30, 1000.0);
+    let liq_mar = crear_liquidacion(&mut tx, rp, emp, 2025, 3, "MARZO", d(2025, 3, 15), 30, 1000.0);
+
+    // Revisión con periodo de todo 2025 y sin obras de usuario: enero y marzo están en el universo.
+    tx.execute(
+        "UPDATE public.revisiones SET periodo_inicio = $2, periodo_fin = $3 WHERE id = $1",
+        &[&rev, &d(2025, 1, 1), &d(2025, 12, 31)],
+    )
+    .expect("asignar periodo a la revisión de prueba");
+
+    sync_reportes_liquidaciones_for_revision_tx(&mut tx, rev).expect("sync inicial");
+    assert_eq!(
+        estado_reporte_de_liquidacion(&mut tx, liq_mar).as_deref(),
+        Some("ACTIVO"),
+        "solo con periodo, marzo debe quedar ACTIVO"
+    );
+
+    // Obra de usuario solo en enero: el universo es periodo ∩ obras, así que marzo sale aunque esté en el periodo.
+    let obra = create_obra_tx(
+        &mut tx,
+        &item_obra("", rev, rp, "C7000007", Some(d(2025, 1, 1)), Some(d(2025, 1, 31))),
+    )
+    .expect("crear obra de prueba");
+    let id_obra: Uuid = obra.id.parse().expect("id de obra");
+
+    resincronizar_universo_tx(&mut tx, rev).expect("resincronizar universo");
+    assert_eq!(
+        estado_reporte_de_liquidacion(&mut tx, liq_ene).as_deref(),
+        Some("ACTIVO"),
+        "enero debe quedar ACTIVO (dentro del periodo y de la obra)"
+    );
+    assert_eq!(
+        estado_reporte_de_liquidacion(&mut tx, liq_mar).as_deref(),
+        Some("FUERA_PERIODO"),
+        "marzo está en el periodo pero fuera de la obra: debe quedar FUERA_PERIODO"
+    );
+
+    // Sin obras de usuario activas: el universo es solo el periodo, así que marzo regresa a ACTIVO.
+    // `desactivar_obra_tx` ya resincroniza el universo internamente.
+    desactivar_obra_tx(&mut tx, id_obra).expect("desactivar obra de prueba");
+    assert_eq!(
+        estado_reporte_de_liquidacion(&mut tx, liq_mar).as_deref(),
+        Some("ACTIVO"),
+        "sin obras, marzo debe volver a ACTIVO por el periodo"
+    );
+
+    tx.rollback().unwrap();
+}

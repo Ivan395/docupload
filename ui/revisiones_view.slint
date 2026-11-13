@@ -1,6 +1,7 @@
 import { ScrollView, LineEdit, Button, ComboBox } from "std-widgets.slint";
 import { AppData, AppLogic, RevisionData } from "models.slint";
 import { DatePickerField } from "date_picker.slint";
+import { RevisionesLoteModal } from "revisiones_lote_modal.slint";
 
 export component RevisionesView inherits Rectangle {
     background: #f8fafc;
@@ -195,6 +196,37 @@ export component RevisionesView inherits Rectangle {
                     btn_new_rev := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { AppLogic.open_new_revision_dialog(); }
+                    }
+                }
+
+                // Alta masiva de revisiones (ADD-03)
+                Rectangle {
+                    height: 38px;
+                    border-radius: 6px;
+                    background: !AppData.selected_rp_is_valid_structure ? #94a3b8 : (btn_lote_rev.has-hover ? #1d4ed8 : #1e3a8a);
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 8px;
+                        alignment: center;
+                        Text { text: "＋"; font-size: 13px; color: #ffffff; font-weight: 800; vertical-alignment: center; }
+                        Text {
+                            text: "Varias revisiones";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_lote_rev := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if (AppData.selected_rp_is_valid_structure) {
+                                AppLogic.revisiones_lote_abrir();
+                            }
+                        }
                     }
                 }
             }
@@ -1882,4 +1914,7 @@ export component RevisionesView inherits Rectangle {
             }
         }
     }
+
+    // Alta masiva de revisiones (ADD-03)
+    if AppData.show_revisiones_lote_modal : RevisionesLoteModal { }
 }
