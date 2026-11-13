@@ -1282,6 +1282,9 @@ export global AppData {
 
     // Filtros
     in-out property <string> reporte_search_query: "";
+    in-out property <int> reporte_focus_buscar: 0;      // se incrementa para pedir foco en el buscador de la pestaña activa (Ctrl/⌘+F)
+    in-out property <int> reporte_focus_restaurar: 0;   // se incrementa tras recargar datos para devolver el foco a la vista
+    in-out property <string> reporte_atajos_texto: "Ctrl+F buscar · Ctrl+Shift+A asistente · Esc cerrar/limpiar";
     in-out property <int> reporte_filter_obra_idx: 0; // 0 = Todos
     in-out property <int> reporte_filter_periodo_idx: 0; // 0 = Todos
     in-out property <int> reporte_filter_estado_idx: 0; // 0 = Todos, 1 = Asignados, 2 = Sin Asignar

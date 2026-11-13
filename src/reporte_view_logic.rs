@@ -1679,6 +1679,11 @@ pub fn sync_and_load_reporte_data(
         render_reporte_ui(ui, &state);
     }
 
+    // Tras renderizar, avisa a la vista (Slint) para devolver el foco a su FocusScope y que
+    // los atajos sigan funcionando después de la recarga.
+    let ad = ui.global::<AppData>();
+    ad.set_reporte_focus_restaurar(ad.get_reporte_focus_restaurar().wrapping_add(1));
+
     filas_sincronizadas
 }
 

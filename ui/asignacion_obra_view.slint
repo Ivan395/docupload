@@ -300,8 +300,31 @@ component CandidatoItem inherits Rectangle {
 }
 
 // Pestaña 2 de Reporte de Liquidaciones: "¿quién trabajó en la obra X?"
-export component AsignacionObraView inherits Rectangle {
-    background: #f8fafc;
+// La vista ES el FocusScope: así los atajos del contenedor (Ctrl/Cmd+F, Ctrl/Cmd+Shift+A) siguen llegando
+// cuando el foco está en un control interno. Slint traduce Control a Command en macOS.
+export component AsignacionObraView inherits FocusScope {
+    init => { root.focus(); }
+
+    // Ctrl/Cmd+F y recarga: el buscador solo existe dentro del modal "agregar empleados"
+    // (ver más abajo); el foco se pide desde el elemento del modal.
+    property <int> restaurar: AppData.reporte_focus_restaurar;
+    changed restaurar => { root.focus(); }
+
+    // Escape: limpia la búsqueda de candidatos si tiene texto
+    KeyBinding {
+        keys: @keys(Escape);
+        activated => {
+            if (AppData.asig_obra_candidatos_busqueda != "") {
+                AppLogic.asig_obra_buscar_candidatos("");
+                root.focus();
+            }
+        }
+    }
+
+    // Fondo de la vista
+    Rectangle {
+        background: #f8fafc;
+    }
 
     HorizontalLayout {
         padding: 16px;
@@ -451,6 +474,15 @@ export component AsignacionObraView inherits Rectangle {
         height: 100%;
         background: #00000088;
 
+        // Ctrl/Cmd+F: pide foco y selecciona el buscador del modal
+        property <int> req_buscar: AppData.reporte_focus_buscar;
+        changed req_buscar => { buscador_obra.focus(); buscador_obra.select-all(); }
+        // Escape con búsqueda limpiada desde la vista: vacía el LineEdit (texto no ligado)
+        property <string> busq_sync: AppData.asig_obra_candidatos_busqueda;
+        changed busq_sync => {
+            if (AppData.asig_obra_candidatos_busqueda == "") { buscador_obra.text = ""; }
+        }
+
         modal_bloqueo := TouchArea {}
 
         Rectangle {
@@ -481,7 +513,7 @@ export component AsignacionObraView inherits Rectangle {
                     wrap: word-wrap;
                 }
 
-                LineEdit {
+                buscador_obra := LineEdit {
                     placeholder-text: "Buscar por nombre o NSS…";
                     text: AppData.asig_obra_candidatos_busqueda;
                     edited(texto) => { AppLogic.asig_obra_buscar_candidatos(texto); }

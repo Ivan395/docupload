@@ -242,10 +242,21 @@ component AsigObraPicker inherits Rectangle {
 }
 
 // La vista ES el FocusScope y rodea a todos sus controles: así los atajos (KeyBinding) funcionan aunque
-// el foco esté en el buscador o en cualquier control interno. Slint traduce Control → ⌘ Command en macOS,
+// el foco esté en el buscador o en cualquier control interno. Slint traduce Control a Command en macOS,
 // por lo que los mismos atajos sirven en Windows, Linux y Mac.
 export component AsignacionEmpleadosView inherits FocusScope {
     init => { root.focus(); }
+
+    // Recarga desde la vista padre: sincroniza el foco y el atajo Ctrl/Cmd+F (pedido por AppData)
+    property <int> req_buscar: AppData.reporte_focus_buscar;
+    changed req_buscar => { buscador.focus(); buscador.select-all(); }
+    property <int> restaurar: AppData.reporte_focus_restaurar;
+    changed restaurar => { root.focus(); }
+    // Al cerrar el asistente de asignación, el foco vuelve a la vista
+    property <bool> asistente_abierto: AppData.show_asig_asistente;
+    changed asistente_abierto => {
+        if (!root.asistente_abierto) { root.focus(); }
+    }
 
     KeyBinding {
         keys: @keys(Control + F);
@@ -264,8 +275,13 @@ export component AsignacionEmpleadosView inherits FocusScope {
     KeyBinding {
         keys: @keys(Escape);
         activated => {
-            AppData.asig_empleado_sel_id = "";
-            AppData.asig_empleado_sel_nombre = "";
+            // Si el asistente está abierto, se cierra con el mismo código de su botón Cancelar
+            if (AppData.show_asig_asistente) {
+                AppLogic.asig_asistente_cerrar();
+            } else {
+                AppData.asig_empleado_sel_id = "";
+                AppData.asig_empleado_sel_nombre = "";
+            }
             root.focus();
         }
     }

@@ -7557,6 +7557,7 @@ fn main() -> Result<(), slint::PlatformError> {
     revisiones_lote_view_logic::wire_revisiones_lote_callbacks(&main_window, db_pool.clone(), imss_inhabiles.clone());
     // Texto de atajos según el sistema operativo (Ctrl en Windows/Linux, ⌘ en macOS)
     main_window.global::<AppData>().set_asig_atajos_texto(crate::operacion_ui::texto_atajos().into());
+    main_window.global::<AppData>().set_reporte_atajos_texto(crate::operacion_ui::texto_atajos_reporte().into());
     crate::asignacion_view_logic::wire_asignacion_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
     crate::asistente_asignacion::wire_asistente_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
     crate::asignacion_obra_logic::wire_asignacion_obra_callbacks(&main_window, db_pool.clone(), reporte_session.clone());

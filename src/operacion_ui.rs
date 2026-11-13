@@ -54,9 +54,28 @@ pub fn texto_atajos() -> &'static str {
     }
 }
 
+/// Texto de ayuda de atajos de la vista de Reporte de Liquidaciones (⌘ en macOS, Ctrl en Windows/Linux).
+pub fn texto_atajos_reporte() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘F buscar · ⌘⇧A asistente · Esc cerrar/limpiar"
+    } else {
+        "Ctrl+F buscar · Ctrl+Shift+A asistente · Esc cerrar/limpiar"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texto_atajos_reporte_coincide_con_el_sistema() {
+        let t = texto_atajos_reporte();
+        if cfg!(target_os = "macos") {
+            assert!(t.contains('⌘'));
+        } else {
+            assert!(t.contains("Ctrl+F") && t.contains("Ctrl+Shift+A"));
+        }
+    }
 
     #[test]
     fn texto_atajos_coincide_con_el_sistema() {
