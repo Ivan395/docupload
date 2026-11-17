@@ -841,9 +841,116 @@ pub fn format_monto_final_from_str(raw: &str) -> String {
     format_monto_mexico(val)
 }
 
+/// Datos ya normalizados de una obra listos para guardarse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObraValida {
+    pub numero: String,
+    pub fecha_inicio: chrono::NaiveDate,
+    pub fecha_fin: chrono::NaiveDate,
+    /// None si venía None, o Some(x) con x <= 0.0 o no finito (se normaliza a None).
+    pub monto: Option<f64>,
+}
+
+/// Valida una obra: número con `validate_registro_obra`, fechas obligatorias y fin >= inicio,
+/// monto >= 0 (0 o ausente se normaliza a None = "sin capturar"). Devuelve TODOS los errores.
+pub fn validar_obra(
+    numero: &str,
+    fecha_inicio: Option<chrono::NaiveDate>,
+    fecha_fin: Option<chrono::NaiveDate>,
+    monto: Option<f64>,
+) -> Result<ObraValida, Vec<String>> {
+    let mut errores: Vec<String> = Vec::new();
+
+    let numero_trim = numero.trim().to_uppercase();
+    if numero_trim.is_empty() {
+        errores.push("El número de registro de obra es obligatorio.".to_string());
+    } else if let Err(e) = validate_registro_obra(&numero_trim) {
+        errores.push(format!("Registro de obra inválido: {}", e));
+    }
+
+    let inicio = match fecha_inicio {
+        Some(f) => Some(f),
+        None => {
+            errores.push("La fecha de inicio de la obra es obligatoria.".to_string());
+            None
+        }
+    };
+    let fin = match fecha_fin {
+        Some(f) => Some(f),
+        None => {
+            errores.push("La fecha final de la obra es obligatoria.".to_string());
+            None
+        }
+    };
+    if let (Some(i), Some(f)) = (inicio, fin) {
+        if f < i {
+            errores.push("La fecha final no puede ser anterior a la fecha de inicio.".to_string());
+        }
+    }
+
+    let monto_norm = match monto {
+        None => None,
+        Some(m) if !m.is_finite() || m < 0.0 => {
+            errores.push("El monto de la obra no puede ser negativo.".to_string());
+            None
+        }
+        Some(m) if m.abs() < f64::EPSILON => None,
+        Some(m) => Some(m),
+    };
+
+    match (errores.is_empty(), inicio, fin) {
+        (true, Some(i), Some(f)) => Ok(ObraValida {
+            numero: numero_trim,
+            fecha_inicio: i,
+            fecha_fin: f,
+            monto: monto_norm,
+        }),
+        _ => Err(errores),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validar_obra_casos() {
+        let d1 = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let d2 = chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+
+        // Obra válida
+        let ok = validar_obra("c1234567", Some(d1), Some(d2), Some(1000.0)).unwrap();
+        assert_eq!(ok.numero, "C1234567");
+        assert_eq!(ok.fecha_inicio, d1);
+        assert_eq!(ok.fecha_fin, d2);
+        assert_eq!(ok.monto, Some(1000.0));
+
+        // Sin inicio / sin fin
+        let e = validar_obra("C1234567", None, Some(d2), None).unwrap_err();
+        assert!(e.contains(&"La fecha de inicio de la obra es obligatoria.".to_string()));
+        let e = validar_obra("C1234567", Some(d1), None, None).unwrap_err();
+        assert!(e.contains(&"La fecha final de la obra es obligatoria.".to_string()));
+
+        // Fin < inicio
+        let e = validar_obra("C1234567", Some(d2), Some(d1), None).unwrap_err();
+        assert_eq!(e, vec!["La fecha final no puede ser anterior a la fecha de inicio.".to_string()]);
+
+        // Mismo día válido
+        assert!(validar_obra("C1234567", Some(d1), Some(d1), None).is_ok());
+
+        // Monto 0 se normaliza a None
+        let ok = validar_obra("C1234567", Some(d1), Some(d2), Some(0.0)).unwrap();
+        assert_eq!(ok.monto, None);
+
+        // Monto negativo es error
+        let e = validar_obra("C1234567", Some(d1), Some(d2), Some(-1.0)).unwrap_err();
+        assert!(e.contains(&"El monto de la obra no puede ser negativo.".to_string()));
+
+        // Varios errores juntos
+        let e = validar_obra("", None, None, Some(-5.0)).unwrap_err();
+        assert!(e.len() >= 2);
+        assert!(e.contains(&"El número de registro de obra es obligatorio.".to_string()));
+    }
 
     #[test]
     fn test_is_generic_sat_identifier() {

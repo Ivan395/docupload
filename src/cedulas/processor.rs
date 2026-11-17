@@ -218,11 +218,13 @@ pub fn process_cedulas(
                 }
 
                 let text_lower = raw_text.to_lowercase();
-                let is_sua_cedula = text_lower.contains("cédula de determinación de cuotas")
-                    || text_lower.contains("cedula de determinacion de cuotas")
-                    || text_lower.contains("sistema único de autodeterminación")
-                    || text_lower.contains("sistema unico de autodeterminacion")
-                    || (text_lower.contains("registro patronal") && text_lower.contains("delegación imss"));
+                let is_bimestral = crate::cedulas::ema::is_bimestral_document(&raw_text);
+                let is_sua_cedula = !is_bimestral
+                    && (text_lower.contains("cédula de determinación de cuotas")
+                        || text_lower.contains("cedula de determinacion de cuotas")
+                        || text_lower.contains("sistema único de autodeterminación")
+                        || text_lower.contains("sistema unico de autodeterminacion")
+                        || (text_lower.contains("registro patronal") && text_lower.contains("delegación imss")));
 
                 if !is_sua_cedula {
                     invalid_counter.fetch_add(1, Ordering::Relaxed);
@@ -400,6 +402,27 @@ pub fn process_cedulas(
 
                         if seen_workers.contains(&(key.clone(), dedupe_key.clone())) {
                             duplicate_count += 1;
+                            let new_is_better = !emp.registro_obras.is_empty() || emp.rfc.is_some() || emp.curp.is_some();
+                            if new_is_better {
+                                if let Some(existing_emp) = entry.employees.iter_mut().find(|e| {
+                                    let wid = e
+                                        .no_seguro_social
+                                        .as_deref()
+                                        .filter(|s| !s.trim().is_empty())
+                                        .or(e.curp.as_deref())
+                                        .or(e.nombre.as_deref())
+                                        .unwrap_or("UNKNOWN")
+                                        .trim()
+                                        .to_uppercase();
+                                    let m = e.mes_periodo.as_deref().unwrap_or("");
+                                    let a = e.anio_periodo.as_deref().unwrap_or("");
+                                    format!("{}_{}_{}", wid, m, a) == dedupe_key
+                                }) {
+                                    if existing_emp.registro_obras.is_empty() && (!emp.registro_obras.is_empty() || existing_emp.rfc.is_none()) {
+                                        *existing_emp = emp.clone();
+                                    }
+                                }
+                            }
                             invalid_items.push(UnprocessedCedula {
                                 filename: file_display_name.clone(),
                                 registro_patronal: biz.registro_patronal.clone().unwrap_or_else(|| "N/D".to_string()),
@@ -492,50 +515,47 @@ pub fn process_cedulas(
             progress_callback(
                 0,
                 total_workers,
-                "Conectando a PostgreSQL y preparando guardado concurrente de cédulas...",
+                "Conectando a PostgreSQL y preparando guardado secuencial de cédulas...",
             );
 
-            let num_cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4);
-            let pool_size = (num_cpus * 2).clamp(4, 32) as u32;
-
-            match crate::db::create_pool(pool_size) {
-                Ok(pool) => {
-                    let cb = |done: usize, total: usize| {
-                        progress_callback(
-                            done,
-                            total,
-                            &format!("Guardando cédulas en PostgreSQL de forma concurrente ({}/{})...", done, total),
-                        );
-                    };
+            match crate::db::create_client() {
+                Ok(mut client) => {
+                    progress_callback(
+                        0,
+                        total_workers,
+                        "Guardando cédulas en PostgreSQL (secuencial)...",
+                    );
 
                     let biz_list: Vec<Business> = sheets.iter().map(|(_, b)| b.clone()).collect();
-                    match crate::db::save_cedulas_concurrent(&pool, &biz_list, Some(&cb)) {
+                    match crate::db::save_cedulas_to_db(&mut client, &biz_list) {
                         Ok(db_stats) => {
                             log::info!(
-                                "Cédulas guardadas en PostgreSQL concurrentemente: {} liquidaciones, {} detalles, {} vinculaciones obras, {} empleados, {} registros obras",
+                                "Cédulas guardadas en PostgreSQL: {} liquidaciones, {} detalles, {} vinculaciones obras, {} empleados, {} registros obras",
                                 db_stats.liquidaciones_guardadas,
                                 db_stats.detalles_guardados,
                                 db_stats.vinculaciones_guardadas,
                                 db_stats.empleados_guardados,
                                 db_stats.registros_obras_guardados
                             );
-                            if !db_stats.errores.is_empty() {
-                                for err in db_stats.errores {
-                                    log::warn!("Advertencia al guardar cédula concurrentemente en BD: {}", err);
-                                }
+                            for err in db_stats.errores {
+                                log::warn!("Advertencia al guardar cédula en BD: {}", err);
                             }
                         }
                         Err(e) => {
-                            log::error!("Error al guardar cédulas concurrentes en PostgreSQL: {}", e);
+                            log::error!("Error al guardar cédulas en PostgreSQL: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    log::warn!("No se pudo inicializar pool de PostgreSQL para guardar cédulas: {}", e);
+                    log::warn!("No se pudo conectar a PostgreSQL para guardar cédulas: {}", e);
                 }
             }
+
+            progress_callback(
+                total_workers,
+                total_workers,
+                "Guardado de cédulas en PostgreSQL finalizado.",
+            );
         }
     }
 

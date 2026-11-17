@@ -1,6 +1,6 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use chrono::NaiveDate;
@@ -9,12 +9,12 @@ use slint::{Model, ModelRc, VecModel, ComponentHandle, SharedString};
 
 use crate::{
     MainWindow, AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem,
-    ReporteFilterOptionItem, ReporteMesTotalItem, ReporteGuarderiaObraItem,
+    ReporteFilterOptionItem, ReporteFiltroOpcion, ReporteFiltroEmpleado, ReporteMesTotalItem, ReporteGuarderiaObraItem,
     ReporteObraUsuarioItem, ReporteSuaObraItem, ReporteBatchWorkerItem,
     ReporteSelectedItem, ReporteBatchObraItem, ReporteEditObraItem,
-    ReporteUniqueEmpleadoItem, InconsistenciaDetalle,
+    ReporteUniqueEmpleadoItem, InconsistenciaDetalle, EntregablePunto, EntregableVersion,
 };
-use crate::cedulas::business::month_to_num;
+use crate::cedulas::business::{month_num_to_name, month_to_num};
 use crate::db::DbPool;
 use crate::db::reporte_liquidaciones::{
     ReporteLiquidacionRowDb, ObraOptionDb,
@@ -26,8 +26,27 @@ use crate::db::reporte_liquidaciones::{
     extract_all_employee_movements, build_all_employee_movements_map,
     calculate_max_dias_obra_for_employee_movements, validate_obra_assignment_for_employee_movements,
     calculate_obra_days_in_month, parse_month_and_year, ReporteFinalHeaderMeta,
+    ModoEntregable,
 };
 use crate::sua_export;
+use crate::cedulas::almacen::sha256_hex;
+use crate::db::entregables::{
+    fetch_reporte_header_meta, listar_exportaciones, registrar_exportacion, siguiente_version,
+    ExportacionInfo,
+};
+use crate::entregable_logic::{
+    evaluar_lista_verificacion, resumen_json, ListaVerificacion, ResumenEntregable, Severidad,
+};
+use crate::rustfs::{download_rustfs_file, upload_file_to_rustfs};
+
+/// Criterios del filtro avanzado. Conjunto vacío = sin restricción en ese criterio.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FiltroAvanzado {
+    pub anios: BTreeSet<i16>,
+    pub meses: BTreeSet<(i16, u32)>,
+    pub obras: BTreeSet<String>,      // uuid de obra o "sin_asignar"
+    pub empleados: BTreeSet<String>,  // clave única de empleado (ver `clave_empleado`)
+}
 
 #[derive(Clone)]
 pub struct ReporteSessionState {
@@ -36,6 +55,7 @@ pub struct ReporteSessionState {
     pub rp_registro: String,
     pub revision_nombre: String,
     pub revision_folio: String,
+    /// Filas ACTIVO dentro del universo de la revisión (meses cubiertos por los Registros de Obra del usuario).
     pub all_rows: Vec<ReporteLiquidacionRowDb>,
     pub filtered_rows: Vec<ReporteLiquidacionRowDb>,
     pub selected_ids: HashSet<Uuid>,
@@ -61,21 +81,19 @@ pub struct ReporteSessionState {
     pub sort_by_rfc: bool,
     pub sort_rfc_asc: bool,
 
-    // Filtro por empleados seleccionados
-    pub emp_filter_active: bool,
-    pub emp_filter_all_months: bool,
-    pub emp_filter_all_obras: bool,
-    pub emp_filter_worker_ids: HashSet<Uuid>,
-    pub emp_filter_worker_rfcs: HashSet<String>,
-    pub emp_filter_selected_months: HashSet<String>,
-    pub emp_filter_selected_obras: HashSet<String>,
-
-    // Modal de empleados
-    pub emp_modal_worker_count: usize,
-    pub emp_modal_worker_names_str: String,
-    pub emp_modal_total_occurrences: usize,
-    pub emp_modal_meses: Vec<(String, String, usize, bool)>,
-    pub emp_modal_obras: Vec<(String, String, usize, bool)>,
+    // Filtro avanzado ("Filtrar…")
+    /// Criterios del filtro aplicado.
+    pub filtro: FiltroAvanzado,
+    pub filtro_activo: bool,
+    /// true si el filtro aplicado se creó en modo selección (false = general).
+    pub filtro_aplicado_seleccion: bool,
+    /// Borrador editado dentro del modal.
+    pub filtro_borrador: FiltroAvanzado,
+    /// true = sin selección (alcance: todas las filas); false = sobre la selección.
+    pub filtro_modo_general: bool,
+    /// Empleados del alcance en modo selección (vacío en modo general).
+    pub filtro_alcance_empleados: BTreeSet<String>,
+    pub filtro_busqueda_emp: String,
     pub quick_select_obras: Vec<(String, String, usize, bool)>,
 
     // Exportación SUA
@@ -126,19 +144,13 @@ impl Default for ReporteSessionState {
             sort_by_rfc: false,
             sort_rfc_asc: true,
 
-            emp_filter_active: false,
-            emp_filter_all_months: true,
-            emp_filter_all_obras: true,
-            emp_filter_worker_ids: HashSet::new(),
-            emp_filter_worker_rfcs: HashSet::new(),
-            emp_filter_selected_months: HashSet::new(),
-            emp_filter_selected_obras: HashSet::new(),
-
-            emp_modal_worker_count: 0,
-            emp_modal_worker_names_str: String::new(),
-            emp_modal_total_occurrences: 0,
-            emp_modal_meses: Vec::new(),
-            emp_modal_obras: Vec::new(),
+            filtro: FiltroAvanzado::default(),
+            filtro_activo: false,
+            filtro_aplicado_seleccion: false,
+            filtro_borrador: FiltroAvanzado::default(),
+            filtro_modo_general: true,
+            filtro_alcance_empleados: BTreeSet::new(),
+            filtro_busqueda_emp: String::new(),
             quick_select_obras: Vec::new(),
 
             sua_selected_obra_ids: HashSet::new(),
@@ -240,42 +252,9 @@ pub fn get_obra_colors(index: usize) -> (slint::Color, slint::Color, slint::Colo
 }
 
 pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
-    let dias_cedula_f = row.dias_cedula as f64;
-    let sum_incidencias = row.lic + row.inc + row.aus;
-    let dias_efectivos = (dias_cedula_f - sum_incidencias).max(0.0);
+    use crate::db::prorrateo::{dias_efectivos, factor_prorrateo, prorratear, ImportesTramo};
 
-    // Restricción: Días obra no puede exceder los días efectivos de cédula (dias_cedula - LIC - INC - AUS)
-    if (row.dias_obra as f64) > dias_efectivos {
-        row.dias_obra = dias_efectivos.round() as i16;
-    }
-
-    if dias_cedula_f <= 0.0001 || row.dias_obra <= 0 {
-        row.cf = 0.0;
-        row.exc_pat = 0.0;
-        row.exc_obr = 0.0;
-        row.pd_pat = 0.0;
-        row.pd_obr = 0.0;
-        row.gmp_pat = 0.0;
-        row.gmp_obr = 0.0;
-        row.rt = 0.0;
-        row.iv_pat = 0.0;
-        row.iv_obr = 0.0;
-        row.gps = 0.0;
-        row.patronal = 0.0;
-        row.obrera = 0.0;
-        row.subtotal = 0.0;
-        return;
-    }
-
-    // Regla de tres estricta: Valor_Prorrateado = (Valor_Original / Días_Cédula) * Días_Obra
-    let factor = if row.id_registro_obra.is_some() {
-        (row.dias_obra as f64) / dias_cedula_f
-    } else {
-        1.0
-    };
-    let round2 = |v: f64| (v * 100.0).round() / 100.0;
-
-    // Respaldo de seguridad: Si los campos originales estaban en 0.0 pero la fila ya tenía importes, no perder la base
+    // Respaldo de seguridad: si los campos originales estaban en 0.0 pero la fila ya tenía importes, no perder la base
     if row.cf_orig == 0.0 && row.cf > 0.0 { row.cf_orig = row.cf; }
     if row.exc_pat_orig == 0.0 && row.exc_pat > 0.0 { row.exc_pat_orig = row.exc_pat; }
     if row.exc_obr_orig == 0.0 && row.exc_obr > 0.0 { row.exc_obr_orig = row.exc_obr; }
@@ -289,23 +268,55 @@ pub fn recalculate_row_in_memory(row: &mut ReporteLiquidacionRowDb) {
     if row.gps_orig == 0.0 && row.gps > 0.0 { row.gps_orig = row.gps; }
     if row.subtotal_orig == 0.0 && row.subtotal > 0.0 { row.subtotal_orig = row.subtotal; }
 
-    row.cf = round2(row.cf_orig * factor);
-    row.exc_pat = round2(row.exc_pat_orig * factor);
-    row.exc_obr = round2(row.exc_obr_orig * factor);
-    row.pd_pat = round2(row.pd_pat_orig * factor);
-    row.pd_obr = round2(row.pd_obr_orig * factor);
-    row.gmp_pat = round2(row.gmp_pat_orig * factor);
-    row.gmp_obr = round2(row.gmp_obr_orig * factor);
-    row.rt = round2(row.rt_orig * factor);
-    row.iv_pat = round2(row.iv_pat_orig * factor);
-    row.iv_obr = round2(row.iv_obr_orig * factor);
-    row.gps = round2(row.gps_orig * factor);
+    let dias_cedula = row.dias_cedula as i32;
 
-    row.patronal = round2(
-        row.cf + row.exc_pat + row.pd_pat + row.gmp_pat + row.rt + row.iv_pat + row.gps,
+    // Restricción de UI: días obra no puede exceder los días efectivos de cédula (dias_cedula - LIC - INC - AUS)
+    let efectivos = dias_efectivos(dias_cedula, row.lic, row.inc, row.aus);
+    if (row.dias_obra as i32) > efectivos {
+        row.dias_obra = efectivos as i16;
+    }
+
+    // Regla canónica de prorrateo (sin obra => factor 1; con obra => min(dias_obra, efectivos) / dias_cedula)
+    let factor = factor_prorrateo(
+        row.id_registro_obra.is_some(),
+        dias_cedula,
+        row.dias_obra as i32,
+        row.lic,
+        row.inc,
+        row.aus,
     );
-    row.obrera = round2(row.exc_obr + row.pd_obr + row.gmp_obr + row.iv_obr);
-    row.subtotal = round2(row.subtotal_orig * factor);
+
+    let originales = ImportesTramo {
+        cf: row.cf_orig,
+        exc_pat: row.exc_pat_orig,
+        exc_obr: row.exc_obr_orig,
+        pd_pat: row.pd_pat_orig,
+        pd_obr: row.pd_obr_orig,
+        gmp_pat: row.gmp_pat_orig,
+        gmp_obr: row.gmp_obr_orig,
+        rt: row.rt_orig,
+        iv_pat: row.iv_pat_orig,
+        iv_obr: row.iv_obr_orig,
+        gps: row.gps_orig,
+        subtotal: row.subtotal_orig,
+        ..Default::default()
+    };
+    let r = prorratear(&originales, factor);
+
+    row.cf = r.cf;
+    row.exc_pat = r.exc_pat;
+    row.exc_obr = r.exc_obr;
+    row.pd_pat = r.pd_pat;
+    row.pd_obr = r.pd_obr;
+    row.gmp_pat = r.gmp_pat;
+    row.gmp_obr = r.gmp_obr;
+    row.rt = r.rt;
+    row.iv_pat = r.iv_pat;
+    row.iv_obr = r.iv_obr;
+    row.gps = r.gps;
+    row.patronal = r.patronal;
+    row.obrera = r.obrera;
+    row.subtotal = r.subtotal;
 }
 
 /// Recalcula el Tope Máx dinámico para cada obra en el modal individual (o multi-obra).
@@ -613,7 +624,307 @@ pub fn redistribute_batch_workers_days(
     }
 }
 
+/// Número de mes (1..=12) de una fila: usa el campo numérico y, si no es válido, el texto del mes.
+pub(crate) fn mes_num(r: &ReporteLiquidacionRowDb) -> u32 {
+    if (1..=12).contains(&r.mes_periodo_int) {
+        r.mes_periodo_int as u32
+    } else {
+        month_to_num(&r.mes_periodo)
+    }
+}
+
+/// Clave de empleado para el filtro: RFC limpio (agrupa duplicados con el mismo RFC),
+/// luego el id del empleado y, en último caso, el nombre. Los RFC genéricos nunca son clave.
+pub(crate) fn clave_empleado(r: &ReporteLiquidacionRowDb) -> String {
+    if let Some(rfc) = get_clean_non_generic_rfc(&r.rfc) {
+        rfc
+    } else if !r.id_empleado.is_nil() {
+        r.id_empleado.to_string()
+    } else {
+        r.nombre_trabajador.trim().to_uppercase()
+    }
+}
+
+/// Clave de obra para el filtro: uuid de la obra o "sin_asignar".
+pub(crate) fn clave_obra(r: &ReporteLiquidacionRowDb) -> String {
+    r.id_registro_obra
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "sin_asignar".to_string())
+}
+
+/// Normaliza texto para comparar: sin acentos, en mayúsculas y sin espacios en los extremos.
+pub(crate) fn normalizar(s: &str) -> String {
+    unidecode::unidecode(s).to_uppercase().trim().to_string()
+}
+
+/// Busca un empleado por NSS (dígitos, ignorando guiones y espacios), nombre (todas las
+/// palabras, sin acentos ni orden), RFC o CURP. Consulta vacía coincide con todo.
+pub(crate) fn coincide_busqueda_empleado(r: &ReporteLiquidacionRowDb, consulta: &str) -> bool {
+    let q = normalizar(consulta);
+    if q.is_empty() {
+        return true;
+    }
+
+    // Nombre: cada palabra de la consulta debe aparecer en el nombre
+    let nombre = normalizar(&r.nombre_trabajador);
+    if q.split_whitespace().all(|token| nombre.contains(token)) {
+        return true;
+    }
+
+    // NSS: solo si la consulta tiene al menos 3 dígitos
+    let digitos_q: String = consulta.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digitos_q.len() >= 3 {
+        let digitos_nss: String = r.nss.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digitos_nss.contains(&digitos_q) {
+            return true;
+        }
+    }
+
+    // RFC y CURP: consulta sin espacios
+    let q_sin_espacios: String = q.chars().filter(|c| !c.is_whitespace()).collect();
+    if !q_sin_espacios.is_empty() {
+        if r.rfc.to_uppercase().contains(&q_sin_espacios) || r.curp.to_uppercase().contains(&q_sin_espacios) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Indica si una fila cumple el filtro avanzado: AND entre criterios, OR dentro de cada uno.
+/// Un criterio vacío no restringe.
+pub(crate) fn fila_pasa_filtro(f: &FiltroAvanzado, r: &ReporteLiquidacionRowDb) -> bool {
+    if !f.anios.is_empty() && !f.anios.contains(&r.anio_periodo) {
+        return false;
+    }
+    if !f.meses.is_empty() && !f.meses.contains(&(r.anio_periodo, mes_num(r))) {
+        return false;
+    }
+    if !f.obras.is_empty() && !f.obras.contains(&clave_obra(r)) {
+        return false;
+    }
+    if !f.empleados.is_empty() && !f.empleados.contains(&clave_empleado(r)) {
+        return false;
+    }
+    true
+}
+
+/// Número de criterios no vacíos (año, mes, obra, empleado).
+pub(crate) fn criterios_no_vacios(f: &FiltroAvanzado) -> i32 {
+    [
+        !f.anios.is_empty(),
+        !f.meses.is_empty(),
+        !f.obras.is_empty(),
+        !f.empleados.is_empty(),
+    ]
+    .iter()
+    .filter(|activo| **activo)
+    .count() as i32
+}
+
+/// Interpreta una clave de mes "YYYY-MM". Mes 0 representa "sin mes" (texto no reconocible).
+pub(crate) fn parsear_clave_mes(clave: &str) -> Option<(i16, u32)> {
+    let (anio, mes) = clave.split_once('-')?;
+    let anio: i16 = anio.trim().parse().ok()?;
+    let mes: u32 = mes.trim().parse().ok()?;
+    if mes <= 12 {
+        Some((anio, mes))
+    } else {
+        None
+    }
+}
+
+/// Alterna un valor en un conjunto del borrador.
+fn toggle_en_conjunto<T: Ord>(conjunto: &mut BTreeSet<T>, valor: T) {
+    if !conjunto.remove(&valor) {
+        conjunto.insert(valor);
+    }
+}
+
+/// Claves de empleado de las filas seleccionadas (vacío = modo general).
+fn alcance_desde_seleccion(state: &ReporteSessionState) -> BTreeSet<String> {
+    state
+        .all_rows
+        .iter()
+        .filter(|r| state.selected_ids.contains(&r.id_reporte_liq))
+        .map(|r| clave_empleado(r))
+        .collect()
+}
+
+fn filtro_emp_item(r: &ReporteLiquidacionRowDb, conteo: usize, seleccionado: bool) -> ReporteFiltroEmpleado {
+    ReporteFiltroEmpleado {
+        clave: clave_empleado(r).into(),
+        nombre: r.nombre_trabajador.as_str().into(),
+        nss: r.nss.as_str().into(),
+        rfc: r.rfc.as_str().into(),
+        curp: r.curp.as_str().into(),
+        conteo: conteo as i32,
+        seleccionado,
+    }
+}
+
+/// Empuja al modal "Filtrar…" sus opciones, selecciones y contadores. El alcance son todas
+/// las filas en modo general, o las filas de los empleados seleccionados en modo selección.
+pub(crate) fn render_filtro_modal(ui: &MainWindow, state: &ReporteSessionState) {
+    let app_data = ui.global::<AppData>();
+    let borrador = &state.filtro_borrador;
+
+    let alcance: Vec<&ReporteLiquidacionRowDb> = state
+        .all_rows
+        .iter()
+        .filter(|r| state.filtro_modo_general || state.filtro_alcance_empleados.contains(&clave_empleado(r)))
+        .collect();
+
+    // Conteos por año, mes, obra y empleado dentro del alcance
+    let mut conteo_anios: BTreeMap<i16, usize> = BTreeMap::new();
+    let mut conteo_meses: BTreeMap<(i16, u32), usize> = BTreeMap::new();
+    let mut conteo_obras: HashMap<String, usize> = HashMap::new();
+    let mut conteo_emp: HashMap<String, usize> = HashMap::new();
+    for r in &alcance {
+        *conteo_anios.entry(r.anio_periodo).or_insert(0) += 1;
+        *conteo_meses.entry((r.anio_periodo, mes_num(r))).or_insert(0) += 1;
+        *conteo_obras.entry(clave_obra(r)).or_insert(0) += 1;
+        *conteo_emp.entry(clave_empleado(r)).or_insert(0) += 1;
+    }
+
+    // Años (ascendente)
+    let anios: Vec<ReporteFiltroOpcion> = conteo_anios
+        .iter()
+        .map(|(anio, n)| ReporteFiltroOpcion {
+            clave: anio.to_string().into(),
+            etiqueta: anio.to_string().into(),
+            grupo: "".into(),
+            conteo: *n as i32,
+            seleccionado: borrador.anios.contains(anio),
+        })
+        .collect();
+
+    // Meses (año y mes ascendentes); grupo = año
+    let meses: Vec<ReporteFiltroOpcion> = conteo_meses
+        .iter()
+        .map(|((anio, mes), n)| {
+            let nombre_mes = if *mes == 0 { "SIN MES" } else { month_num_to_name(*mes) };
+            ReporteFiltroOpcion {
+                clave: format!("{}-{:02}", anio, mes).into(),
+                etiqueta: format!("{} {}", nombre_mes, anio).into(),
+                grupo: anio.to_string().into(),
+                conteo: *n as i32,
+                seleccionado: borrador.meses.contains(&(*anio, *mes)),
+            }
+        })
+        .collect();
+
+    // Obras: etiqueta desde all_obras_options; "sin_asignar" siempre al final
+    let mut obras: Vec<(String, String, usize)> = Vec::new();
+    for (clave, n) in &conteo_obras {
+        if clave == "sin_asignar" {
+            continue;
+        }
+        let etiqueta = state
+            .all_obras_options
+            .iter()
+            .find(|o| o.id.to_string() == *clave)
+            .map(|o| o.label.clone())
+            .or_else(|| {
+                alcance
+                    .iter()
+                    .find(|r| clave_obra(r) == *clave)
+                    .map(|r| {
+                        if r.obra_label.trim().is_empty() {
+                            format!("Obra {}", r.obra_numero)
+                        } else {
+                            r.obra_label.clone()
+                        }
+                    })
+            })
+            .unwrap_or_else(|| format!("Obra {}", clave));
+        obras.push((clave.clone(), etiqueta, *n));
+    }
+    if let Some(n) = conteo_obras.get("sin_asignar") {
+        obras.push(("sin_asignar".to_string(), "Sin asignar (pendientes)".to_string(), *n));
+    }
+    obras.sort_by(|a, b| {
+        (a.0 == "sin_asignar")
+            .cmp(&(b.0 == "sin_asignar"))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    let obras_items: Vec<ReporteFiltroOpcion> = obras
+        .iter()
+        .map(|(clave, etiqueta, n)| ReporteFiltroOpcion {
+            clave: clave.as_str().into(),
+            etiqueta: etiqueta.as_str().into(),
+            grupo: "".into(),
+            conteo: *n as i32,
+            seleccionado: borrador.obras.contains(clave),
+        })
+        .collect();
+
+    // Representante de cada empleado (primera fila de toda la revisión) para nombre, NSS, RFC y CURP
+    let mut representante: HashMap<String, &ReporteLiquidacionRowDb> = HashMap::new();
+    for r in &state.all_rows {
+        representante.entry(clave_empleado(r)).or_insert(r);
+    }
+
+    // Empleados ya seleccionados en el borrador (ordenados por nombre)
+    let mut emp_sel: Vec<(String, ReporteFiltroEmpleado)> = borrador
+        .empleados
+        .iter()
+        .filter_map(|clave| {
+            representante.get(clave).map(|r| {
+                let conteo = *conteo_emp.get(clave).unwrap_or(&0);
+                (r.nombre_trabajador.clone(), filtro_emp_item(r, conteo, true))
+            })
+        })
+        .collect();
+    emp_sel.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Resultados de búsqueda: empleados únicos del alcance, máximo 50, ordenados por nombre
+    let busqueda = state.filtro_busqueda_emp.trim().to_string();
+    let mut emp_resultados: Vec<(String, ReporteFiltroEmpleado)> = Vec::new();
+    if !busqueda.is_empty() {
+        let mut vistos: HashSet<String> = HashSet::new();
+        for r in &alcance {
+            if !coincide_busqueda_empleado(r, &busqueda) {
+                continue;
+            }
+            let clave = clave_empleado(r);
+            if !vistos.insert(clave.clone()) {
+                continue;
+            }
+            let conteo = *conteo_emp.get(&clave).unwrap_or(&0);
+            let seleccionado = borrador.empleados.contains(&clave);
+            emp_resultados.push((r.nombre_trabajador.clone(), filtro_emp_item(r, conteo, seleccionado)));
+        }
+        emp_resultados.sort_by(|a, b| a.0.cmp(&b.0));
+        emp_resultados.truncate(50);
+    }
+
+    // Vista previa: filas del alcance que cumplen el borrador
+    let coinciden = alcance
+        .iter()
+        .filter(|r| fila_pasa_filtro(borrador, r))
+        .count();
+
+    app_data.set_reporte_filtro_modo_general(state.filtro_modo_general);
+    app_data.set_reporte_filtro_coinciden(coinciden as i32);
+    app_data.set_reporte_filtro_aviso("".into());
+    app_data.set_reporte_filtro_busqueda_emp(state.filtro_busqueda_emp.as_str().into());
+    app_data.set_reporte_filtro_anios(ModelRc::new(VecModel::from(anios)));
+    app_data.set_reporte_filtro_meses(ModelRc::new(VecModel::from(meses)));
+    app_data.set_reporte_filtro_obras(ModelRc::new(VecModel::from(obras_items)));
+    app_data.set_reporte_filtro_emp_seleccionados(ModelRc::new(VecModel::from(
+        emp_sel.into_iter().map(|(_, e)| e).collect::<Vec<_>>(),
+    )));
+    app_data.set_reporte_filtro_emp_resultados(ModelRc::new(VecModel::from(
+        emp_resultados.into_iter().map(|(_, e)| e).collect::<Vec<_>>(),
+    )));
+}
+
 pub fn apply_reporte_filtering(state: &mut ReporteSessionState) {
+    // El filtro "Fuera de periodo" ya no existe: un índice fuera de rango (opciones 0..=2) vuelve a "Todos"
+    if state.filter_estado_idx > 2 {
+        state.filter_estado_idx = 0;
+    }
     // Filtrar obras_options: Solo conservar obras creadas por el usuario (creado_usuario = true)
     // o aquellas que se encuentran en la tabla de liquidaciones del reporte.
     state.obras_options.retain(|o| {
@@ -702,29 +1013,9 @@ pub fn apply_reporte_filtering(state: &mut ReporteSessionState) {
                 }
             }
 
-            // Filtro por empleados seleccionados
-            if state.emp_filter_active {
-                let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
-                let is_target = state.emp_filter_worker_ids.contains(&r.id_empleado)
-                    || clean_rfc.map_or(false, |clean| state.emp_filter_worker_rfcs.contains(&clean));
-                if !is_target {
-                    return false;
-                }
-
-                // Filtrar por meses
-                if !state.emp_filter_all_months {
-                    if !state.emp_filter_selected_months.contains(&r.periodo_str) {
-                        return false;
-                    }
-                }
-
-                // Filtrar por obras
-                if !state.emp_filter_all_obras {
-                    let obra_key = r.id_registro_obra.map(|u| u.to_string()).unwrap_or_else(|| "sin_asignar".to_string());
-                    if !state.emp_filter_selected_obras.contains(&obra_key) {
-                        return false;
-                    }
-                }
+            // Filtro avanzado ("Filtrar…"): AND entre criterios, OR dentro de cada uno
+            if state.filtro_activo && !fila_pasa_filtro(&state.filtro, r) {
+                return false;
             }
 
             // Filtro Multi-Selección de Empleados Únicos (Menú Principal)
@@ -1116,6 +1407,7 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             movimientos_resumen: movimientos_resumen.into(),
             tiene_inconsistencia,
             observacion_validacion: observacion_validacion.into(),
+            cedula_actualizada: r.cedula_actualizada,
             is_baja,
             idx: (start_idx + page_offset + 1) as i32,
             id_reporte_liq: r.id_reporte_liq.to_string().into(),
@@ -1231,33 +1523,9 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
     if state.sort_by_rfc { active_sort_count += 1; }
     app_data.set_reporte_active_sort_count(active_sort_count);
 
-    // Sincronizar estado de filtro de empleados seleccionados
-    app_data.set_reporte_emp_modal_worker_count(state.emp_modal_worker_count as i32);
-    app_data.set_reporte_emp_modal_worker_names_str(state.emp_modal_worker_names_str.as_str().into());
-    app_data.set_reporte_emp_modal_total_occurrences(state.emp_modal_total_occurrences as i32);
-    app_data.set_reporte_emp_filter_all_months(state.emp_filter_all_months);
-    app_data.set_reporte_emp_filter_all_obras(state.emp_filter_all_obras);
-    app_data.set_reporte_emp_filter_active(state.emp_filter_active);
-
-    let meses_models: Vec<ReporteFilterOptionItem> = state.emp_modal_meses.iter().map(|(id, lbl, count, sel)| {
-        ReporteFilterOptionItem {
-            id: id.as_str().into(),
-            label: lbl.as_str().into(),
-            count: *count as i32,
-            selected: *sel,
-        }
-    }).collect();
-    app_data.set_reporte_emp_modal_meses(ModelRc::new(VecModel::from(meses_models)));
-
-    let obras_models: Vec<ReporteFilterOptionItem> = state.emp_modal_obras.iter().map(|(id, lbl, count, sel)| {
-        ReporteFilterOptionItem {
-            id: id.as_str().into(),
-            label: lbl.as_str().into(),
-            count: *count as i32,
-            selected: *sel,
-        }
-    }).collect();
-    app_data.set_reporte_emp_modal_obras(ModelRc::new(VecModel::from(obras_models)));
+    // Sincronizar estado del filtro avanzado ("Filtrar…")
+    app_data.set_reporte_filtro_activo(state.filtro_activo);
+    app_data.set_reporte_filtro_criterios(if state.filtro_activo { criterios_no_vacios(&state.filtro) } else { 0 });
 
     // 7. Totales para el Pie de Tabla Fijo (calculados sobre filtered_rows)
     let mut total_dias_ced: i32 = 0;
@@ -1388,10 +1656,11 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
             valor_guarderias: k.valor_guarderias as f32,
             valor_guarderias_str: format_curr(k.valor_guarderias).into(),
             monto_obra: k.monto_obra as f32,
-            monto_obra_str: format_curr(k.monto_obra).into(),
+            monto_obra_str: if k.sin_monto { "Sin monto (N/D)".into() } else { format_curr(k.monto_obra).into() },
             limite_18_obra: k.limite_18_obra as f32,
-            limite_18_obra_str: format_curr(k.limite_18_obra).into(),
+            limite_18_obra_str: if k.sin_monto { "N/D".into() } else { format_curr(k.limite_18_obra).into() },
             supera_18: k.supera_18,
+            sin_monto: k.sin_monto,
             empleados_count: k.empleados_count as i32,
         }
     }).collect();
@@ -1399,37 +1668,73 @@ pub fn render_reporte_ui(ui: &MainWindow, state: &ReporteSessionState) {
 
     // Sincronizar estado del filtro multi-selección de empleados únicos
     sync_unique_empleados_to_ui(state, &app_data);
+
+    // Pestaña "Asignación por empleado"
+    crate::asignacion_view_logic::render_asignacion_ui(ui, state);
+    // Pestaña "Asignación por obra"
+    crate::asignacion_obra_logic::render_asignacion_obra_ui(ui, state);
 }
 
+/// Carga el reporte de la revisión. Solo sincroniza con las cédulas si `sincronizar` es true.
+/// Sin sincronización completa, reevalúa antes el universo de la revisión (meses de los Registros de Obra).
+/// Devuelve el número de filas sincronizadas (0 si no se sincronizó o falló).
 pub fn sync_and_load_reporte_data(
     ui: &MainWindow,
     pool_opt: &Option<Arc<DbPool>>,
     session_arc: &Arc<Mutex<ReporteSessionState>>,
     revision_id_str: &str,
-) {
+    sincronizar: bool,
+) -> Option<usize> {
     let pool = match pool_opt {
         Some(p) => p,
-        None => return,
+        None => return None,
     };
 
     let rev_uuid = match Uuid::parse_str(revision_id_str) {
         Ok(u) => u,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     let mut client = match pool.get() {
         Ok(c) => c,
         Err(e) => {
             log::error!("Error obteniendo conexión a BD para reporte: {}", e);
-            return;
+            return None;
         }
     };
 
-    // 1. Sincronizar liquidaciones hacia tablas de reportes
-    match sync_reportes_liquidaciones_for_revision(&mut client, rev_uuid) {
-        Ok(c) => log::info!("Sincronizadas {} filas de reporte liquidaciones", c),
-        Err(e) => log::error!("Error sincronizando reporte liquidaciones: {}", e),
-    }
+    // 1. Sincronizar liquidaciones hacia tablas de reportes (solo bajo solicitud explícita)
+    // None = la sincronización falló (los datos se cargan igualmente); Some(n) = filas nuevas
+    let filas_sincronizadas: Option<usize> = if sincronizar {
+        match sync_reportes_liquidaciones_for_revision(&mut client, rev_uuid) {
+            Ok(c) => {
+                log::info!("Sincronizadas {} filas de reporte liquidaciones", c);
+                Some(c)
+            }
+            Err(e) => {
+                log::error!("Error sincronizando reporte liquidaciones: {}", e);
+                None
+            }
+        }
+    } else {
+        // Sin sincronización completa: reevaluar ACTIVO/FUERA_PERIODO según los Registros de Obra actuales.
+        // Un fallo no aborta la carga de la vista.
+        match crate::db::reporte_liquidaciones::reevaluar_universo_revision(&mut client, rev_uuid) {
+            Ok((fuera, activos)) => {
+                if fuera > 0 || activos > 0 {
+                    log::info!(
+                        "Universo reevaluado: {} pasaron a fuera de periodo, {} regresaron",
+                        fuera,
+                        activos
+                    );
+                }
+            }
+            Err(e) => {
+                log::error!("Error reevaluando universo de la revisión: {}", e);
+            }
+        }
+        Some(0)
+    };
 
     // 2. Consultar filas y opciones de obras en paralelo concurrente aprovechando el pool de conexiones
     let (rows_res, obras_res, all_obras_res) = std::thread::scope(|s| {
@@ -1460,6 +1765,10 @@ pub fn sync_and_load_reporte_data(
             Vec::new()
         }
     };
+
+    // fetch_reporte_liquidaciones ya devuelve solo filas ACTIVO dentro del universo de la revisión;
+    // este filtro es únicamente una salvaguarda.
+    let rows: Vec<_> = rows.into_iter().filter(|r| r.estado == "ACTIVO").collect();
 
     let obras = match obras_res {
         Ok(o) => o,
@@ -1559,6 +1868,22 @@ pub fn sync_and_load_reporte_data(
         app_data.set_reporte_show_missing_cedulas_details(false);
     }
 
+    app_data.set_reporte_estado_options(ModelRc::new(VecModel::from(vec![
+        SharedString::from("Todos"),
+        SharedString::from("Asignados"),
+        SharedString::from("Sin Asignar (Pendiente)"),
+    ])));
+
+    // Estado vacío: sin Registros de Obra del usuario con fechas no hay meses en el universo del reporte
+    let sin_ro = match crate::db::reporte_liquidaciones::revision_tiene_ro_usuario(&mut client, rev_uuid) {
+        Ok(tiene) => !tiene,
+        Err(e) => {
+            log::error!("Error verificando Registros de Obra de la revisión: {}", e);
+            false
+        }
+    };
+    app_data.set_reporte_sin_ro(sin_ro);
+
     // 4. Actualizar estado de sesión
     {
         let mut state = session_arc.lock().unwrap();
@@ -1580,19 +1905,14 @@ pub fn sync_and_load_reporte_data(
         state.filter_periodo_idx = 0;
         state.filter_estado_idx = 0;
 
-        // Reset filtros de empleados y modales
-        state.emp_filter_active = false;
-        state.emp_filter_all_months = true;
-        state.emp_filter_all_obras = true;
-        state.emp_filter_worker_ids.clear();
-        state.emp_filter_worker_rfcs.clear();
-        state.emp_filter_selected_months.clear();
-        state.emp_filter_selected_obras.clear();
-        state.emp_modal_worker_count = 0;
-        state.emp_modal_worker_names_str.clear();
-        state.emp_modal_total_occurrences = 0;
-        state.emp_modal_meses.clear();
-        state.emp_modal_obras.clear();
+        // Reset del filtro avanzado y de su modal
+        state.filtro = FiltroAvanzado::default();
+        state.filtro_activo = false;
+        state.filtro_aplicado_seleccion = false;
+        state.filtro_borrador = FiltroAvanzado::default();
+        state.filtro_modo_general = true;
+        state.filtro_alcance_empleados.clear();
+        state.filtro_busqueda_emp.clear();
 
         state.selected_unique_emp_ids.clear();
         state.unique_emp_search_query.clear();
@@ -1604,6 +1924,13 @@ pub fn sync_and_load_reporte_data(
         apply_reporte_filtering(&mut state);
         render_reporte_ui(ui, &state);
     }
+
+    // Tras renderizar, avisa a la vista (Slint) para devolver el foco a su FocusScope y que
+    // los atajos sigan funcionando después de la recarga.
+    let ad = ui.global::<AppData>();
+    ad.set_reporte_focus_restaurar(ad.get_reporte_focus_restaurar().wrapping_add(1));
+
+    filas_sincronizadas
 }
 
 pub fn refresh_sua_modal_ui(app_data: &AppData, state: &ReporteSessionState) {
@@ -1674,6 +2001,325 @@ pub fn refresh_sua_modal_ui(app_data: &AppData, state: &ReporteSessionState) {
     app_data.set_reporte_sua_total_empleados_filtrados(filtered_workers.len() as i32);
 }
 
+/// Copia plana del estado que usan las exportaciones de Excel, sin tipos de UI, para poder
+/// generarlas en un hilo de fondo.
+#[derive(Clone)]
+struct ContextoEntregable {
+    revision_id: Option<Uuid>,
+    cliente_nombre: String,
+    rp_registro: String,
+    revision_nombre: String,
+    all_rows: Vec<ReporteLiquidacionRowDb>,
+    filtered_rows: Vec<ReporteLiquidacionRowDb>,
+    obras_options: Vec<ObraOptionDb>,
+    /// Obra elegida en el filtro de la vista; solo afecta a los KPIs del borrador.
+    filter_obra_id: Option<Uuid>,
+    /// `true` cuando la vista muestra menos filas que las activas.
+    hay_filtros: bool,
+}
+
+impl ContextoEntregable {
+    fn desde_estado(state: &ReporteSessionState) -> Self {
+        let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
+            Some(state.obras_options[state.filter_obra_idx - 1].id)
+        } else {
+            None
+        };
+        Self {
+            revision_id: revision_activa(state),
+            cliente_nombre: state.cliente_nombre.clone(),
+            rp_registro: state.rp_registro.clone(),
+            revision_nombre: state.revision_nombre.clone(),
+            all_rows: state.all_rows.clone(),
+            filtered_rows: state.filtered_rows.clone(),
+            obras_options: state.obras_options.clone(),
+            filter_obra_id,
+            hay_filtros: state.filtered_rows.len() != state.all_rows.len(),
+        }
+    }
+}
+
+/// Revisión seleccionada en la sesión, si su identificador es un UUID válido.
+fn revision_activa(state: &ReporteSessionState) -> Option<Uuid> {
+    state.current_revision_id.as_deref().and_then(|s| Uuid::parse_str(s).ok())
+}
+
+/// Carpeta de salida de los Excel: `./output`, con respaldo en Documentos o en la carpeta temporal.
+fn directorio_salida() -> PathBuf {
+    let default_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("output");
+    if std::fs::create_dir_all(&default_dir).is_ok() {
+        return default_dir;
+    }
+    let user_base = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let fallback_dir = user_base.join("Documents").join("FirmaFiscalACD_Output");
+    let _ = std::fs::create_dir_all(&fallback_dir);
+    if fallback_dir.exists() {
+        return fallback_dir;
+    }
+    let temp_out = std::env::temp_dir().join("FirmaFiscalACD_Output");
+    let _ = std::fs::create_dir_all(&temp_out);
+    temp_out
+}
+
+/// Convierte un texto en fragmento seguro para nombres de archivo; usa `vacio` si no queda nada.
+fn fragmento_nombre(texto: &str, vacio: &str) -> String {
+    let limpio: String = texto
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' => '_',
+            otro if otro.is_control() => '_',
+            otro => otro,
+        })
+        .collect();
+    let recortado = limpio.trim_matches('_');
+    if recortado.is_empty() {
+        vacio.to_string()
+    } else {
+        recortado.to_string()
+    }
+}
+
+/// Nombre del Excel: `<prefijo>Reporte_Liquidaciones_<folio>_<fecha>.xlsx`.
+fn nombre_archivo_excel(prefijo: &str, folio: &str, fecha: &str) -> String {
+    format!(
+        "{prefijo}Reporte_Liquidaciones_{}_{fecha}.xlsx",
+        fragmento_nombre(folio, "REVISION")
+    )
+}
+
+/// Marca de tiempo local para los nombres de archivo.
+fn marca_tiempo() -> String {
+    chrono::Local::now().format("%Y%m%d_%H%M%S").to_string()
+}
+
+/// Texto de resumen de la verificación previa al entregable.
+fn formato_resumen(r: &ResumenEntregable) -> String {
+    format!(
+        "{} filas activas · {} empleados · {} empleado-mes · Subtotal {}",
+        r.filas,
+        r.empleados,
+        r.empleado_mes,
+        format_curr(r.total_subtotal)
+    )
+}
+
+/// Resumen breve de una versión del historial, a partir del JSON guardado con la exportación.
+fn resumen_historial(resumen: Option<&serde_json::Value>) -> String {
+    let Some(j) = resumen else {
+        return String::new();
+    };
+    let filas = j.get("filas").and_then(|v| v.as_u64());
+    let subtotal = j.get("total_subtotal").and_then(|v| v.as_f64());
+    match (filas, subtotal) {
+        (Some(f), Some(s)) => format!("{f} filas · Subtotal {}", format_curr(s)),
+        (Some(f), None) => format!("{f} filas"),
+        (None, Some(s)) => format!("Subtotal {}", format_curr(s)),
+        (None, None) => String::new(),
+    }
+}
+
+/// Primeros 12 caracteres del hash SHA-256, para mostrar en pantalla.
+fn hash_corto(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// Código de severidad que consume la UI: 0 bloqueante, 1 advertencia, 2 informativo.
+fn codigo_severidad(s: &Severidad) -> i32 {
+    match s {
+        Severidad::Bloqueante => 0,
+        Severidad::Advertencia => 1,
+        Severidad::Info => 2,
+    }
+}
+
+/// Convierte la lista de verificación al modelo de la UI.
+fn modelo_puntos(lista: &ListaVerificacion) -> ModelRc<EntregablePunto> {
+    let puntos: Vec<EntregablePunto> = lista
+        .puntos
+        .iter()
+        .map(|p| EntregablePunto {
+            severidad: codigo_severidad(&p.severidad),
+            titulo: p.titulo.as_str().into(),
+            detalle: p.detalle.as_str().into(),
+        })
+        .collect();
+    ModelRc::new(VecModel::from(puntos))
+}
+
+/// Abre en el explorador la carpeta que contiene `ruta`.
+fn abrir_carpeta_de(ruta: &Path) {
+    if let Some(carpeta) = ruta.parent() {
+        crate::open_folder_in_os(carpeta);
+    }
+}
+
+/// Genera el Excel en `out_file`. El borrador usa todas las filas activas, o solo la vista filtrada
+/// si `solo_vista_filtrada` está activo; el entregable siempre usa todas las filas activas.
+fn generar_excel(
+    ctx: &ContextoEntregable,
+    meta: &ReporteFinalHeaderMeta,
+    modo: ModoEntregable,
+    out_file: &Path,
+) -> Result<(), String> {
+    let valid_user_obra_ids: HashSet<Uuid> = ctx
+        .obras_options
+        .iter()
+        .filter(|o| o.creado_usuario)
+        .map(|o| o.id)
+        .collect();
+    let (filas, filtro_obra) = match modo {
+        ModoEntregable::Borrador { solo_vista_filtrada: true } => {
+            (ctx.filtered_rows.as_slice(), ctx.filter_obra_id)
+        }
+        ModoEntregable::Borrador { solo_vista_filtrada: false } => (ctx.all_rows.as_slice(), None),
+        ModoEntregable::Entregable { .. } => (ctx.all_rows.as_slice(), None),
+    };
+    let guarderias_kpis = compute_guarderias_kpis(filas, &ctx.obras_options, filtro_obra);
+    export_reporte_liquidaciones_to_excel(
+        filas,
+        &ctx.all_rows,
+        Some(&valid_user_obra_ids),
+        &guarderias_kpis,
+        out_file,
+        &meta.cliente_nombre,
+        &meta.rp_registro,
+        &meta.revision_folio,
+        meta,
+        modo,
+    )
+    .map_err(|e| format!("Error exportando Excel: {e}"))
+}
+
+/// Resultado de un entregable generado, subido a RustFS y registrado.
+struct EntregableGenerado {
+    ruta: PathBuf,
+    version: i32,
+    hash: String,
+}
+
+/// Obtiene la lista de verificación y la siguiente versión XLSX de la revisión activa.
+fn preparar_verificacion(
+    pool: &DbPool,
+    ctx: &ContextoEntregable,
+) -> Result<(ListaVerificacion, i32), String> {
+    let rev = ctx
+        .revision_id
+        .ok_or_else(|| "No hay una revisión activa seleccionada.".to_string())?;
+    let mut client = pool
+        .get()
+        .map_err(|e| format!("conexión a la base de datos: {e}"))?;
+    let meta = fetch_reporte_header_meta(&mut client, rev)?;
+    let lista = evaluar_lista_verificacion(&meta, &ctx.all_rows, &ctx.obras_options, ctx.hay_filtros);
+    let version = siguiente_version(&mut client, rev, "XLSX")?;
+    Ok((lista, version))
+}
+
+/// Genera el Excel de trabajo (borrador) en la carpeta de salida. No sube ni registra nada.
+/// Nunca se bloquea: `solo_vista_filtrada` decide si incluye solo la vista filtrada o todas las filas activas.
+fn generar_borrador(
+    pool: &DbPool,
+    ctx: &ContextoEntregable,
+    solo_vista_filtrada: bool,
+) -> Result<PathBuf, String> {
+    let rev = ctx
+        .revision_id
+        .ok_or_else(|| "No hay una revisión activa seleccionada.".to_string())?;
+    let mut client = pool
+        .get()
+        .map_err(|e| format!("conexión a la base de datos: {e}"))?;
+    // El borrador se permite con encabezado incompleto: el Excel muestra "[FALTA: ...]" en los huecos.
+    let meta = fetch_reporte_header_meta(&mut client, rev)?;
+    let ruta = directorio_salida().join(nombre_archivo_excel(
+        "BORRADOR_",
+        &meta.revision_folio,
+        &marca_tiempo(),
+    ));
+    generar_excel(ctx, &meta, ModoEntregable::Borrador { solo_vista_filtrada }, &ruta)?;
+    Ok(ruta)
+}
+
+/// Genera la versión `version_esperada` del entregable con todas las filas activas, la sube a RustFS
+/// y registra su hash. El registro solo ocurre si la subida fue correcta.
+fn generar_entregable(
+    pool: &DbPool,
+    ctx: &ContextoEntregable,
+    version_esperada: i32,
+) -> Result<EntregableGenerado, String> {
+    let rev = ctx
+        .revision_id
+        .ok_or_else(|| "No hay una revisión activa seleccionada.".to_string())?;
+    let mut client = pool
+        .get()
+        .map_err(|e| format!("conexión a la base de datos: {e}"))?;
+    let meta = fetch_reporte_header_meta(&mut client, rev)?;
+    // Los campos faltantes del encabezado bloquean vía evaluar_lista_verificacion (criterio único).
+    let lista = evaluar_lista_verificacion(&meta, &ctx.all_rows, &ctx.obras_options, ctx.hay_filtros);
+    if !lista.puede_entregar {
+        return Err("La verificación ya no permite entregar; revísala de nuevo.".to_string());
+    }
+    let version = siguiente_version(&mut client, rev, "XLSX")?;
+    if version != version_esperada {
+        return Err(format!(
+            "La versión cambió (ahora corresponde v{version}); revisa la verificación de nuevo."
+        ));
+    }
+
+    let nombre = nombre_archivo_excel(&format!("v{version}_"), &meta.revision_folio, &marca_tiempo());
+    let ruta = directorio_salida().join(&nombre);
+    generar_excel(ctx, &meta, ModoEntregable::Entregable { version }, &ruta)?;
+
+    let bytes = std::fs::read(&ruta)
+        .map_err(|e| format!("No se pudo leer el archivo generado: {e}"))?;
+    let hash = sha256_hex(&bytes);
+    let ubicacion = ruta.display().to_string();
+    let clave = upload_file_to_rustfs(
+        &ctx.cliente_nombre,
+        &ctx.rp_registro,
+        &ctx.revision_nombre,
+        "Entregables",
+        &nombre,
+        &bytes,
+    )
+    .map_err(|e| {
+        format!(
+            "El archivo se generó en {ubicacion}, pero no se pudo guardar en RustFS ({e}); la versión no quedó registrada."
+        )
+    })?;
+    registrar_exportacion(
+        &mut client,
+        rev,
+        "XLSX",
+        version,
+        &hash,
+        &clave,
+        &resumen_json(&lista),
+    )
+    .map_err(|e| {
+        format!(
+            "El archivo se generó en {ubicacion} y se guardó en RustFS, pero no se pudo registrar la versión: {e}"
+        )
+    })?;
+
+    Ok(EntregableGenerado { ruta, version, hash })
+}
+
+/// Descarga una versión desde RustFS, la guarda en la carpeta de salida y compara su hash
+/// con el registrado. Devuelve la ruta y si el hash coincide.
+fn descargar_version(info: &ExportacionInfo) -> Result<(PathBuf, bool), String> {
+    let bytes = download_rustfs_file(&info.rustfs_key)?;
+    let coincide = sha256_hex(&bytes).eq_ignore_ascii_case(&info.sha256);
+    let nombre = info.rustfs_key.rsplit('/').next().unwrap_or("entregable.xlsx");
+    let ruta = directorio_salida().join(nombre);
+    std::fs::write(&ruta, &bytes)
+        .map_err(|e| format!("No se pudo guardar el archivo descargado: {e}"))?;
+    Ok((ruta, coincide))
+}
+
 pub fn wire_reporte_liquidaciones_callbacks(
     main_window: &MainWindow,
     db_pool: Option<Arc<DbPool>>,
@@ -1693,8 +2339,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 let rev_id = app_data.get_selected_revision_id().to_string();
-                let rp_id = app_data.get_selected_rp_id().to_string();
-                let target_id = if !rev_id.trim().is_empty() { rev_id } else { rp_id };
+                // El reporte siempre trabaja sobre una revisión seleccionada (nunca sobre el registro patronal)
+                let target_id = rev_id.trim().to_string();
                 crate::app_logger::log_ui_action(
                     "Reporte Liquidaciones",
                     "Navegación",
@@ -1707,14 +2353,14 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         "Reporte Liquidaciones",
                         "Navegación",
                         "Validación",
-                        "No hay registro patronal seleccionado",
+                        "No hay revisión seleccionada",
                     );
-                    crate::show_toast_message(&ui, "Seleccione primero un Registro Patronal.");
+                    crate::show_toast_message(&ui, "Selecciona primero una revisión para ver el Reporte de Liquidaciones.");
                     return;
                 }
                 app_data.set_reporte_liquidaciones_access_allowed(true);
                 app_data.set_current_view(7);
-                sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id);
+                sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id, false);
             }
         });
     }
@@ -1728,8 +2374,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 let rev_id = app_data.get_selected_revision_id().to_string();
-                let rp_id = app_data.get_selected_rp_id().to_string();
-                let target_id = if !rev_id.trim().is_empty() { rev_id } else { rp_id };
+                // El reporte siempre trabaja sobre una revisión seleccionada (nunca sobre el registro patronal)
+                let target_id = rev_id.trim().to_string();
                 crate::app_logger::log_ui_action(
                     "Reporte Liquidaciones",
                     "Barra Superior",
@@ -1737,10 +2383,45 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     "Recargar datos del reporte",
                     &format!("target_id={}", target_id),
                 );
-                if !target_id.is_empty() {
-                    sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &target_id);
-                    crate::show_toast_message(&ui, "Reporte de liquidaciones recargado.");
+                if target_id.is_empty() {
+                    crate::show_toast_message(&ui, "Selecciona primero una revisión para ver el Reporte de Liquidaciones.");
+                    return;
                 }
+                let Ok(target_uuid) = Uuid::parse_str(&target_id) else {
+                    crate::show_toast_message(&ui, "Seleccione una revisión antes de sincronizar.");
+                    return;
+                };
+                let Some(pool) = pool_clone.clone() else {
+                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    return;
+                };
+                let pool_recarga = pool_clone.clone();
+                let session_recarga = session_clone.clone();
+                // La sincronización corre en segundo plano con capa de avance; la recarga de la vista,
+                // al terminar, en el hilo de la interfaz.
+                crate::operacion_ui::ejecutar_con_avance(
+                    &ui,
+                    "Sincronizando con las cédulas…",
+                    "Incorporando cédulas nuevas y recalculando el prorrateo. Las ediciones del analista se conservan.",
+                    move || -> Result<usize, String> {
+                        let mut client = pool.get().map_err(|e| format!("conexión a la base de datos: {e}"))?;
+                        sync_reportes_liquidaciones_for_revision(&mut client, target_uuid)
+                    },
+                    move |ui, resultado| {
+                        sync_and_load_reporte_data(ui, &pool_recarga, &session_recarga, &target_id, false);
+                        let mensaje = match resultado {
+                            Ok(filas_nuevas) => format!(
+                                "Sincronizado con las cédulas: {} filas nuevas; las ediciones del analista se conservaron.",
+                                filas_nuevas
+                            ),
+                            Err(e) => {
+                                log::error!("Error sincronizando reporte liquidaciones: {}", e);
+                                "No se pudo sincronizar con las cédulas (ver log). Se muestran los datos actuales sin cambios.".to_string()
+                            }
+                        };
+                        crate::show_toast_message(ui, &mensaje);
+                    },
+                );
             }
         });
     }
@@ -2182,13 +2863,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                         // Vincular por UUID o por número de registro patronal de obra
                         let maybe_sib = sibling_rows.iter().find(|s| {
-                            if let Some(s_oid) = s.id_registro_obra {
-                                s_oid == o.id
-                            } else if !s.obra_numero.trim().is_empty() {
-                                s.obra_numero.trim().eq_ignore_ascii_case(o.numero.trim())
-                            } else {
-                                false
-                            }
+                            s.id_registro_obra == Some(o.id)
+                                || (!s.obra_numero.trim().is_empty() && s.obra_numero.trim().eq_ignore_ascii_case(o.numero.trim()))
                         });
                         let selected = maybe_sib.is_some();
                         let d_obra = maybe_sib.map(|s| s.dias_obra as i32).unwrap_or(0);
@@ -2259,556 +2935,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
             }
         });
     }
-    {
-        let ui_weak = main_window.as_weak();
-        let open_fn = open_unified_modal.clone();
-        app_logic.on_reporte_open_obra_picker(move |id_str| {
-            if let Some(ui) = ui_weak.upgrade() {
-                open_fn(&ui, &id_str);
-            }
-        });
-    }
-    {
-        let ui_weak = main_window.as_weak();
-        let open_fn = open_unified_modal;
-        app_logic.on_reporte_open_edit_dias(move |id_str| {
-            if let Some(ui) = ui_weak.upgrade() {
-                open_fn(&ui, &id_str);
-            }
-        });
-    }
-
-    // 11. Filtrar obras en modal unificado
-    {
-        let ui_weak = main_window.as_weak();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_filter_edit_obras(move |q| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let q_lower = q.trim().to_lowercase();
-                let state = session_clone.lock().unwrap();
-                let mut obras_vec = Vec::new();
-                for o in &state.obras_options {
-                    if q_lower.is_empty() || o.numero.to_lowercase().contains(&q_lower) || o.label.to_lowercase().contains(&q_lower) {
-                        obras_vec.push(ReporteObraItem {
-                            id: o.id.to_string().into(),
-                            numero: o.numero.clone().into(),
-                            label: o.label.clone().into(),
-                        });
-                    }
-                }
-                ui.global::<AppData>().set_reporte_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
-            }
-        });
-    }
-
-    // 12. Seleccionar obra en combobox del modal
-    {
-        let ui_weak = main_window.as_weak();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_select_edit_obra(move |obra_id, obra_label| {
-            if let Some(ui) = ui_weak.upgrade() {
-                crate::app_logger::log_ui_event(
-                    "Reporte Liquidaciones",
-                    "Modal Edición Unificada",
-                    "Selección de Obra",
-                    &format!("obra_id={}, label={}", obra_id, obra_label),
-                );
-                let app_data = ui.global::<AppData>();
-                app_data.set_reporte_edit_selected_obra_id(obra_id.clone());
-                app_data.set_reporte_edit_selected_obra_label(obra_label.clone());
-                app_data.set_reporte_edit_search_query(obra_label);
-
-                let state = session_clone.lock().unwrap();
-                let cur_id_str = app_data.get_reporte_edit_row_id().to_string();
-                if let Ok(cur_uuid) = Uuid::parse_str(&cur_id_str) {
-                    if let Some(row) = state.all_rows.iter().find(|r| r.id_reporte_liq == cur_uuid) {
-                        let movs = extract_all_employee_movements(
-                            row.id_empleado,
-                            &row.mes_periodo,
-                            row.anio_periodo,
-                            &row.clave,
-                            row.fecha,
-                            &state.all_rows,
-                        );
-
-                        if obra_id.is_empty() {
-                            app_data.set_reporte_edit_dias_obra_val("0".into());
-                            let (dias_max, _) = calculate_max_dias_obra_for_employee_movements(
-                                row.dias_cedula,
-                                row.lic,
-                                row.inc,
-                                row.aus,
-                                &row.mes_periodo,
-                                row.anio_periodo,
-                                &row.periodo_str,
-                                None,
-                                None,
-                                &movs,
-                            );
-                            app_data.set_reporte_edit_dias_max(dias_max as i32);
-                            app_data.set_reporte_edit_obra_vigencia_info("⚠️ Sin obra seleccionada".into());
-                        } else {
-                            let (obra_ini, obra_fin, vigencia_str) = match Uuid::parse_str(&obra_id) {
-                                Ok(oid) => state.obras_options.iter().find(|o| o.id == oid)
-                                    .map(|o| {
-                                        let v = match (o.fecha_inicio, o.fecha_fin) {
-                                            (Some(ini), Some(fin)) => format!("Vigencia: {} al {}", ini.format("%d/%m/%Y"), fin.format("%d/%m/%Y")),
-                                            (Some(ini), None) => format!("Inicio: {}", ini.format("%d/%m/%Y")),
-                                            (None, Some(fin)) => format!("Fin: {}", fin.format("%d/%m/%Y")),
-                                            (None, None) => "Sin vigencia registrada".to_string(),
-                                        };
-                                        (o.fecha_inicio, o.fecha_fin, v)
-                                    })
-                                    .unwrap_or((None, None, String::new())),
-                                Err(_) => (None, None, String::new()),
-                            };
-
-                            // Validación de compatibilidad: obra iniciada después de baja o fuera de fechas según movimientos
-                            if let Err(e) = validate_obra_assignment_for_employee_movements(
-                                obra_ini,
-                                obra_fin,
-                                &movs,
-                                &row.mes_periodo,
-                                row.anio_periodo,
-                                &row.periodo_str,
-                            ) {
-                                crate::app_logger::log_ui_error(
-                                    "Reporte Liquidaciones",
-                                    "Modal Edición Unificada",
-                                    "Validación Obra Incompatible",
-                                    &format!("No se puede asignar esta obra: {}", e),
-                                );
-                                crate::show_toast_message(&ui, &format!("No se puede asignar esta obra: {}", e));
-                                app_data.set_reporte_edit_selected_obra_id("".into());
-                                app_data.set_reporte_edit_selected_obra_label("⚠️ Sin Asignar (Pendiente)".into());
-                                app_data.set_reporte_edit_search_query("".into());
-                                app_data.set_reporte_edit_dias_obra_val("0".into());
-                                app_data.set_reporte_edit_dias_max(0);
-                                app_data.set_reporte_edit_obra_vigencia_info(format!("⚠️ {}", e).into());
-                                app_data.set_reporte_edit_dropdown_open(false);
-                                return;
-                            }
-
-                            let cur_cedula: i16 = app_data.get_reporte_edit_dias_cedula_val().trim().parse().unwrap_or(row.dias_cedula);
-                            let (max_dias, dias_obra_en_mes) = calculate_max_dias_obra_for_employee_movements(
-                                cur_cedula,
-                                row.lic,
-                                row.inc,
-                                row.aus,
-                                &row.mes_periodo,
-                                row.anio_periodo,
-                                &row.periodo_str,
-                                obra_ini,
-                                obra_fin,
-                                &movs,
-                            );
-
-                            app_data.set_reporte_edit_dias_max(max_dias as i32);
-                            app_data.set_reporte_edit_dias_obra_val(max_dias.to_string().into());
-
-                            let info_msg = if let Some(d_obra) = dias_obra_en_mes {
-                                format!(
-                                    "📅 Días activos en este mes: {} días ({}) • Límite asignable: {} días",
-                                    d_obra, vigencia_str, max_dias
-                                )
-                            } else {
-                                format!("📅 {} • Límite asignable: {} días", vigencia_str, max_dias)
-                            };
-                            app_data.set_reporte_edit_obra_vigencia_info(info_msg.into());
-                        }
-                    }
-                }
-
-                let mut obras_vec = Vec::with_capacity(state.obras_options.len());
-                for o in &state.obras_options {
-                    obras_vec.push(ReporteObraItem {
-                        id: o.id.to_string().into(),
-                        numero: o.numero.clone().into(),
-                        label: o.label.clone().into(),
-                    });
-                }
-                app_data.set_reporte_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
-                app_data.set_reporte_edit_dropdown_open(false);
-            }
-        });
-    }
-
-    // 12b. Cambio en tiempo real de días cédula en el modal
-    {
-        let ui_weak = main_window.as_weak();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_edit_dias_cedula_changed(move |new_dias_str| {
-            if let Some(ui) = ui_weak.upgrade() {
-                crate::app_logger::log_ui_input(
-                    "Reporte Liquidaciones",
-                    "Modal Edición Unificada",
-                    "Input Días Cédula",
-                    "dias_cedula",
-                    &new_dias_str,
-                );
-                let app_data = ui.global::<AppData>();
-                let state = session_clone.lock().unwrap();
-                let cur_id_str = app_data.get_reporte_edit_row_id().to_string();
-                if let Ok(cur_uuid) = Uuid::parse_str(&cur_id_str) {
-                    if let Some(row) = state.all_rows.iter().find(|r| r.id_reporte_liq == cur_uuid) {
-                        let movs = extract_all_employee_movements(
-                            row.id_empleado,
-                            &row.mes_periodo,
-                            row.anio_periodo,
-                            &row.clave,
-                            row.fecha,
-                            &state.all_rows,
-                        );
-
-                        let selected_oid_str = app_data.get_reporte_edit_selected_obra_id().to_string();
-                        let (obra_ini, obra_fin, vigencia_str) = if !selected_oid_str.is_empty() {
-                            match Uuid::parse_str(&selected_oid_str) {
-                                Ok(oid) => state.obras_options.iter().find(|o| o.id == oid)
-                                    .map(|o| {
-                                        let v = match (o.fecha_inicio, o.fecha_fin) {
-                                            (Some(ini), Some(fin)) => format!("Vigencia: {} al {}", ini.format("%d/%m/%Y"), fin.format("%d/%m/%Y")),
-                                            (Some(ini), None) => format!("Inicio: {}", ini.format("%d/%m/%Y")),
-                                            (None, Some(fin)) => format!("Fin: {}", fin.format("%d/%m/%Y")),
-                                            (None, None) => "Sin vigencia registrada".to_string(),
-                                        };
-                                        (o.fecha_inicio, o.fecha_fin, v)
-                                    })
-                                    .unwrap_or((None, None, String::new())),
-                                Err(_) => (None, None, String::new()),
-                            }
-                        } else {
-                            (None, None, String::new())
-                        };
-
-                        let new_cedula: i16 = new_dias_str.trim().parse().unwrap_or(row.dias_cedula);
-                        let (max_dias, dias_obra_en_mes) = calculate_max_dias_obra_for_employee_movements(
-                            new_cedula,
-                            row.lic,
-                            row.inc,
-                            row.aus,
-                            &row.mes_periodo,
-                            row.anio_periodo,
-                            &row.periodo_str,
-                            obra_ini,
-                            obra_fin,
-                            &movs,
-                        );
-
-                        app_data.set_reporte_edit_dias_max(max_dias as i32);
-                        let cur_obra: i16 = app_data.get_reporte_edit_dias_obra_val().trim().parse().unwrap_or(0);
-                        if cur_obra > max_dias {
-                            app_data.set_reporte_edit_dias_obra_val(max_dias.to_string().into());
-                        }
-
-                        if !selected_oid_str.is_empty() {
-                            let info_msg = if let Some(d_obra) = dias_obra_en_mes {
-                                format!(
-                                    "📅 Días activos de la obra en este mes: {} días ({}) • Límite asignable: {} días",
-                                    d_obra, vigencia_str, max_dias
-                                )
-                            } else {
-                                format!("📅 {} • Límite asignable: {} días", vigencia_str, max_dias)
-                            };
-                            app_data.set_reporte_edit_obra_vigencia_info(info_msg.into());
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // 13. Alternar desplegable combobox
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_reporte_toggle_edit_dropdown(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                let new_val = !app_data.get_reporte_edit_dropdown_open();
-                crate::app_logger::log_ui_event(
-                    "Reporte Liquidaciones",
-                    "Modal Edición Unificada",
-                    "Alternar Dropdown Obras",
-                    &format!("abierto={}", new_val),
-                );
-                app_data.set_reporte_edit_dropdown_open(new_val);
-            }
-        });
-    }
-
-    // 14. Guardar cambios del modal unificado
-    {
-        let ui_weak = main_window.as_weak();
-        let pool_clone = db_pool.clone();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_submit_unified_edit(move |id_str, obra_id_str, dias_ced_str, dias_obr_str| {
-            if let Some(ui) = ui_weak.upgrade() {
-                crate::app_logger::log_ui_event(
-                    "Reporte Liquidaciones",
-                    "Modal Edición Unificada",
-                    "Click Botón Guardar Cambios",
-                    &format!("id={}, obra_id={}, dias_cedula={}, dias_obra={}", id_str, obra_id_str, dias_ced_str, dias_obr_str),
-                );
-
-                let row_uuid = match Uuid::parse_str(&id_str) {
-                    Ok(u) => u,
-                    Err(_) => {
-                        crate::app_logger::log_ui_error(
-                            "Reporte Liquidaciones",
-                            "Modal Edición Unificada",
-                            "Error Parse UUID",
-                            &format!("UUID inválido: {}", id_str),
-                        );
-                        return;
-                    }
-                };
-
-                let new_dias_ced = dias_ced_str.trim().parse::<i16>().unwrap_or(30).max(1);
-                let raw_dias_obr = dias_obr_str.trim().parse::<i16>().unwrap_or(0).max(0);
-
-                let obra_uuid_opt = if obra_id_str.trim().is_empty() {
-                    None
-                } else {
-                    Uuid::parse_str(obra_id_str.trim()).ok()
-                };
-
-                // Validación: Días Cédula y Días Obra no deben exceder 31 días
-                if new_dias_ced > 31 || raw_dias_obr > 31 {
-                    let err_msg = format!("Validación: Los días no pueden exceder 31 (Cédula: {}, Obra: {}).", new_dias_ced, raw_dias_obr);
-                    crate::app_logger::log_ui_error(
-                        "Reporte Liquidaciones",
-                        "Modal Edición Unificada",
-                        "Validación Límite 31 Días",
-                        &err_msg,
-                    );
-                    crate::show_toast_message(
-                        &ui,
-                        &err_msg,
-                    );
-                    return;
-                }
-
-                // Obtener datos del empleado y sus movimientos en el mes
-                let (lic_val, inc_val, aus_val, mes_periodo, anio_periodo, periodo_str, movs, parent_id) = {
-                    let state = session_clone.lock().unwrap();
-                    if let Some(r) = state.all_rows.iter().find(|row| row.id_reporte_liq == row_uuid) {
-                        let m = extract_all_employee_movements(
-                            r.id_empleado,
-                            &r.mes_periodo,
-                            r.anio_periodo,
-                            &r.clave,
-                            r.fecha,
-                            &state.all_rows,
-                        );
-                        (r.lic, r.inc, r.aus, r.mes_periodo.clone(), r.anio_periodo, r.periodo_str.clone(), m, r.id_parent_reporte_liq)
-                    } else {
-                        (0.0, 0.0, 0.0, String::new(), 0, String::new(), Vec::new(), Uuid::nil())
-                    }
-                };
-
-                // Validación multi-obra: Suma de días asignados a las obras no debe superar días cédula
-                {
-                    let state = session_clone.lock().unwrap();
-                    let other_obras_days: i16 = state.all_rows.iter()
-                        .filter(|r| r.id_parent_reporte_liq == parent_id && r.id_reporte_liq != row_uuid)
-                        .map(|r| r.dias_obra)
-                        .sum();
-
-                    if other_obras_days + raw_dias_obr > new_dias_ced {
-                        let err_msg = format!(
-                            "Restricción: La suma de días entre las obras ({} ya asignados en otras obras + {} en esta = {}) supera los días de cédula del trabajador ({}).",
-                            other_obras_days, raw_dias_obr, other_obras_days + raw_dias_obr, new_dias_ced
-                        );
-                        crate::app_logger::log_ui_error(
-                            "Reporte Liquidaciones",
-                            "Modal Edición Unificada",
-                            "Validación Suma Días Multi-Obra",
-                            &err_msg,
-                        );
-                        crate::show_toast_message(&ui, &err_msg);
-                        return;
-                    }
-                }
-
-                let (obra_ini, obra_fin, dias_obra_en_mes, vigencia_str) = if let Some(oid) = obra_uuid_opt {
-                    let state = session_clone.lock().unwrap();
-                    state.obras_options.iter().find(|o| o.id == oid)
-                        .map(|o| {
-                            let v = match (o.fecha_inicio, o.fecha_fin) {
-                                (Some(ini), Some(fin)) => format!("vigencia {} al {}", ini.format("%d/%m/%Y"), fin.format("%d/%m/%Y")),
-                                (Some(ini), None) => format!("inicio {}", ini.format("%d/%m/%Y")),
-                                (None, Some(fin)) => format!("fin {}", fin.format("%d/%m/%Y")),
-                                (None, None) => "sin fechas registradas".to_string(),
-                            };
-                            let d = parse_month_and_year(&mes_periodo, anio_periodo, &periodo_str)
-                                .and_then(|(m, y)| calculate_obra_days_in_month(m, y, o.fecha_inicio, o.fecha_fin));
-                            (o.fecha_inicio, o.fecha_fin, d, v)
-                        })
-                        .unwrap_or((None, None, None, String::new()))
-                } else {
-                    (None, None, None, String::new())
-                };
-
-                // Validación: si tiene obra seleccionada, verificar compatibilidad con movimientos y no superposición
-                if let Some(new_oid) = obra_uuid_opt {
-                    if let Err(e) = validate_obra_assignment_for_employee_movements(
-                        obra_ini,
-                        obra_fin,
-                        &movs,
-                        &mes_periodo,
-                        anio_periodo,
-                        &periodo_str,
-                    ) {
-                        crate::app_logger::log_ui_error(
-                            "Reporte Liquidaciones",
-                            "Modal Edición Unificada",
-                            "Validación Asignación Obra",
-                            &format!("Error compatibilidad: {}", e),
-                        );
-                        crate::show_toast_message(&ui, &format!("No se puede asignar esta obra: {}", e));
-                        return;
-                    }
-
-                    // Verificar superposición con otras obras ya vinculadas a este empleado
-                    let state = session_clone.lock().unwrap();
-                    for other in state.all_rows.iter().filter(|r| r.id_parent_reporte_liq == parent_id && r.id_reporte_liq != row_uuid) {
-                        if let Some(other_oid) = other.id_registro_obra {
-                            if other_oid == new_oid {
-                                let err_msg = format!("El trabajador ya tiene asignada la obra '{}' en otra fila de este periodo.", other.obra_label);
-                                crate::show_toast_message(&ui, &err_msg);
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
-                    new_dias_ced,
-                    lic_val,
-                    inc_val,
-                    aus_val,
-                    &mes_periodo,
-                    anio_periodo,
-                    &periodo_str,
-                    obra_ini,
-                    obra_fin,
-                    &movs,
-                );
-
-                if obra_uuid_opt.is_some() && raw_dias_obr > max_permitido {
-                    let total_inc = lic_val + inc_val + aus_val;
-                    let razon = if let Err(e) = validate_obra_assignment_for_employee_movements(
-                        obra_ini,
-                        obra_fin,
-                        &movs,
-                        &mes_periodo,
-                        anio_periodo,
-                        &periodo_str,
-                    ) {
-                        e
-                    } else if let Some(d_obra) = dias_obra_en_mes {
-                        format!(
-                            "Días activos de la obra en el mes: {} ({}), Días efectivos trabajador: {:.0} (Cédula {} - Incidencias {:.0})",
-                            d_obra, vigencia_str, (new_dias_ced as f64 - total_inc).max(0.0), new_dias_ced, total_inc
-                        )
-                    } else {
-                        format!(
-                            "Días efectivos trabajador: {:.0} (Cédula {} - Incidencias {:.0})",
-                            (new_dias_ced as f64 - total_inc).max(0.0), new_dias_ced, total_inc
-                        )
-                    };
-                    let err_msg = format!(
-                        "Restricción: Días Obra ({}) supera el máximo permitido ({}) para este empleado en {}. ({})",
-                        raw_dias_obr, max_permitido, periodo_str, razon
-                    );
-                    crate::app_logger::log_ui_error(
-                        "Reporte Liquidaciones",
-                        "Modal Edición Unificada",
-                        "Validación Límite Días Obra",
-                        &err_msg,
-                    );
-                    crate::show_toast_message(
-                        &ui,
-                        &err_msg,
-                    );
-                    return;
-                }
-
-                let app_data = ui.global::<AppData>();
-                app_data.set_show_reporte_edit_modal(false);
-
-                let new_dias_obr = if obra_uuid_opt.is_some() {
-                    if dias_obr_str.trim().is_empty() {
-                        max_permitido
-                    } else {
-                        raw_dias_obr
-                    }
-                } else {
-                    0
-                };
-
-                {
-                    let mut state = session_clone.lock().unwrap();
-                    let obra_info = if let Some(oid) = obra_uuid_opt {
-                        state.obras_options.iter().find(|o| o.id == oid).cloned()
-                    } else {
-                        None
-                    };
-
-                    if let Some(row) = state.all_rows.iter_mut().find(|r| r.id_reporte_liq == row_uuid) {
-                        row.dias_cedula = new_dias_ced;
-                        row.dias_obra = new_dias_obr;
-                        row.id_registro_obra = obra_uuid_opt;
-                        if let Some(ref o) = obra_info {
-                            row.obra_numero = o.numero.clone();
-                            row.obra_label = o.label.clone();
-                            row.obra_creado_usuario = o.creado_usuario;
-                        } else {
-                            row.obra_numero = String::new();
-                            row.obra_label = "⚠️ Sin Asignar (Pendiente)".to_string();
-                            row.obra_creado_usuario = false;
-                        }
-                        if new_dias_obr <= max_permitido {
-                            row.tiene_inconsistencia = false;
-                            row.observacion_validacion = String::new();
-                        }
-                        recalculate_row_in_memory(row);
-                    }
-
-                    // Sincronizar dias_cedula en filas hermanas del mismo empleado
-                    for r in state.all_rows.iter_mut() {
-                        if r.id_parent_reporte_liq == parent_id && r.id_reporte_liq != row_uuid {
-                            r.dias_cedula = new_dias_ced;
-                            recalculate_row_in_memory(r);
-                        }
-                    }
-
-                    apply_reporte_filtering(&mut state);
-                    render_reporte_ui(&ui, &state);
-                }
-
-                // Persistir en PostgreSQL en segundo plano
-                if let Some(ref pool) = pool_clone {
-                    let pool_bg = pool.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(mut client) = pool_bg.get() {
-                            if let Err(e) = update_single_reporte_row(
-                                &mut client,
-                                row_uuid,
-                                new_dias_ced,
-                                new_dias_obr,
-                                obra_uuid_opt,
-                            ) {
-                                log::error!("Error persistiendo actualización unificada: {}", e);
-                            }
-                        }
-                    });
-                }
-
-                crate::show_toast_message(&ui, "Registro de obra y días actualizados correctamente.");
-            }
-        });
-    }
-
     // Callbacks reactivos del Modal Multi-Obra
     {
         let ui_weak = main_window.as_weak();
@@ -3150,22 +3276,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
             }
         });
     }
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_reporte_close_obra_picker(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.global::<AppData>().set_show_reporte_edit_modal(false);
-            }
-        });
-    }
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_reporte_close_edit_dias(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.global::<AppData>().set_show_reporte_edit_modal(false);
-            }
-        });
-    }
 
     // Callbacks del filtro multi-selección de empleados únicos
     {
@@ -3452,17 +3562,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
     {
         let ui_weak = main_window.as_weak();
-        app_logic.on_reporte_toggle_add_dropdown(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                let new_val = !app_data.get_reporte_add_dropdown_open();
-                app_data.set_reporte_add_dropdown_open(new_val);
-            }
-        });
-    }
-
-    {
-        let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_submit_add_obra(move |row_id_str, obra_id_str, dias_obra_str| {
@@ -3684,7 +3783,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
             }
         };
 
-        let req_clone = request_fn.clone();
+        let req_clone = request_fn;
         app_logic.on_reporte_request_confirm_igualar_dias(move || {
             crate::app_logger::log_ui_event(
                 "Reporte Liquidaciones",
@@ -3693,15 +3792,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 "Solicitando modal de confirmación para asignar Días Obra máximos",
             );
             req_clone();
-        });
-        app_logic.on_reporte_batch_igualar_dias(move || {
-            crate::app_logger::log_ui_event(
-                "Reporte Liquidaciones",
-                "Barra Acciones Masivas",
-                "Click Botón Batch Igualar Días",
-                "Invocando confirmación de igualar días",
-            );
-            request_fn();
         });
     }
 
@@ -3838,205 +3928,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // Batch: Poner Días Obra en 0 para la selección
-    {
-        let ui_weak = main_window.as_weak();
-        let pool_clone = db_pool.clone();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_batch_poner_dias_cero(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                crate::app_logger::log_ui_event(
-                    "Reporte Liquidaciones",
-                    "Barra Acciones Masivas",
-                    "Click Botón Días Obra en 0",
-                    "Asignando 0 días de obra a la selección actual",
-                );
-                let mut count_modified = 0;
-
-                let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
-                    let mut state = session_clone.lock().unwrap();
-                    let ids_to_change: HashSet<Uuid> = if state.selected_ids.is_empty() {
-                        state.filtered_rows.iter()
-                            .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
-                            .map(|r| r.id_reporte_liq)
-                            .collect()
-                    } else {
-                        state.selected_ids.clone()
-                    };
-
-                    for row in state.all_rows.iter_mut() {
-                        if ids_to_change.contains(&row.id_reporte_liq) {
-                            row.dias_obra = 0;
-                            recalculate_row_in_memory(row);
-                            count_modified += 1;
-                        }
-                    }
-
-                    let rows = state
-                        .all_rows
-                        .iter()
-                        .filter(|r| ids_to_change.contains(&r.id_reporte_liq))
-                        .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
-                        .collect();
-
-                    apply_reporte_filtering(&mut state);
-                    render_reporte_ui(&ui, &state);
-
-                    rows
-                };
-
-                // Persistir en PostgreSQL
-                if let Some(ref pool) = pool_clone {
-                    let pool_bg = pool.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(mut client) = pool_bg.get() {
-                            if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
-                                log::error!("Error persistiendo días obra 0 en BD: {}", e);
-                            }
-                        }
-                    });
-                }
-
-                crate::show_toast_message(
-                    &ui,
-                    &format!("Se asignaron 0 días de obra a {} registros.", count_modified),
-                );
-            }
-        });
-    }
-
-    // Batch: Asignar Días Obra arbitrarios (incluyendo 0) a la selección
-    {
-        let ui_weak = main_window.as_weak();
-        let pool_clone = db_pool.clone();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_batch_apply_dias_obra(move |dias_str| {
-            if let Some(ui) = ui_weak.upgrade() {
-                crate::app_logger::log_ui_input(
-                    "Reporte Liquidaciones",
-                    "Barra Acciones Masivas",
-                    "Input Días Obra Masivo",
-                    "dias_obra_masivo",
-                    &dias_str,
-                );
-                let trimmed = dias_str.trim();
-                let target_dias = match trimmed.parse::<i16>() {
-                    Ok(d) if (0..=31).contains(&d) => d,
-                    _ => {
-                        crate::app_logger::log_ui_error(
-                            "Reporte Liquidaciones",
-                            "Barra Acciones Masivas",
-                            "Validación Días Inválidos",
-                            &format!("Número de días inválido: '{}'", dias_str),
-                        );
-                        crate::show_toast_message(&ui, "Por favor ingresa un número de días válido entre 0 y 31.");
-                        return;
-                    }
-                };
-
-                let mut count_modified = 0;
-
-                let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
-                    let mut state = session_clone.lock().unwrap();
-                    let ids_to_change: HashSet<Uuid> = if state.selected_ids.is_empty() {
-                        state.filtered_rows.iter()
-                            .map(|r| r.id_reporte_liq)
-                            .collect()
-                    } else {
-                        state.selected_ids.clone()
-                    };
-
-                    let obras_map: HashMap<Uuid, (Option<NaiveDate>, Option<NaiveDate>)> = state
-                        .obras_options
-                        .iter()
-                        .map(|o| (o.id, (o.fecha_inicio, o.fecha_fin)))
-                        .collect();
-
-                    let movements_map = build_all_employee_movements_map(&state.all_rows);
-                    let mut modified_ids = HashSet::new();
-
-                    for row in state.all_rows.iter_mut() {
-                        if ids_to_change.contains(&row.id_reporte_liq) {
-                            let (obra_ini, obra_fin) = row.id_registro_obra
-                                .and_then(|oid| obras_map.get(&oid).copied())
-                                .unwrap_or((None, None));
-
-                            let key = (row.id_empleado, row.mes_periodo.trim().to_uppercase(), row.anio_periodo);
-                            let movs = movements_map.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
-
-                            if row.id_registro_obra.is_some() {
-                                if validate_obra_assignment_for_employee_movements(
-                                    obra_ini,
-                                    obra_fin,
-                                    movs,
-                                    &row.mes_periodo,
-                                    row.anio_periodo,
-                                    &row.periodo_str,
-                                ).is_err() {
-                                    continue;
-                                }
-                            }
-
-                            let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
-                                row.dias_cedula,
-                                row.lic,
-                                row.inc,
-                                row.aus,
-                                &row.mes_periodo,
-                                row.anio_periodo,
-                                &row.periodo_str,
-                                obra_ini,
-                                obra_fin,
-                                movs,
-                            );
-
-                            if max_permitido == 0 && !movs.is_empty() {
-                                continue;
-                            }
-
-                            row.dias_obra = target_dias.min(max_permitido);
-                            recalculate_row_in_memory(row);
-                            count_modified += 1;
-                            modified_ids.insert(row.id_reporte_liq);
-                        }
-                    }
-
-                    let rows = state
-                        .all_rows
-                        .iter()
-                        .filter(|r| modified_ids.contains(&r.id_reporte_liq))
-                        .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
-                        .collect();
-
-                    apply_reporte_filtering(&mut state);
-                    render_reporte_ui(&ui, &state);
-
-                    rows
-                };
-
-                // Limpiar input
-                ui.global::<AppData>().set_reporte_batch_dias_obra_input("".into());
-
-                // Persistir en PostgreSQL
-                if let Some(ref pool) = pool_clone {
-                    let pool_bg = pool.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(mut client) = pool_bg.get() {
-                            if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
-                                log::error!("Error persistiendo asignación de días obra en BD: {}", e);
-                            }
-                        }
-                    });
-                }
-
-                crate::show_toast_message(
-                    &ui,
-                    &format!("Se asignaron {} días de obra a {} registros.", target_dias, count_modified),
-                );
-            }
-        });
-    }
-
     // Helper: Calcula la lista de trabajadores para el modal masivo con su respectivo Tope Máx
     fn compute_batch_workers_list(
         state: &ReporteSessionState,
@@ -4164,6 +4055,31 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                 let batch_workers = compute_batch_workers_list(&state, "__KEEP__", None);
                 let count = batch_workers.len() as i32;
+
+                // Identificar qué obras ya tienen asignadas los empleados/filas seleccionadas (incluyendo hermanos del mismo mes)
+                let mut currently_assigned_obra_ids: HashSet<Uuid> = HashSet::new();
+                let mut currently_assigned_obra_nums: HashSet<String> = HashSet::new();
+
+                for sel_id in &state.selected_ids {
+                    if let Some(r) = state.all_rows.iter().find(|x| x.id_reporte_liq == *sel_id) {
+                        if let Some(oid) = r.id_registro_obra {
+                            currently_assigned_obra_ids.insert(oid);
+                        }
+                        if !r.obra_numero.trim().is_empty() {
+                            currently_assigned_obra_nums.insert(r.obra_numero.trim().to_uppercase());
+                        }
+                        // Filas hermanas del mismo trabajador en este periodo
+                        for sib in state.all_rows.iter().filter(|x| x.id_parent_reporte_liq == r.id_parent_reporte_liq) {
+                            if let Some(oid) = sib.id_registro_obra {
+                                currently_assigned_obra_ids.insert(oid);
+                            }
+                            if !sib.obra_numero.trim().is_empty() {
+                                currently_assigned_obra_nums.insert(sib.obra_numero.trim().to_uppercase());
+                            }
+                        }
+                    }
+                }
+
                 let mut obras_vec = Vec::with_capacity(state.obras_options.len());
                 let mut multi_obras_vec = Vec::with_capacity(state.obras_options.len());
                 for o in &state.obras_options {
@@ -4190,29 +4106,35 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     } else {
                         30
                     };
+
+                    let is_assigned = currently_assigned_obra_ids.contains(&o.id)
+                        || currently_assigned_obra_nums.contains(&o.numero.trim().to_uppercase());
+
                     multi_obras_vec.push(ReporteBatchObraItem {
                         id: o.id.to_string().into(),
                         numero: o.numero.clone().into(),
                         label: o.label.clone().into(),
                         vigencia_str: vigencia_str.into(),
                         dias_tope_est: tope_est as i32,
-                        selected: false,
+                        selected: is_assigned,
                     });
                 }
+
+                let sel_count = multi_obras_vec.iter().filter(|x| x.selected).count() as i32;
 
                 let app_data = ui.global::<AppData>();
                 app_data.set_reporte_batch_edit_worker_count(count);
                 app_data.set_reporte_batch_edit_workers(ModelRc::new(VecModel::from(batch_workers)));
                 app_data.set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
                 app_data.set_reporte_batch_edit_obras_multiselect(ModelRc::new(VecModel::from(multi_obras_vec)));
-                app_data.set_reporte_batch_edit_selected_obras_count(0);
-                app_data.set_reporte_batch_edit_multi_obra_enabled(false);
+                app_data.set_reporte_batch_edit_selected_obras_count(sel_count);
+                app_data.set_reporte_batch_edit_multi_obra_enabled(sel_count > 1);
                 app_data.set_reporte_batch_edit_selected_obra_id("__KEEP__".into());
                 app_data.set_reporte_batch_edit_selected_obra_label("🔄 Mantener Obras Actuales (Sin Cambios)".into());
                 app_data.set_reporte_batch_edit_search_query("🔄 Mantener Obras Actuales (Sin Cambios)".into());
                 app_data.set_reporte_batch_edit_dias_cedula_val("".into());
                 app_data.set_reporte_batch_edit_dias_obra_val("".into());
-                app_data.set_reporte_batch_edit_change_obra(false);
+                app_data.set_reporte_batch_edit_change_obra(sel_count > 0);
                 app_data.set_reporte_batch_edit_change_dias_cedula(false);
                 app_data.set_reporte_batch_edit_change_dias_obra(false);
                 app_data.set_reporte_batch_edit_dropdown_open(false);
@@ -4232,21 +4154,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 app_data.set_reporte_batch_edit_alert_show(false);
                 app_data.set_show_reporte_batch_edit_modal(false);
                 app_data.set_reporte_batch_edit_dropdown_open(false);
-            }
-        });
-    }
-
-    // Batch Modal: Alternar modo de asignación 1 obra vs múltiples obras
-    {
-        let ui_weak = main_window.as_weak();
-        app_logic.on_reporte_batch_edit_set_multi_mode(move |enabled| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                app_data.set_reporte_batch_edit_multi_obra_enabled(enabled);
-                if enabled {
-                    app_data.set_reporte_batch_edit_change_obra(true);
-                    app_data.set_reporte_batch_edit_dropdown_open(false);
-                }
             }
         });
     }
@@ -4368,82 +4275,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // Batch Modal: Filtrar obras en modal masivo
-    {
-        let ui_weak = main_window.as_weak();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_filter_batch_edit_obras(move |q| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let q_lower = q.trim().to_lowercase();
-                let state = session_clone.lock().unwrap();
-                let mut obras_vec = Vec::new();
-                for o in &state.obras_options {
-                    if q_lower.is_empty() || o.numero.to_lowercase().contains(&q_lower) || o.label.to_lowercase().contains(&q_lower) {
-                        obras_vec.push(ReporteObraItem {
-                            id: o.id.to_string().into(),
-                            numero: o.numero.clone().into(),
-                            label: o.label.clone().into(),
-                        });
-                    }
-                }
-                ui.global::<AppData>().set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
-            }
-        });
-    }
-
-    // Batch Modal: Seleccionar obra en modal masivo
-    {
-        let ui_weak = main_window.as_weak();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_select_batch_edit_obra(move |obra_id, obra_label| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                let is_keep = obra_id.as_str() == "__KEEP__";
-                app_data.set_reporte_batch_edit_selected_obra_id(obra_id.clone());
-                app_data.set_reporte_batch_edit_selected_obra_label(obra_label.clone());
-                app_data.set_reporte_batch_edit_search_query(obra_label);
-                app_data.set_reporte_batch_edit_change_obra(!is_keep);
-                app_data.set_reporte_batch_edit_dropdown_open(false);
-
-                let state = session_clone.lock().unwrap();
-                let cedula_text = app_data.get_reporte_batch_edit_dias_cedula_val().trim().to_string();
-                let forced_cedula = if app_data.get_reporte_batch_edit_change_dias_cedula() && !cedula_text.is_empty() {
-                    cedula_text.parse::<i16>().ok()
-                } else {
-                    None
-                };
-
-                let batch_workers = compute_batch_workers_list(&state, obra_id.as_str(), forced_cedula);
-                app_data.set_reporte_batch_edit_workers(ModelRc::new(VecModel::from(batch_workers.clone())));
-
-                // Si hay trabajadores para los cuales esta obra da tope 0 por incompatibilidad de fechas, informar en la alerta del modal:
-                let zero_count = batch_workers.iter().filter(|w| w.tope_max == 0).count();
-                if !is_keep && obra_id.as_str() != "__NONE__" && zero_count > 0 {
-                    let msg = if zero_count == 1 {
-                        "⚠️ Atención: 1 trabajador seleccionado no tiene días activos compatibles con esta obra (Tope Máx: 0 días).".to_string()
-                    } else {
-                        format!("⚠️ Atención: {} trabajadores seleccionados no tienen días activos compatibles con esta obra (Tope Máx: 0 días).", zero_count)
-                    };
-                    app_data.set_reporte_batch_edit_alert_text(msg.into());
-                    app_data.set_reporte_batch_edit_alert_type("warning".into());
-                    app_data.set_reporte_batch_edit_alert_show(true);
-                } else {
-                    app_data.set_reporte_batch_edit_alert_show(false);
-                }
-
-                let mut obras_vec = Vec::with_capacity(state.obras_options.len());
-                for o in &state.obras_options {
-                    obras_vec.push(ReporteObraItem {
-                        id: o.id.to_string().into(),
-                        numero: o.numero.clone().into(),
-                        label: o.label.clone().into(),
-                    });
-                }
-                app_data.set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
-            }
-        });
-    }
-
     // Batch Modal: Cambio en Días Cédula para recalcular tope máx en tiempo real
     {
         let ui_weak = main_window.as_weak();
@@ -4520,30 +4351,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // Batch Modal: Alternar desplegable en modal masivo
-    {
-        let ui_weak = main_window.as_weak();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_toggle_batch_edit_dropdown(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let app_data = ui.global::<AppData>();
-                let new_state = !app_data.get_reporte_batch_edit_dropdown_open();
-                app_data.set_reporte_batch_edit_dropdown_open(new_state);
-                if new_state {
-                    let state = session_clone.lock().unwrap();
-                    let mut obras_vec = Vec::with_capacity(state.obras_options.len());
-                    for o in &state.obras_options {
-                        obras_vec.push(ReporteObraItem {
-                            id: o.id.to_string().into(),
-                            numero: o.numero.clone().into(),
-                            label: o.label.clone().into(),
-                        });
-                    }
-                    app_data.set_reporte_batch_edit_filtered_obras(ModelRc::new(VecModel::from(obras_vec)));
-                }
-            }
-        });
-    }
 
     // Batch Modal: Aplicar modificación masiva a todos los seleccionados
     {
@@ -4879,400 +4686,347 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 18. Batch: Aplicar Registro de Obra, Días Cédula y/o Días Obra a la selección
-    {
-        let ui_weak = main_window.as_weak();
-        let pool_clone = db_pool.clone();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_batch_apply(move |obra_idx, dias_cedula_str, dias_obra_str, _apply_all| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let custom_dias_ced_opt = dias_cedula_str.trim().parse::<i16>().ok();
-                let custom_dias_obr_opt = dias_obra_str.trim().parse::<i16>().ok();
-                let obra_idx_usize = obra_idx as usize;
-
-                if obra_idx_usize == 0 && custom_dias_ced_opt.is_none() && custom_dias_obr_opt.is_none() {
-                    crate::show_toast_message(
-                        &ui,
-                        "Por favor especifica al menos un campo a modificar (Obra, Días Cédula o Días Obra).",
-                    );
-                    return;
-                }
-
-                let mut count = 0;
-                let mut modified_fields = Vec::new();
-
-                let rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)> = {
-                    let mut state = session_clone.lock().unwrap();
-                    let ids_to_modify: HashSet<Uuid> = if state.selected_ids.is_empty() {
-                        state.filtered_rows.iter()
-                            .map(|r| r.id_reporte_liq)
-                            .collect()
-                    } else {
-                        state.selected_ids.clone()
-                    };
-
-                    let obra_info = if obra_idx_usize > 0 && obra_idx_usize <= state.obras_options.len() {
-                        Some(state.obras_options[obra_idx_usize - 1].clone())
-                    } else {
-                        None
-                    };
-
-                    if obra_info.is_some() {
-                        modified_fields.push("Obra");
-                    }
-                    if custom_dias_ced_opt.is_some() {
-                        modified_fields.push("Días Cédula");
-                    }
-                    if custom_dias_obr_opt.is_some() {
-                        modified_fields.push("Días Obra");
-                    }
-
-                    let obras_map: HashMap<Uuid, (Option<NaiveDate>, Option<NaiveDate>)> = state
-                        .obras_options
-                        .iter()
-                        .map(|o| (o.id, (o.fecha_inicio, o.fecha_fin)))
-                        .collect();
-
-                    let movements_map = build_all_employee_movements_map(&state.all_rows);
-                    let mut modified_ids = HashSet::new();
-                    let mut clamped_count = 0;
-
-                    for row in state.all_rows.iter_mut() {
-                        if ids_to_modify.contains(&row.id_reporte_liq) {
-                            let key = (row.id_empleado, row.mes_periodo.trim().to_uppercase(), row.anio_periodo);
-                            let movs = movements_map.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
-
-                            if let Some(ref o) = obra_info {
-                                if validate_obra_assignment_for_employee_movements(
-                                    o.fecha_inicio,
-                                    o.fecha_fin,
-                                    movs,
-                                    &row.mes_periodo,
-                                    row.anio_periodo,
-                                    &row.periodo_str,
-                                ).is_err() {
-                                    continue;
-                                }
-                                row.id_registro_obra = Some(o.id);
-                                row.obra_numero = o.numero.clone();
-                                row.obra_label = o.label.clone();
-                                row.obra_creado_usuario = o.creado_usuario;
-                            }
-
-                            let (obra_ini, obra_fin) = row.id_registro_obra
-                                .and_then(|oid| obras_map.get(&oid).copied())
-                                .unwrap_or((None, None));
-
-                            if row.id_registro_obra.is_some() {
-                                if validate_obra_assignment_for_employee_movements(
-                                    obra_ini,
-                                    obra_fin,
-                                    movs,
-                                    &row.mes_periodo,
-                                    row.anio_periodo,
-                                    &row.periodo_str,
-                                ).is_err() {
-                                    continue;
-                                }
-                            }
-
-                            if let Some(dias_ced) = custom_dias_ced_opt {
-                                row.dias_cedula = dias_ced.max(1);
-                            }
-
-                            let (max_permitido, _) = calculate_max_dias_obra_for_employee_movements(
-                                row.dias_cedula,
-                                row.lic,
-                                row.inc,
-                                row.aus,
-                                &row.mes_periodo,
-                                row.anio_periodo,
-                                &row.periodo_str,
-                                obra_ini,
-                                obra_fin,
-                                movs,
-                            );
-
-                            if let Some(dias_obr) = custom_dias_obr_opt {
-                                let valid_obr = dias_obr.max(0).min(max_permitido);
-                                if valid_obr < dias_obr {
-                                    clamped_count += 1;
-                                }
-                                row.dias_obra = valid_obr;
-                            } else if obra_info.is_some() {
-                                row.dias_obra = max_permitido;
-                            } else if row.dias_obra > max_permitido {
-                                row.dias_obra = max_permitido;
-                                clamped_count += 1;
-                            }
-                            recalculate_row_in_memory(row);
-                            count += 1;
-                            modified_ids.insert(row.id_reporte_liq);
-                        }
-                    }
-
-                    let rows = state
-                        .all_rows
-                        .iter()
-                        .filter(|r| modified_ids.contains(&r.id_reporte_liq))
-                        .map(|r| (r.id_reporte_liq, r.dias_cedula, r.dias_obra, r.id_registro_obra))
-                        .collect();
-
-                    apply_reporte_filtering(&mut state);
-                    render_reporte_ui(&ui, &state);
-
-                    if clamped_count > 0 {
-                        modified_fields.push("Días Obra ajustados a Días Cédula");
-                    }
-
-                    rows
-                };
-
-                // Limpiar inputs del panel masivo tras aplicar
-                ui.global::<AppData>().set_reporte_batch_dias_cedula_input("".into());
-                ui.global::<AppData>().set_reporte_batch_dias_obra_input("".into());
-
-                // Persistir exclusivamente en tablas de reportes (public.reportes_*)
-                if let Some(ref pool) = pool_clone {
-                    let pool_bg = pool.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(mut client) = pool_bg.get() {
-                            if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
-                                log::error!("Error persistiendo modificación masiva en BD: {}", e);
-                            }
-                        }
-                    });
-                }
-
-                let desc = modified_fields.join(", ");
-                crate::show_toast_message(
-                    &ui,
-                    &format!("Modificación masiva aplicada a {} registros ({}).", count, desc),
-                );
-            }
-        });
-    }
-
-    // 19. Exportar a Excel
+    // 19. Exportar a Excel: abre la lista de verificación del entregable (no exporta directamente)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
         let pool_clone = db_pool.clone();
         app_logic.on_exportar_reporte_liquidaciones_excel(move || {
-            if let Some(ui) = ui_weak.upgrade() {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let ctx = {
                 let state = session_clone.lock().unwrap();
-                if state.filtered_rows.is_empty() {
-                    crate::show_toast_message(&ui, "No hay filas en el reporte para exportar.");
-                    return;
+                ContextoEntregable::desde_estado(&state)
+            };
+            let Some(pool) = pool_clone.clone() else {
+                crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                return;
+            };
+            match preparar_verificacion(&pool, &ctx) {
+                Ok((lista, version)) => {
+                    let app_data = ui.global::<AppData>();
+                    app_data.set_entregable_puntos(modelo_puntos(&lista));
+                    app_data.set_entregable_puede_entregar(lista.puede_entregar);
+                    app_data.set_entregable_siguiente_version(version);
+                    app_data.set_entregable_resumen(formato_resumen(&lista.resumen).into());
+                    app_data.set_show_entregable_modal(true);
                 }
-
-                let output_dir = {
-                    let default_dir = std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .join("output");
-                    if std::fs::create_dir_all(&default_dir).is_ok() {
-                        default_dir
-                    } else {
-                        let user_base = std::env::var("USERPROFILE")
-                            .or_else(|_| std::env::var("HOME"))
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|_| std::env::temp_dir());
-                        let fallback_dir = user_base.join("Documents").join("FirmaFiscalACD_Output");
-                        let _ = std::fs::create_dir_all(&fallback_dir);
-                        if fallback_dir.exists() {
-                            fallback_dir
-                        } else {
-                            let temp_out = std::env::temp_dir().join("FirmaFiscalACD_Output");
-                            let _ = std::fs::create_dir_all(&temp_out);
-                            temp_out
-                        }
-                    }
-                };
-
-                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                let clean_rev: String = state.revision_nombre
-                    .chars()
-                    .map(|c| match c {
-                        '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' => '_',
-                        other if other.is_control() => '_',
-                        other => other,
-                    })
-                    .collect();
-                let clean_rev_trimmed = clean_rev.trim_matches('_');
-                let final_rev_tag = if clean_rev_trimmed.is_empty() { "REVISION" } else { clean_rev_trimmed };
-                let filename = format!("Reporte_Liquidaciones_{}_{}.xlsx", final_rev_tag, timestamp);
-                let out_file = output_dir.join(&filename);
-
-                let valid_user_obra_ids: HashSet<Uuid> = state
-                    .obras_options
-                    .iter()
-                    .filter(|o| o.creado_usuario)
-                    .map(|o| o.id)
-                    .collect();
-
-                let filter_obra_id = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
-                    Some(state.obras_options[state.filter_obra_idx - 1].id)
-                } else {
-                    None
-                };
-
-                let guarderias_kpis = compute_guarderias_kpis(
-                    &state.filtered_rows,
-                    &state.obras_options,
-                    filter_obra_id,
-                );
-
-                let mut delegacion = "COAHUILA".to_string();
-                let mut subdelegacion = "SALTILLO".to_string();
-                let mut rfc = "GON2110075C9".to_string();
-                let representante_legal = "ARTURO CARRILLO DOMINGUEZ".to_string();
-
-                if let Some(ref pool) = pool_clone {
-                    if let Ok(mut client) = pool.get() {
-                        if let Some(ref rev_id_str) = state.current_revision_id {
-                            if let Ok(rev_uuid) = Uuid::parse_str(rev_id_str) {
-                                if let Ok(Some(row)) = client.query_opt(
-                                    r#"
-                                    SELECT c.rfc, rp.delegacion, rp.subdelegacion
-                                    FROM public.revisiones r
-                                    JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal
-                                    JOIN public.clientes c ON c.id = rp.id_cliente
-                                    WHERE r.id = $1
-                                    "#,
-                                    &[&rev_uuid],
-                                ) {
-                                    if let Some(r) = row.get::<_, Option<String>>(0) {
-                                        if !r.trim().is_empty() { rfc = r.trim().to_string(); }
-                                    }
-                                    if let Some(d) = row.get::<_, Option<String>>(1) {
-                                        if !d.trim().is_empty() { delegacion = d.trim().to_string(); }
-                                    }
-                                    if let Some(sd) = row.get::<_, Option<String>>(2) {
-                                        if !sd.trim().is_empty() { subdelegacion = sd.trim().to_string(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let periodo_obra = if state.filter_obra_idx > 0 && state.filter_obra_idx <= state.obras_options.len() {
-                    let o = &state.obras_options[state.filter_obra_idx - 1];
-                    match (o.fecha_inicio, o.fecha_fin) {
-                        (Some(fi), Some(ff)) => format!("{} AL {}", fi.format("%d/%m/%Y"), ff.format("%d/%m/%Y")),
-                        (Some(fi), None) => format!("DESDE {}", fi.format("%d/%m/%Y")),
-                        (None, Some(ff)) => format!("HASTA {}", ff.format("%d/%m/%Y")),
-                        (None, None) => "15/04/2026 AL 30/06/2026".to_string(),
-                    }
-                } else {
-                    let mut min_fi: Option<chrono::NaiveDate> = None;
-                    let mut max_ff: Option<chrono::NaiveDate> = None;
-                    for o in &state.obras_options {
-                        if let Some(fi) = o.fecha_inicio {
-                            min_fi = Some(min_fi.map(|m| m.min(fi)).unwrap_or(fi));
-                        }
-                        if let Some(ff) = o.fecha_fin {
-                            max_ff = Some(max_ff.map(|m| m.max(ff)).unwrap_or(ff));
-                        }
-                    }
-                    match (min_fi, max_ff) {
-                        (Some(fi), Some(ff)) => format!("{} AL {}", fi.format("%d/%m/%Y"), ff.format("%d/%m/%Y")),
-                        (Some(fi), None) => format!("DESDE {}", fi.format("%d/%m/%Y")),
-                        (None, Some(ff)) => format!("HASTA {}", ff.format("%d/%m/%Y")),
-                        (None, None) => "15/04/2026 AL 30/06/2026".to_string(),
-                    }
-                };
-
-                let header_meta = ReporteFinalHeaderMeta {
-                    delegacion,
-                    subdelegacion,
-                    cliente_nombre: state.cliente_nombre.clone(),
-                    rp_registro: state.rp_registro.clone(),
-                    rfc,
-                    periodo_obra,
-                    representante_legal,
-                    revision_folio: state.revision_folio.clone(),
-                };
-
-                match export_reporte_liquidaciones_to_excel(
-                    &state.filtered_rows,
-                    &state.all_rows,
-                    Some(&valid_user_obra_ids),
-                    &guarderias_kpis,
-                    &out_file,
-                    &state.cliente_nombre,
-                    &state.rp_registro,
-                    &state.revision_folio,
-                    Some(&header_meta),
-                ) {
-                    Ok(_) => {
-                        crate::show_toast_message(
-                            &ui,
-                            &format!("Excel generado exitosamente: {}", filename),
-                        );
-                        crate::open_folder_in_os(&output_dir);
-                    }
-                    Err(e) => {
-                        log::error!("Error exportando excel de liquidaciones: {}", e);
-                        crate::show_toast_message(&ui, &format!("Error exportando Excel: {}", e));
-                    }
+                Err(e) => {
+                    log::error!("Error preparando la verificación del entregable: {}", e);
+                    crate::show_toast_message(&ui, &format!("No se pudo preparar el entregable: {e}"));
                 }
             }
         });
     }
 
+    // 19b. Entregable IMSS: borrador, entregable versionado (segundo plano), historial y descarga
+    {
+        let historial: Arc<Mutex<Vec<ExportacionInfo>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Borrador: vista filtrada, sin subir ni registrar
+        {
+            let ui_weak = main_window.as_weak();
+            let session_clone = reporte_session.clone();
+            let pool_clone = db_pool.clone();
+            app_logic.on_entregable_generar_borrador(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let solo_vista_filtrada = ui.global::<AppData>().get_entregable_borrador_solo_filtrada();
+                ui.global::<AppData>().set_show_entregable_modal(false);
+                let ctx = {
+                    let state = session_clone.lock().unwrap();
+                    ContextoEntregable::desde_estado(&state)
+                };
+                let filas_a_exportar = if solo_vista_filtrada {
+                    ctx.filtered_rows.len()
+                } else {
+                    ctx.all_rows.len()
+                };
+                if filas_a_exportar == 0 {
+                    let mensaje = if solo_vista_filtrada {
+                        "No hay filas en la vista para generar el Excel de trabajo."
+                    } else {
+                        "No hay filas activas para generar el Excel de trabajo."
+                    };
+                    crate::show_toast_message(&ui, mensaje);
+                    return;
+                }
+                let Some(pool) = pool_clone.clone() else {
+                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    return;
+                };
+                let alcance = if solo_vista_filtrada { "solo vista filtrada" } else { "todas las filas activas" };
+                crate::operacion_ui::ejecutar_con_avance(
+                    &ui,
+                    "Generando Excel de trabajo…",
+                    &format!("Generando el Excel de trabajo ({alcance}). No se guarda en RustFS ni se registra versión."),
+                    move || generar_borrador(&pool, &ctx, solo_vista_filtrada),
+                    move |ui, resultado| match resultado {
+                        Ok(ruta) => {
+                            let nombre = ruta
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            let etiqueta = if solo_vista_filtrada {
+                                "Excel de trabajo generado (solo vista filtrada)"
+                            } else {
+                                "Excel de trabajo generado (todas las filas activas)"
+                            };
+                            crate::show_toast_message(ui, &format!("{etiqueta}: {nombre}"));
+                            abrir_carpeta_de(&ruta);
+                        }
+                        Err(e) => {
+                            log::error!("Error generando borrador de liquidaciones: {}", e);
+                            crate::show_toast_message(ui, &e);
+                        }
+                    },
+                );
+            });
+        }
+
+        // Entregable: todas las filas activas, subida a RustFS y registro de versión
+        {
+            let ui_weak = main_window.as_weak();
+            let session_clone = reporte_session.clone();
+            let pool_clone = db_pool.clone();
+            app_logic.on_entregable_generar_definitivo(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let app_data = ui.global::<AppData>();
+                if !app_data.get_entregable_puede_entregar() {
+                    crate::show_toast_message(
+                        &ui,
+                        "No se puede generar el entregable: resuelve los puntos bloqueantes.",
+                    );
+                    return;
+                }
+                let version = app_data.get_entregable_siguiente_version();
+                app_data.set_show_entregable_modal(false);
+                let ctx = {
+                    let state = session_clone.lock().unwrap();
+                    ContextoEntregable::desde_estado(&state)
+                };
+                let Some(pool) = pool_clone.clone() else {
+                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    return;
+                };
+                crate::operacion_ui::ejecutar_con_avance(
+                    &ui,
+                    &format!("Generando entregable IMSS v{version}…"),
+                    "Generando el Excel con todas las filas activas, guardándolo en RustFS y registrando la versión.",
+                    move || generar_entregable(&pool, &ctx, version),
+                    move |ui, resultado| match resultado {
+                        Ok(entregado) => {
+                            crate::show_toast_message(
+                                ui,
+                                &format!(
+                                    "Entregable v{} generado y registrado (hash {})",
+                                    entregado.version,
+                                    hash_corto(&entregado.hash)
+                                ),
+                            );
+                            abrir_carpeta_de(&entregado.ruta);
+                        }
+                        Err(e) => {
+                            log::error!("Error generando entregable de liquidaciones: {}", e);
+                            crate::show_toast_message(ui, &e);
+                        }
+                    },
+                );
+            });
+        }
+
+        // Cerrar modal de verificación
+        {
+            let ui_weak = main_window.as_weak();
+            app_logic.on_entregable_cerrar(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.global::<AppData>().set_show_entregable_modal(false);
+                }
+            });
+        }
+
+        // Cerrar historial
+        {
+            let ui_weak = main_window.as_weak();
+            app_logic.on_entregable_cerrar_historial(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.global::<AppData>().set_show_entregable_historial(false);
+                }
+            });
+        }
+
+        // Abrir historial de versiones registradas
+        {
+            let ui_weak = main_window.as_weak();
+            let session_clone = reporte_session.clone();
+            let pool_clone = db_pool.clone();
+            let historial = historial.clone();
+            app_logic.on_entregable_abrir_historial(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let rev = {
+                    let state = session_clone.lock().unwrap();
+                    revision_activa(&state)
+                };
+                let Some(rev) = rev else {
+                    crate::show_toast_message(&ui, "No hay una revisión activa seleccionada.");
+                    return;
+                };
+                let Some(pool) = pool_clone.clone() else {
+                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    return;
+                };
+                let consulta = pool
+                    .get()
+                    .map_err(|e| format!("conexión a la base de datos: {e}"))
+                    .and_then(|mut client| listar_exportaciones(&mut client, rev));
+                match consulta {
+                    Ok(versiones) => {
+                        let filas: Vec<EntregableVersion> = versiones
+                            .iter()
+                            .map(|v| EntregableVersion {
+                                id: v.id.to_string().into(),
+                                version: v.version,
+                                tipo: v.tipo.as_str().into(),
+                                fecha: v.creado.as_str().into(),
+                                hash: hash_corto(&v.sha256).into(),
+                                resumen: resumen_historial(v.resumen.as_ref()).into(),
+                            })
+                            .collect();
+                        *historial.lock().unwrap() = versiones;
+                        let app_data = ui.global::<AppData>();
+                        app_data.set_entregable_historial(ModelRc::new(VecModel::from(filas)));
+                        app_data.set_show_entregable_historial(true);
+                    }
+                    Err(e) => {
+                        log::error!("Error listando entregables de liquidaciones: {}", e);
+                        crate::show_toast_message(&ui, &format!("No se pudo cargar el historial: {e}"));
+                    }
+                }
+            });
+        }
+
+        // Descargar una versión registrada y verificar su hash
+        {
+            let ui_weak = main_window.as_weak();
+            let historial = historial.clone();
+            app_logic.on_entregable_descargar(move |id: SharedString| {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let info = historial
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|v| v.id.to_string() == id.as_str())
+                    .cloned();
+                let Some(info) = info else {
+                    crate::show_toast_message(
+                        &ui,
+                        "No se encontró esa versión; vuelve a abrir el historial.",
+                    );
+                    return;
+                };
+                crate::operacion_ui::ejecutar_con_avance(
+                    &ui,
+                    "Descargando entregable…",
+                    "Descargando la versión desde RustFS y verificando su hash registrado.",
+                    move || descargar_version(&info),
+                    move |ui, resultado| match resultado {
+                        Ok((ruta, true)) => {
+                            crate::show_toast_message(
+                                ui,
+                                &format!("Entregable descargado y verificado: {}", ruta.display()),
+                            );
+                            abrir_carpeta_de(&ruta);
+                        }
+                        Ok((ruta, false)) => {
+                            crate::show_toast_message(
+                                ui,
+                                "⚠ El archivo descargado no coincide con el hash registrado.",
+                            );
+                            log::error!("Hash distinto al registrado en {}", ruta.display());
+                            abrir_carpeta_de(&ruta);
+                        }
+                        Err(e) => {
+                            log::error!("Error descargando entregable de liquidaciones: {}", e);
+                            crate::show_toast_message(ui, &e);
+                        }
+                    },
+                );
+            });
+        }
+    }
+
     // 20. Revertir cambios
+    {
+        let ui_weak = main_window.as_weak();
+        // El botón solo pide confirmación: revertir descarta las asignaciones del analista.
+        app_logic.on_revertir_reporte_liquidaciones(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                crate::app_logger::log_ui_event(
+                    "Reporte Liquidaciones",
+                    "Barra Superior",
+                    "Click Botón Revertir Cambios (solicita confirmación)",
+                    &format!("revision_id={}", ui.global::<AppData>().get_selected_revision_id()),
+                );
+                ui.global::<AppData>().set_show_reporte_confirmar_revertir(true);
+            }
+        });
+    }
+
+    // 20b. Cancelar la reversión
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_reporte_cancelar_revertir(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_reporte_confirmar_revertir(false);
+            }
+        });
+    }
+
+    // 20c. Revertir confirmado: corre en segundo plano con capa de avance
     {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
         let session_clone = reporte_session.clone();
-        app_logic.on_revertir_reporte_liquidaciones(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let rev_id = ui.global::<AppData>().get_selected_revision_id().to_string();
-                crate::app_logger::log_ui_event(
-                    "Reporte Liquidaciones",
-                    "Barra Superior",
-                    "Click Botón Revertir Cambios",
-                    &format!("revision_id={}", rev_id),
-                );
-                if !rev_id.is_empty() {
-                    if let Ok(rev_uuid) = Uuid::parse_str(&rev_id) {
-                        if let Some(pool) = &pool_clone {
-                            match pool.get() {
-                                Ok(mut client) => {
-                                    match revertir_reporte_liquidaciones_a_originales(&mut client, rev_uuid) {
-                                        Ok(count) => {
-                                            log::info!("Revertidos {} registros de reporte liquidaciones a sus valores originales.", count);
-                                            sync_and_load_reporte_data(&ui, &pool_clone, &session_clone, &rev_id);
-                                            crate::show_toast_message(&ui, "Cambios revertidos exitosamente a los valores originales de las cédulas.");
-                                        }
-                                        Err(e) => {
-                                            crate::app_logger::log_ui_error(
-                                                "Reporte Liquidaciones",
-                                                "Barra Superior",
-                                                "Error al Revertir Cambios",
-                                                &e,
-                                            );
-                                            log::error!("Error revirtiendo reporte: {}", e);
-                                            crate::show_toast_message(&ui, &format!("Error al revertir cambios: {}", e));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    crate::app_logger::log_ui_error(
-                                        "Reporte Liquidaciones",
-                                        "Barra Superior",
-                                        "Error Conexión BD Revertir",
-                                        &e.to_string(),
-                                    );
-                                    log::error!("Error de conexión al pool para reversión: {}", e);
-                                    crate::show_toast_message(&ui, "Error de conexión a la base de datos.");
-                                }
-                            }
-                        }
+        app_logic.on_reporte_confirmar_revertir(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let app_data = ui.global::<AppData>();
+            app_data.set_show_reporte_confirmar_revertir(false);
+            let rev_id = app_data.get_selected_revision_id().to_string();
+            let Ok(rev_uuid) = Uuid::parse_str(&rev_id) else {
+                crate::show_toast_message(&ui, "Seleccione una revisión antes de revertir.");
+                return;
+            };
+            let Some(pool) = pool_clone.clone() else {
+                crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                return;
+            };
+            crate::app_logger::log_ui_event(
+                "Reporte Liquidaciones",
+                "Barra Superior",
+                "Revertir Cambios confirmado",
+                &format!("revision_id={}", rev_id),
+            );
+            let pool_recarga = pool_clone.clone();
+            let session_recarga = session_clone.clone();
+            crate::operacion_ui::ejecutar_con_avance(
+                &ui,
+                "Revirtiendo cambios del reporte…",
+                "Reconstruyendo el Reporte de Liquidaciones con los valores originales de las cédulas y recalculando importes.",
+                move || -> Result<usize, String> {
+                    let mut client = pool.get().map_err(|e| format!("conexión a la base de datos: {e}"))?;
+                    revertir_reporte_liquidaciones_a_originales(&mut client, rev_uuid)
+                },
+                move |ui, resultado| match resultado {
+                    Ok(count) => {
+                        log::info!("Revertidos {} registros de reporte liquidaciones a sus valores originales.", count);
+                        sync_and_load_reporte_data(ui, &pool_recarga, &session_recarga, &rev_id, false);
+                        crate::show_toast_message(ui, "Cambios revertidos a los valores originales de las cédulas.");
                     }
-                }
-            }
+                    Err(e) => {
+                        crate::app_logger::log_ui_error("Reporte Liquidaciones", "Barra Superior", "Error al Revertir Cambios", &e);
+                        log::error!("Error revirtiendo reporte: {}", e);
+                        crate::show_toast_message(ui, &format!("Error al revertir cambios: {}", e));
+                    }
+                },
+            );
         });
     }
 
@@ -5358,7 +5112,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 27. Abrir modal de explorar y filtrar empleados seleccionados
+    // 27. Abrir modal "Filtrar…": modo selección si hay filas seleccionadas, modo general si no
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
@@ -5366,119 +5120,24 @@ pub fn wire_reporte_liquidaciones_callbacks(
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
 
-                let (worker_ids, worker_rfcs, worker_names) = if !state.selected_ids.is_empty() {
-                    let mut w_ids = HashSet::new();
-                    let mut w_rfcs = HashSet::new();
-                    let mut w_names = Vec::new();
-                    let mut seen = HashSet::new();
-                    for r in &state.all_rows {
-                        if state.selected_ids.contains(&r.id_reporte_liq) {
-                            w_ids.insert(r.id_empleado);
-                            if let Some(clean) = get_clean_non_generic_rfc(&r.rfc) {
-                                w_rfcs.insert(clean);
-                            }
-                            if seen.insert(r.nombre_trabajador.clone()) {
-                                w_names.push(r.nombre_trabajador.clone());
-                            }
-                        }
-                    }
-                    (w_ids, w_rfcs, w_names)
-                } else if state.emp_filter_active && !state.emp_filter_worker_ids.is_empty() {
-                    let mut w_names = Vec::new();
-                    let mut seen = HashSet::new();
-                    for r in &state.all_rows {
-                        let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
-                        if state.emp_filter_worker_ids.contains(&r.id_empleado)
-                            || clean_rfc.map_or(false, |clean| state.emp_filter_worker_rfcs.contains(&clean))
-                        {
-                            if seen.insert(r.nombre_trabajador.clone()) {
-                                w_names.push(r.nombre_trabajador.clone());
-                            }
-                        }
-                    }
-                    (state.emp_filter_worker_ids.clone(), state.emp_filter_worker_rfcs.clone(), w_names)
+                // Alcance = empleados de las filas seleccionadas (vacío = modo general)
+                let alcance = alcance_desde_seleccion(&state);
+                let modo_general = alcance.is_empty();
+
+                // Reutilizar el filtro aplicado solo si es compatible con el modo actual
+                let borrador = if state.filtro_activo && (modo_general || state.filtro_aplicado_seleccion) {
+                    state.filtro.clone()
                 } else {
-                    crate::show_toast_message(&ui, "Selecciona al menos una casilla de empleado en la tabla.");
-                    return;
+                    FiltroAvanzado { empleados: alcance.clone(), ..Default::default() }
                 };
 
-                let mut total_occurrences = 0;
-                let mut month_counts: std::collections::BTreeMap<(i16, u32, String), usize> = std::collections::BTreeMap::new();
-                let mut obra_counts_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                state.filtro_modo_general = modo_general;
+                state.filtro_alcance_empleados = alcance;
+                state.filtro_borrador = borrador;
+                state.filtro_busqueda_emp.clear();
 
-                for r in &state.all_rows {
-                    let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
-                    let matches = worker_ids.contains(&r.id_empleado)
-                        || clean_rfc.map_or(false, |clean| worker_rfcs.contains(&clean));
-                    if matches {
-                        total_occurrences += 1;
-
-                        let m_num = month_to_num(&r.mes_periodo);
-                        let entry = month_counts.entry((r.anio_periodo, m_num, r.periodo_str.clone())).or_insert(0);
-                        *entry += 1;
-
-                        let obra_key = if let Some(oid) = r.id_registro_obra {
-                            oid.to_string()
-                        } else {
-                            "sin_asignar".to_string()
-                        };
-                        *obra_counts_map.entry(obra_key).or_insert(0) += 1;
-                    }
-                }
-
-                state.emp_modal_worker_count = worker_names.len();
-                state.emp_modal_worker_names_str = worker_names.join(", ");
-                state.emp_modal_total_occurrences = total_occurrences;
-                state.emp_filter_worker_ids = worker_ids;
-                state.emp_filter_worker_rfcs = worker_rfcs;
-
-                state.emp_modal_meses = month_counts.into_iter().map(|((anio, _m_num, periodo_str), count)| {
-                    let label = if periodo_str.contains('/') {
-                        periodo_str.clone()
-                    } else {
-                        format!("{} {}", periodo_str, anio)
-                    };
-                    let is_sel = if state.emp_filter_selected_months.is_empty() {
-                        true
-                    } else {
-                        state.emp_filter_selected_months.contains(&periodo_str)
-                    };
-                    (periodo_str, label, count, is_sel)
-                }).collect();
-
-                let mut emp_modal_obras = Vec::new();
-                for o in &state.all_obras_options {
-                    let count = *obra_counts_map.get(&o.id.to_string()).unwrap_or(&0);
-                    let is_sel = if state.emp_filter_selected_obras.is_empty() {
-                        true
-                    } else {
-                        state.emp_filter_selected_obras.contains(&o.id.to_string())
-                    };
-                    emp_modal_obras.push((o.id.to_string(), o.label.clone(), count, is_sel));
-                }
-                let unassigned_count = *obra_counts_map.get("sin_asignar").unwrap_or(&0);
-                let is_sel = if state.emp_filter_selected_obras.is_empty() {
-                    true
-                } else {
-                    state.emp_filter_selected_obras.contains("sin_asignar")
-                };
-                emp_modal_obras.push(("sin_asignar".to_string(), "⚠️ Sin Asignar (Pendientes)".to_string(), unassigned_count, is_sel));
-
-                for (k, cnt) in &obra_counts_map {
-                    if k != "sin_asignar" && !state.all_obras_options.iter().any(|o| o.id.to_string() == *k) {
-                        let is_sel = if state.emp_filter_selected_obras.is_empty() {
-                            true
-                        } else {
-                            state.emp_filter_selected_obras.contains(k)
-                        };
-                        emp_modal_obras.push((k.clone(), format!("Obra {}", k), *cnt, is_sel));
-                    }
-                }
-
-                state.emp_modal_obras = emp_modal_obras;
-
+                render_filtro_modal(&ui, &state);
                 ui.global::<AppData>().set_show_reporte_emp_modal(true);
-                render_reporte_ui(&ui, &state);
             }
         });
     }
@@ -5493,24 +5152,19 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 29. Seleccionar todas las apariciones en todos los meses
+    // 29. Seleccionar todas las apariciones en todos los meses de los empleados del alcance (modo selección)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_select_all_months_for_selected_employees(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                let worker_ids = state.emp_filter_worker_ids.clone();
-                let worker_rfcs = state.emp_filter_worker_rfcs.clone();
+                let alcance = state.filtro_alcance_empleados.clone();
 
                 let target_ids: Vec<Uuid> = state.all_rows.iter()
                     .filter(|r| {
-                        if r.clave.trim().eq_ignore_ascii_case("baja") {
-                            return false;
-                        }
-                        let clean_rfc = get_clean_non_generic_rfc(&r.rfc);
-                        worker_ids.contains(&r.id_empleado)
-                            || clean_rfc.map_or(false, |clean| worker_rfcs.contains(&clean))
+                        !r.clave.trim().eq_ignore_ascii_case("baja")
+                            && alcance.contains(&clave_empleado(r))
                     })
                     .map(|r| r.id_reporte_liq)
                     .collect();
@@ -5528,142 +5182,178 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 30. Set filtro todos los meses (true = todos, false = algunos)
+    // 30. Filtro avanzado: alternar año en el borrador
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
-        app_logic.on_reporte_set_emp_filter_all_months(move |all_m| {
+        app_logic.on_reporte_filtro_toggle_anio(move |valor| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                state.emp_filter_all_months = all_m;
-                if all_m {
-                    for m in state.emp_modal_meses.iter_mut() {
-                        m.3 = true;
-                    }
+                if let Ok(anio) = valor.as_str().trim().parse::<i16>() {
+                    toggle_en_conjunto(&mut state.filtro_borrador.anios, anio);
                 }
-                render_reporte_ui(&ui, &state);
+                render_filtro_modal(&ui, &state);
             }
         });
     }
 
-    // 31. Set filtro todas las obras (true = todas, false = algunas)
+    // 31. Filtro avanzado: alternar mes ("YYYY-MM") en el borrador
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
-        app_logic.on_reporte_set_emp_filter_all_obras(move |all_o| {
+        app_logic.on_reporte_filtro_toggle_mes(move |valor| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                state.emp_filter_all_obras = all_o;
-                if all_o {
-                    for o in state.emp_modal_obras.iter_mut() {
-                        o.3 = true;
-                    }
+                if let Some(mes) = parsear_clave_mes(valor.as_str()) {
+                    toggle_en_conjunto(&mut state.filtro_borrador.meses, mes);
                 }
-                render_reporte_ui(&ui, &state);
+                render_filtro_modal(&ui, &state);
             }
         });
     }
 
-    // 32. Toggle mes en modal
+    // 32. Filtro avanzado: alternar obra (uuid o "sin_asignar") en el borrador
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
-        app_logic.on_reporte_toggle_emp_filter_month(move |m_id| {
+        app_logic.on_reporte_filtro_toggle_obra(move |valor| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                let m_id_str = m_id.as_str();
-                for m in state.emp_modal_meses.iter_mut() {
-                    if m.0 == m_id_str {
-                        m.3 = !m.3;
-                        break;
-                    }
-                }
-                render_reporte_ui(&ui, &state);
+                toggle_en_conjunto(&mut state.filtro_borrador.obras, valor.to_string());
+                render_filtro_modal(&ui, &state);
             }
         });
     }
 
-    // 33. Toggle obra en modal
+    // 33. Filtro avanzado: alternar empleado en el borrador (en modo selección debe quedar al menos uno)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
-        app_logic.on_reporte_toggle_emp_filter_obra(move |o_id| {
+        app_logic.on_reporte_filtro_toggle_empleado(move |valor| {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                let o_id_str = o_id.as_str();
-                for o in state.emp_modal_obras.iter_mut() {
-                    if o.0 == o_id_str {
-                        o.3 = !o.3;
-                        break;
+                let clave = valor.to_string();
+                let mut aviso_minimo = false;
+                if state.filtro_borrador.empleados.remove(&clave) {
+                    if !state.filtro_modo_general && state.filtro_borrador.empleados.is_empty() {
+                        state.filtro_borrador.empleados.insert(clave);
+                        aviso_minimo = true;
                     }
+                } else {
+                    state.filtro_borrador.empleados.insert(clave);
                 }
-                render_reporte_ui(&ui, &state);
+                render_filtro_modal(&ui, &state);
+                if aviso_minimo {
+                    ui.global::<AppData>().set_reporte_filtro_aviso(
+                        "En modo selección debe quedar al menos un empleado.".into(),
+                    );
+                }
             }
         });
     }
 
-    // 34. Aplicar filtro de empleados
+    // 33b. Filtro avanzado: buscar empleado (NSS, nombre, RFC, CURP)
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_filtro_buscar_empleado(move |texto| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                state.filtro_busqueda_emp = texto.to_string();
+                render_filtro_modal(&ui, &state);
+            }
+        });
+    }
+
+    // 33c. Filtro avanzado: limpiar el borrador (general: vacío; selección: solo los empleados seleccionados)
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_filtro_limpiar_borrador(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                state.filtro_borrador = FiltroAvanzado {
+                    empleados: state.filtro_alcance_empleados.clone(),
+                    ..Default::default()
+                };
+                render_filtro_modal(&ui, &state);
+            }
+        });
+    }
+
+    // 33d. Filtro avanzado: seleccionar las filas resultantes del filtro aplicado (excluye bajas)
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = reporte_session.clone();
+        app_logic.on_reporte_filtro_seleccionar_resultados(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let mut state = session_clone.lock().unwrap();
+                let ids: HashSet<Uuid> = state.filtered_rows.iter()
+                    .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
+                    .map(|r| r.id_reporte_liq)
+                    .collect();
+                let count = ids.len();
+                state.selected_ids = ids;
+
+                render_reporte_ui(&ui, &state);
+                crate::show_toast_message(&ui, &format!("Se seleccionaron {} filas.", count));
+            }
+        });
+    }
+
+    // 34. Aplicar filtro avanzado (NO modifica la selección de filas)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_apply_emp_filter(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                let sel_months: HashSet<String> = state.emp_modal_meses.iter()
-                    .filter(|(_, _, _, sel)| *sel)
-                    .map(|(id, _, _, _)| id.clone())
-                    .collect();
-                let sel_obras: HashSet<String> = state.emp_modal_obras.iter()
-                    .filter(|(_, _, _, sel)| *sel)
-                    .map(|(id, _, _, _)| id.clone())
-                    .collect();
 
-                state.emp_filter_selected_months = sel_months;
-                state.emp_filter_selected_obras = sel_obras;
+                // En modo general hace falta al menos un criterio; en selección el empleado ya viene prellenado
+                if state.filtro_modo_general && criterios_no_vacios(&state.filtro_borrador) == 0 {
+                    ui.global::<AppData>().set_reporte_filtro_aviso(
+                        "Selecciona al menos un criterio (año, mes, obra o empleado).".into(),
+                    );
+                    return;
+                }
 
-                state.emp_filter_active = true;
+                state.filtro = state.filtro_borrador.clone();
+                state.filtro_activo = true;
+                state.filtro_aplicado_seleccion = !state.filtro_modo_general;
+                // Obra y Periodo son de valor único: con el filtro avanzado activo se reinician
+                state.filter_obra_idx = 0;
+                state.filter_periodo_idx = 0;
                 state.current_page = 1;
                 ui.global::<AppData>().set_show_reporte_emp_modal(false);
 
                 apply_reporte_filtering(&mut state);
-
-                // Seleccionar automáticamente las filas resultantes del filtro (excluyendo bajas)
-                state.selected_ids = state.filtered_rows.iter()
-                    .filter(|r| !r.clave.trim().eq_ignore_ascii_case("baja"))
-                    .map(|r| r.id_reporte_liq)
-                    .collect();
-
                 render_reporte_ui(&ui, &state);
 
                 crate::show_toast_message(
                     &ui,
-                    &format!("Filtro de empleados activo: {} filas encontradas.", state.filtered_rows.len()),
+                    &format!("Filtro activo: {} filas.", state.filtered_rows.len()),
                 );
             }
         });
     }
 
-    // 35. Limpiar filtro de empleados
+    // 35. Quitar el filtro avanzado aplicado (no modifica la selección de filas)
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
         app_logic.on_reporte_clear_emp_filter(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let mut state = session_clone.lock().unwrap();
-                state.emp_filter_active = false;
-                state.emp_filter_all_months = true;
-                state.emp_filter_all_obras = true;
-                state.emp_filter_selected_months.clear();
-                state.emp_filter_selected_obras.clear();
-                state.emp_filter_worker_ids.clear();
-                state.emp_filter_worker_rfcs.clear();
-                state.selected_ids.clear();
+                state.filtro = FiltroAvanzado::default();
+                state.filtro_activo = false;
+                state.filtro_aplicado_seleccion = false;
+                state.filtro_borrador = FiltroAvanzado::default();
                 ui.global::<AppData>().set_show_reporte_emp_modal(false);
 
                 apply_reporte_filtering(&mut state);
                 render_reporte_ui(&ui, &state);
 
-                crate::show_toast_message(&ui, "Filtro de empleados removido y selección limpiada.");
+                crate::show_toast_message(&ui, "Filtro avanzado removido.");
             }
         });
     }
@@ -5679,13 +5369,13 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 state.filter_obra_idx = 0;
                 state.filter_periodo_idx = 0;
                 state.filter_estado_idx = 0;
-                state.emp_filter_active = false;
-                state.emp_filter_all_months = true;
-                state.emp_filter_all_obras = true;
-                state.emp_filter_selected_months.clear();
-                state.emp_filter_selected_obras.clear();
-                state.emp_filter_worker_ids.clear();
-                state.emp_filter_worker_rfcs.clear();
+                state.filtro = FiltroAvanzado::default();
+                state.filtro_activo = false;
+                state.filtro_aplicado_seleccion = false;
+                state.filtro_borrador = FiltroAvanzado::default();
+                state.filtro_modo_general = true;
+                state.filtro_alcance_empleados.clear();
+                state.filtro_busqueda_emp.clear();
                 state.selected_ids.clear();
                 state.selected_unique_emp_ids.clear();
                 state.unique_emp_search_query.clear();
@@ -5698,7 +5388,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 app_data.set_reporte_filter_obra_idx(0);
                 app_data.set_reporte_filter_periodo_idx(0);
                 app_data.set_reporte_filter_estado_idx(0);
-                app_data.set_reporte_emp_filter_active(false);
                 app_data.set_reporte_unique_empleados_search("".into());
                 app_data.set_show_reporte_emp_modal(false);
 
@@ -6034,28 +5723,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 32. Seleccionar todas o ninguna obra para SUA
-    {
-        let ui_weak = main_window.as_weak();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_sua_select_all_obras(move |select_all| {
-            if let Some(ui) = ui_weak.upgrade() {
-                let mut state = session_clone.lock().unwrap();
-                state.sua_selected_obra_ids.clear();
-                if select_all {
-                    let all_ids: Vec<Uuid> = state.all_obras_options.iter().map(|o| o.id).collect();
-                    for id in all_ids {
-                        state.sua_selected_obra_ids.insert(id);
-                    }
-                    state.sua_include_unassigned = true;
-                } else {
-                    state.sua_include_unassigned = false;
-                }
-                let app_data = ui.global::<AppData>();
-                refresh_sua_modal_ui(&app_data, &state);
-            }
-        });
-    }
 
     // 32.1. Seleccionar preset para SUA: "all", "obras", "sin_obra", "none"
     {
@@ -6098,6 +5765,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
     {
         let ui_weak = main_window.as_weak();
         let session_clone = reporte_session.clone();
+        let pool_sua = db_pool.clone();
         app_logic.on_reporte_generar_sua(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 let (selected_obra_ids, include_unassigned, all_rows, folio_rev, all_obras) = {
@@ -6143,7 +5811,25 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     None => return,
                 };
 
-                match sua_export::export_sua_files(&folder, &folio_rev, &filtered_rows, &all_obras) {
+                // CP del registro patronal de la revisión para 2_AFIL (vacío si no está capturado)
+                let cp_patronal: String = {
+                    let rev_id = ui.global::<AppData>().get_selected_revision_id().to_string();
+                    match (Uuid::parse_str(&rev_id), pool_sua.as_ref().and_then(|p| p.get().ok())) {
+                        (Ok(rev_uuid), Some(mut client)) => client
+                            .query_opt(
+                                "SELECT COALESCE(BTRIM(rp.codigo_postal), '') FROM public.revisiones r \
+                                 JOIN public.registros_patronales rp ON rp.id = r.id_registro_patronal WHERE r.id = $1",
+                                &[&rev_uuid],
+                            )
+                            .ok()
+                            .flatten()
+                            .map(|r| r.get::<_, String>(0))
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    }
+                };
+
+                match sua_export::export_sua_files(&folder, &folio_rev, &filtered_rows, &all_obras, &cp_patronal) {
                     Ok(res) => {
                         let msg = format!(
                             "Archivos SUA exportados exitosamente en:\n{}\n• 1. ASEG: {} trabajadores\n• 2. AFIL: {} afiliados\n• 3. MovObra: {} vinculaciones a obra\n• 4. MOVT: {} movimientos\n• 5. CRED: {}\n• 6. INCAP: {} incapacidades",
@@ -6155,6 +5841,14 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             res.cred_filename,
                             res.incap_count
                         );
+                        let msg = if res.advertencias.is_empty() {
+                            msg
+                        } else {
+                            for advertencia in &res.advertencias {
+                                log::warn!("Advertencia SUA: {}", advertencia);
+                            }
+                            format!("{msg} · {} advertencia(s) (ver log)", res.advertencias.len())
+                        };
                         crate::show_toast_message(&ui, &msg);
                         crate::open_folder_in_os(&folder);
                         ui.global::<AppData>().set_show_reporte_export_sua_modal(false);
@@ -6168,59 +5862,6 @@ pub fn wire_reporte_liquidaciones_callbacks(
         });
     }
 
-    // 25. Callback para verificar y autocorregir días de obras
-    {
-        let ui_weak = main_window.as_weak();
-        let pool_clone = db_pool.clone();
-        let session_clone = reporte_session.clone();
-        app_logic.on_reporte_verificar_y_corregir_dias(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                let id_rev_str = {
-                    let state = session_clone.lock().unwrap();
-                    state.current_revision_id.clone()
-                };
-                let id_revision = match id_rev_str.and_then(|s| Uuid::parse_str(&s).ok()) {
-                    Some(id) => id,
-                    None => {
-                        crate::show_toast_message(&ui, "No hay una revisión activa seleccionada.");
-                        return;
-                    }
-                };
-
-                let pool = match pool_clone {
-                    Some(ref p) => p,
-                    None => {
-                        crate::show_toast_message(&ui, "No hay conexión a la base de datos.");
-                        return;
-                    }
-                };
-
-                let mut client = match pool.get() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        crate::show_toast_message(&ui, &format!("Error obteniendo cliente BD: {}", e));
-                        return;
-                    }
-                };
-
-                match crate::db::reporte_liquidaciones::verify_and_autocorrect_employee_obras(&mut client, id_revision) {
-                    Ok(stats) => {
-                        crate::show_toast_message(&ui, &stats.resumen);
-                        if let Ok(fresh_rows) = crate::db::reporte_liquidaciones::fetch_reporte_liquidaciones(&mut client, id_revision) {
-                            let mut state = session_clone.lock().unwrap();
-                            state.all_rows = fresh_rows;
-                            update_unique_empleados_catalog(&mut state, &ui.global::<AppData>());
-                            apply_reporte_filtering(&mut state);
-                            render_reporte_ui(&ui, &state);
-                        }
-                    }
-                    Err(e) => {
-                        crate::show_toast_message(&ui, &format!("Error verificando y corrigiendo días: {}", e));
-                    }
-                }
-            }
-        });
-    }
 }
 
 #[cfg(test)]
@@ -6296,14 +5937,16 @@ mod tests {
         let total_gps = 1_500.00;
         let valor_guarderias = total_gps / 0.01;
         assert_eq!(valor_guarderias, 150_000.00);
-        let supera_18 = (monto_obra > 0.0 && valor_guarderias > limite_18) || (monto_obra == 0.0 && valor_guarderias > 0.0);
+        // Sin monto (0.0) nunca supera el 18%: no hay base para el cálculo
+        let sin_monto = !(monto_obra > 0.0);
+        let supera_18 = !sin_monto && valor_guarderias > limite_18;
         assert!(!supera_18);
 
         // Total GPS de empleados = 2,000.00 -> 200,000.00 > 180,000.00
         let total_gps_alto = 2_000.00;
         let valor_guarderias_alto = total_gps_alto / 0.01;
         assert_eq!(valor_guarderias_alto, 200_000.00);
-        let supera_18_alto = (monto_obra > 0.0 && valor_guarderias_alto > limite_18) || (monto_obra == 0.0 && valor_guarderias_alto > 0.0);
+        let supera_18_alto = !sin_monto && valor_guarderias_alto > limite_18;
         assert!(supera_18_alto);
     }
 
@@ -6594,6 +6237,9 @@ mod tests {
                 subtotal_orig: 100.0,
                 tiene_inconsistencia: false,
                 observacion_validacion: String::new(),
+                estado: "ACTIVO".to_string(),
+                cedula_actualizada: false,
+                editado_usuario: false,
             }
         };
 
@@ -6704,6 +6350,9 @@ mod tests {
                 subtotal_orig: 100.0,
                 tiene_inconsistencia: false,
                 observacion_validacion: String::new(),
+                estado: "ACTIVO".to_string(),
+                cedula_actualizada: false,
+                editado_usuario: false,
             }
         };
 
@@ -6859,6 +6508,9 @@ mod tests {
             subtotal_orig: 50.0,
             tiene_inconsistencia: false,
             observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
         };
 
         let mut row_baja = row1.clone();
@@ -6889,7 +6541,9 @@ mod tests {
         assert_eq!(r1.dias_obra, 0);
         assert_eq!(r1.obra_numero, "");
         assert_eq!(r1.obra_label, "⚠️ Sin Asignar (Pendiente)");
-        assert_eq!(r1.subtotal, 0.0); // Sin obra asignada el subtotal se pone a 0.0
+        // Regla canónica (decidida por el usuario, Fase 3): sin obra asignada el tramo conserva
+        // el importe completo de la cédula (factor 1), visible como "Sin asignar".
+        assert_eq!(r1.subtotal, 50.0);
 
         let r2 = rows.iter().find(|r| r.id_reporte_liq == row2_id).unwrap();
         assert_eq!(r2.clave, "BAJA");
@@ -6962,6 +6616,9 @@ mod tests {
             subtotal_orig: 896.98,
             tiene_inconsistencia: false,
             observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
         };
 
         let mut row_baja = row_activa.clone();
@@ -6986,5 +6643,404 @@ mod tests {
         assert_eq!(workers_in_modal[0].id_reporte_liq, active_id);
         assert_eq!(workers_in_modal[0].dias_cedula, 17);
     }
+
+    #[test]
+    fn test_batch_modal_preselects_assigned_obras() {
+        let parent_id = Uuid::now_v7();
+        let row1_id = Uuid::now_v7();
+        let row2_id = Uuid::now_v7();
+        let obra1_id = Uuid::now_v7();
+        let obra2_id = Uuid::now_v7();
+        let obra3_id = Uuid::now_v7();
+
+        let obra1 = crate::db::reporte_liquidaciones::ObraOptionDb {
+            id: obra1_id,
+            numero: "C0995849".to_string(),
+            tipo_obra: "CONSTRUCCION".to_string(),
+            fecha_inicio: chrono::NaiveDate::from_ymd_opt(2024, 10, 14),
+            fecha_fin: chrono::NaiveDate::from_ymd_opt(2024, 11, 15),
+            label: "C0995849 - CONSTRUCCION".to_string(),
+            creado_usuario: true,
+            monto: 350114.0,
+        };
+        let obra2 = crate::db::reporte_liquidaciones::ObraOptionDb {
+            id: obra2_id,
+            numero: "C0995853".to_string(),
+            tipo_obra: "REGISTRO DE OBRA CÉDULA".to_string(),
+            fecha_inicio: chrono::NaiveDate::from_ymd_opt(2024, 10, 1),
+            fecha_fin: chrono::NaiveDate::from_ymd_opt(2024, 11, 30),
+            label: "C0995853 - REGISTRO DE OBRA CÉDULA".to_string(),
+            creado_usuario: false,
+            monto: 0.0,
+        };
+        let obra3 = crate::db::reporte_liquidaciones::ObraOptionDb {
+            id: obra3_id,
+            numero: "C0995860".to_string(),
+            tipo_obra: "REGISTRO DE OBRA CÉDULA".to_string(),
+            fecha_inicio: chrono::NaiveDate::from_ymd_opt(2024, 10, 1),
+            fecha_fin: chrono::NaiveDate::from_ymd_opt(2024, 12, 31),
+            label: "C0995860 - REGISTRO DE OBRA CÉDULA".to_string(),
+            creado_usuario: false,
+            monto: 0.0,
+        };
+
+        let obras_options = vec![obra1.clone(), obra2.clone(), obra3.clone()];
+
+        // Empleado con 2 registros desdoblados vinculados a obra1 y obra2
+        let row1 = ReporteLiquidacionRowDb {
+            id_reporte_liq: row1_id,
+            id_parent_reporte_liq: parent_id,
+            id_liquidacion: Uuid::now_v7(),
+            id_revision: Uuid::now_v7(),
+            id_empleado: Uuid::now_v7(),
+            nombre_trabajador: "BERMUDEZ RAMIREZ MIGUEL ANGEL".to_string(),
+            rfc: "BERM790127CH1".to_string(),
+            curp: "BERM790127HNLRMG08".to_string(),
+            nss: "43947909248".to_string(),
+            pensionado: String::new(),
+            registro_patronal: "A3415636101".to_string(),
+            mes_periodo: "OCTUBRE".to_string(),
+            mes_periodo_int: 10,
+            anio_periodo: 2024,
+            periodo_str: "OCTUBRE / 2024".to_string(),
+            dias_cedula: 31,
+            id_registro_obra: Some(obra1_id),
+            obra_numero: "C0995849".to_string(),
+            obra_label: "C0995849 - CONSTRUCCION".to_string(),
+            dias_obra: 18,
+            obra_creado_usuario: true,
+            clave: String::new(),
+            fecha: None,
+            fecha_str: String::new(),
+            sdi: 261.20,
+            lic: 0.0,
+            inc: 0.0,
+            aus: 0.0,
+            cf: 350.0,
+            exc_pat: 0.0,
+            exc_obr: 0.0,
+            pd_pat: 0.0,
+            pd_obr: 0.0,
+            gmp_pat: 0.0,
+            gmp_obr: 0.0,
+            rt: 0.0,
+            iv_pat: 0.0,
+            iv_obr: 0.0,
+            gps: 0.0,
+            patronal: 0.0,
+            obrera: 0.0,
+            subtotal: 931.77,
+            cf_orig: 350.0,
+            exc_pat_orig: 0.0,
+            exc_obr_orig: 0.0,
+            pd_pat_orig: 0.0,
+            pd_obr_orig: 0.0,
+            gmp_pat_orig: 0.0,
+            gmp_obr_orig: 0.0,
+            rt_orig: 0.0,
+            iv_pat_orig: 0.0,
+            iv_obr_orig: 0.0,
+            gps_orig: 0.0,
+            patronal_orig: 0.0,
+            obrera_orig: 0.0,
+            subtotal_orig: 1604.71,
+            tiene_inconsistencia: false,
+            observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
+        };
+
+        let mut row2 = row1.clone();
+        row2.id_reporte_liq = row2_id;
+        row2.id_registro_obra = Some(obra2_id);
+        row2.obra_numero = "C0995853".to_string();
+        row2.obra_label = "C0995853 - REGISTRO DE OBRA CÉDULA".to_string();
+        row2.dias_obra = 13;
+        row2.obra_creado_usuario = false;
+        row2.subtotal = 672.94;
+
+        let all_rows = vec![row1, row2];
+        let selected_ids: HashSet<Uuid> = [row1_id, row2_id].into_iter().collect();
+
+        // Lógica de detección de obras asignadas
+        let mut currently_assigned_obra_ids: HashSet<Uuid> = HashSet::new();
+        let mut currently_assigned_obra_nums: HashSet<String> = HashSet::new();
+
+        for sel_id in &selected_ids {
+            if let Some(r) = all_rows.iter().find(|x| x.id_reporte_liq == *sel_id) {
+                if let Some(oid) = r.id_registro_obra {
+                    currently_assigned_obra_ids.insert(oid);
+                }
+                if !r.obra_numero.trim().is_empty() {
+                    currently_assigned_obra_nums.insert(r.obra_numero.trim().to_uppercase());
+                }
+                for sib in all_rows.iter().filter(|x| x.id_parent_reporte_liq == r.id_parent_reporte_liq) {
+                    if let Some(oid) = sib.id_registro_obra {
+                        currently_assigned_obra_ids.insert(oid);
+                    }
+                    if !sib.obra_numero.trim().is_empty() {
+                        currently_assigned_obra_nums.insert(sib.obra_numero.trim().to_uppercase());
+                    }
+                }
+            }
+        }
+
+        let mut preselected_count = 0;
+        let mut is_obra1_selected = false;
+        let mut is_obra2_selected = false;
+        let mut is_obra3_selected = false;
+
+        for o in &obras_options {
+            let is_assigned = currently_assigned_obra_ids.contains(&o.id)
+                || currently_assigned_obra_nums.contains(&o.numero.trim().to_uppercase());
+            if is_assigned {
+                preselected_count += 1;
+            }
+            if o.id == obra1_id { is_obra1_selected = is_assigned; }
+            if o.id == obra2_id { is_obra2_selected = is_assigned; }
+            if o.id == obra3_id { is_obra3_selected = is_assigned; }
+        }
+
+        assert_eq!(preselected_count, 2, "Deben preseleccionarse exactamente las 2 obras vinculadas");
+        assert!(is_obra1_selected, "C0995849 debe estar seleccionada");
+        assert!(is_obra2_selected, "C0995853 debe estar seleccionada");
+        assert!(!is_obra3_selected, "C0995860 NO debe estar seleccionada");
+    }
 }
 
+#[cfg(test)]
+mod tests_entregable_flujo {
+    use super::*;
+
+    #[test]
+    fn nombre_archivo_excel_con_version_y_folio() {
+        assert_eq!(
+            nombre_archivo_excel("v3_", "R-001", "20260112_101010"),
+            "v3_Reporte_Liquidaciones_R-001_20260112_101010.xlsx"
+        );
+    }
+
+    #[test]
+    fn nombre_archivo_excel_sanea_folio_y_usa_respaldo() {
+        assert_eq!(
+            nombre_archivo_excel("BORRADOR_", "R 001/A", "F"),
+            "BORRADOR_Reporte_Liquidaciones_R_001_A_F.xlsx"
+        );
+        assert_eq!(
+            nombre_archivo_excel("BORRADOR_", "", "F"),
+            "BORRADOR_Reporte_Liquidaciones_REVISION_F.xlsx"
+        );
+    }
+
+    #[test]
+    fn formato_resumen_muestra_totales() {
+        let r = ResumenEntregable {
+            filas: 3,
+            empleados: 2,
+            empleado_mes: 2,
+            total_subtotal: 1234.5,
+            total_patronal: 0.0,
+            total_obrera: 0.0,
+            total_gps: 0.0,
+        };
+        assert_eq!(
+            formato_resumen(&r),
+            "3 filas activas · 2 empleados · 2 empleado-mes · Subtotal $1,234.50"
+        );
+    }
+
+    #[test]
+    fn resumen_historial_desde_json() {
+        assert_eq!(resumen_historial(None), "");
+        let completo = serde_json::json!({"filas": 3, "total_subtotal": 10.5});
+        assert_eq!(resumen_historial(Some(&completo)), "3 filas · Subtotal $10.50");
+        let vacio = serde_json::json!({});
+        assert_eq!(resumen_historial(Some(&vacio)), "");
+    }
+
+    #[test]
+    fn hash_corto_tiene_doce_caracteres() {
+        assert_eq!(hash_corto(&"a".repeat(64)).len(), 12);
+    }
+
+    #[test]
+    fn codigo_severidad_coincide_con_la_ui() {
+        assert_eq!(codigo_severidad(&Severidad::Bloqueante), 0);
+        assert_eq!(codigo_severidad(&Severidad::Advertencia), 1);
+        assert_eq!(codigo_severidad(&Severidad::Info), 2);
+    }
+}
+
+#[cfg(test)]
+mod tests_filtro_avanzado {
+    use super::*;
+
+    /// Fila de prueba con valores neutros; los campos relevantes se ajustan después.
+    fn fila(anio: i16, mes: u32, obra: Option<Uuid>, nombre: &str, nss: &str, rfc: &str, curp: &str) -> ReporteLiquidacionRowDb {
+        ReporteLiquidacionRowDb {
+            id_reporte_liq: Uuid::now_v7(),
+            id_parent_reporte_liq: Uuid::now_v7(),
+            id_liquidacion: Uuid::now_v7(),
+            id_revision: Uuid::now_v7(),
+            id_empleado: Uuid::now_v7(),
+            nombre_trabajador: nombre.into(),
+            rfc: rfc.into(),
+            curp: curp.into(),
+            nss: nss.into(),
+            pensionado: String::new(),
+            registro_patronal: String::new(),
+            mes_periodo: String::new(),
+            mes_periodo_int: mes as i16,
+            anio_periodo: anio,
+            periodo_str: format!("{:02}/{}", mes, anio),
+            dias_cedula: 30,
+            id_registro_obra: obra,
+            obra_numero: String::new(),
+            obra_label: String::new(),
+            dias_obra: 0,
+            obra_creado_usuario: false,
+            clave: String::new(),
+            fecha: None,
+            fecha_str: String::new(),
+            sdi: 0.0,
+            lic: 0.0,
+            inc: 0.0,
+            aus: 0.0,
+            cf: 0.0,
+            exc_pat: 0.0,
+            exc_obr: 0.0,
+            pd_pat: 0.0,
+            pd_obr: 0.0,
+            gmp_pat: 0.0,
+            gmp_obr: 0.0,
+            rt: 0.0,
+            iv_pat: 0.0,
+            iv_obr: 0.0,
+            gps: 0.0,
+            patronal: 0.0,
+            obrera: 0.0,
+            subtotal: 0.0,
+            cf_orig: 0.0,
+            exc_pat_orig: 0.0,
+            exc_obr_orig: 0.0,
+            pd_pat_orig: 0.0,
+            pd_obr_orig: 0.0,
+            gmp_pat_orig: 0.0,
+            gmp_obr_orig: 0.0,
+            rt_orig: 0.0,
+            iv_pat_orig: 0.0,
+            iv_obr_orig: 0.0,
+            gps_orig: 0.0,
+            patronal_orig: 0.0,
+            obrera_orig: 0.0,
+            subtotal_orig: 0.0,
+            tiene_inconsistencia: false,
+            observacion_validacion: String::new(),
+            estado: String::new(),
+            cedula_actualizada: false,
+            editado_usuario: false,
+        }
+    }
+
+    fn filtro_con<F: FnOnce(&mut FiltroAvanzado)>(f: F) -> FiltroAvanzado {
+        let mut filtro = FiltroAvanzado::default();
+        f(&mut filtro);
+        filtro
+    }
+
+    #[test]
+    fn filtro_por_anio() {
+        let f = filtro_con(|f| {
+            f.anios.insert(2014);
+        });
+        assert!(fila_pasa_filtro(&f, &fila(2014, 3, None, "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2015, 3, None, "A", "", "", "")));
+    }
+
+    #[test]
+    fn filtro_por_mes_distingue_anios() {
+        let f = filtro_con(|f| {
+            f.meses.insert((2014, 5));
+        });
+        assert!(fila_pasa_filtro(&f, &fila(2014, 5, None, "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2015, 5, None, "A", "", "", "")));
+    }
+
+    #[test]
+    fn filtro_por_obra_y_sin_asignar() {
+        let obra = Uuid::now_v7();
+        let otra = Uuid::now_v7();
+        let f = filtro_con(|f| {
+            f.obras.insert(obra.to_string());
+            f.obras.insert("sin_asignar".to_string());
+        });
+        assert!(fila_pasa_filtro(&f, &fila(2024, 1, Some(obra), "A", "", "", "")));
+        assert!(fila_pasa_filtro(&f, &fila(2024, 1, None, "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2024, 1, Some(otra), "A", "", "", "")));
+    }
+
+    #[test]
+    fn clave_empleado_agrupa_por_rfc_real() {
+        let mut a = fila(2024, 1, None, "PEREZ JOSE", "", "PEJO800101AB1", "");
+        let mut b = fila(2024, 2, None, "PEREZ JOSE", "", "pejo800101ab1", "");
+        a.id_empleado = Uuid::now_v7();
+        b.id_empleado = Uuid::now_v7();
+        assert_ne!(a.id_empleado, b.id_empleado);
+        assert_eq!(clave_empleado(&a), clave_empleado(&b));
+        assert_eq!(clave_empleado(&a), "PEJO800101AB1");
+
+        let f = filtro_con(|f| {
+            f.empleados.insert(clave_empleado(&a));
+        });
+        assert!(fila_pasa_filtro(&f, &a));
+        assert!(fila_pasa_filtro(&f, &b));
+    }
+
+    #[test]
+    fn rfc_generico_no_se_usa_como_clave() {
+        let a = fila(2024, 1, None, "UNO", "", "XAXX010101000", "");
+        let b = fila(2024, 1, None, "DOS", "", "XAXX010101000", "");
+        assert_ne!(clave_empleado(&a), "XAXX010101000");
+        assert_ne!(clave_empleado(&a), clave_empleado(&b));
+        assert_eq!(clave_empleado(&a), a.id_empleado.to_string());
+    }
+
+    #[test]
+    fn busqueda_nss_ignora_guiones_y_espacios() {
+        let r = fila(2024, 1, None, "GARCIA LOPEZ MARIA", "12345678901", "", "");
+        assert!(coincide_busqueda_empleado(&r, "1234-5678"));
+        assert!(coincide_busqueda_empleado(&r, "123 456 78"));
+        assert!(!coincide_busqueda_empleado(&r, "1234-9999"));
+    }
+
+    #[test]
+    fn busqueda_nombre_sin_acentos_ni_orden() {
+        let r = fila(2024, 1, None, "PÉREZ LÓPEZ JOSÉ", "", "", "");
+        assert!(coincide_busqueda_empleado(&r, "jose perez"));
+        assert!(coincide_busqueda_empleado(&r, "PEREZ jose"));
+        assert!(!coincide_busqueda_empleado(&r, "jose garcia"));
+    }
+
+    #[test]
+    fn criterios_se_combinan_con_and() {
+        let obra_x = Uuid::now_v7();
+        let obra_y = Uuid::now_v7();
+        let f = filtro_con(|f| {
+            f.anios.insert(2014);
+            f.obras.insert(obra_x.to_string());
+        });
+        assert!(fila_pasa_filtro(&f, &fila(2014, 1, Some(obra_x), "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2014, 1, Some(obra_y), "A", "", "", "")));
+        assert!(!fila_pasa_filtro(&f, &fila(2015, 1, Some(obra_x), "A", "", "", "")));
+        assert_eq!(criterios_no_vacios(&f), 2);
+    }
+
+    #[test]
+    fn filtro_vacio_deja_pasar_todo() {
+        let f = FiltroAvanzado::default();
+        assert!(fila_pasa_filtro(&f, &fila(2014, 1, None, "A", "", "", "")));
+        assert!(fila_pasa_filtro(&f, &fila(2030, 12, Some(Uuid::now_v7()), "B", "", "", "")));
+        assert_eq!(criterios_no_vacios(&f), 0);
+    }
+}

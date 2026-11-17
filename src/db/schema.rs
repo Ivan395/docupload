@@ -50,6 +50,397 @@ pub fn format_boxed_pg_error(err: &(dyn std::error::Error + 'static)) -> String 
     }
 }
 
+/// Fase 1 de integridad: tablas, columnas e índices nuevos. Todo idempotente.
+/// Los CHECK se crean solo si no existen, mediante bloques DO.
+const SQL_FASE1_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS public.archivos_cedulas (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    id_registro_patronal uuid NOT NULL REFERENCES public.registros_patronales(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    id_revision_carga uuid REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE SET NULL,
+    sha256 char(64) NOT NULL,
+    nombre_original varchar(350) NOT NULL,
+    rustfs_key varchar(700),
+    tipo varchar(10) NOT NULL CHECK (tipo IN ('SUA','EMA')),
+    anio_periodo smallint NOT NULL,
+    mes_periodo_int smallint NOT NULL CHECK (mes_periodo_int BETWEEN 1 AND 12),
+    paginas smallint,
+    trabajadores integer,
+    estado varchar(20) NOT NULL DEFAULT 'STAGED' CHECK (estado IN ('STAGED','ACTIVO','REEMPLAZADO','PAPELERA')),
+    reemplazado_por uuid REFERENCES public.archivos_cedulas(id) ON DELETE SET NULL,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_archivos_cedulas_rp_sha UNIQUE (id_registro_patronal, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_archivos_cedulas_rp_periodo ON public.archivos_cedulas(id_registro_patronal, anio_periodo, mes_periodo_int) WHERE estado = 'ACTIVO';
+CREATE INDEX IF NOT EXISTS idx_archivos_cedulas_staged ON public.archivos_cedulas(created_at) WHERE estado = 'STAGED';
+-- Clave temporal en RustFS mientras el archivo está en STAGED (necesaria para reintentar la promoción)
+ALTER TABLE public.archivos_cedulas ADD COLUMN IF NOT EXISTS staging_key varchar(700);
+
+ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS id_archivo uuid REFERENCES public.archivos_cedulas(id) ON UPDATE CASCADE ON DELETE SET NULL;
+ALTER TABLE public.liquidaciones ADD COLUMN IF NOT EXISTS origen varchar(5);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_liquidaciones_origen') THEN
+        ALTER TABLE public.liquidaciones ADD CONSTRAINT chk_liquidaciones_origen CHECK (origen IS NULL OR origen IN ('SUA','EMA'));
+    END IF;
+END $$;
+
+ALTER TABLE public.revisiones ADD COLUMN IF NOT EXISTS periodo_inicio date;
+ALTER TABLE public.revisiones ADD COLUMN IF NOT EXISTS periodo_fin date;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_revisiones_periodo') THEN
+        ALTER TABLE public.revisiones ADD CONSTRAINT chk_revisiones_periodo CHECK (periodo_inicio IS NULL OR periodo_fin IS NULL OR periodo_inicio <= periodo_fin);
+    END IF;
+END $$;
+
+ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS estado varchar(20) NOT NULL DEFAULT 'ACTIVO';
+ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS editado_usuario boolean NOT NULL DEFAULT false;
+ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS cedula_actualizada boolean NOT NULL DEFAULT false;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_reportes_liquidaciones_estado') THEN
+        ALTER TABLE public.reportes_liquidaciones ADD CONSTRAINT chk_reportes_liquidaciones_estado CHECK (estado IN ('ACTIVO','FUERA_PERIODO','EXCLUIDO'));
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.reportes_cambios (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    id_reporte_liquidacion uuid REFERENCES public.reportes_liquidaciones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    lote_id uuid NOT NULL,
+    accion varchar(30) NOT NULL,
+    antes jsonb,
+    despues jsonb,
+    usuario varchar(100),
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_reportes_cambios_rev ON public.reportes_cambios(id_revision, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reportes_cambios_lote ON public.reportes_cambios(lote_id);
+-- Pila de deshacer: lote DESHACER que revirtió este cambio (NULL = vigente)
+ALTER TABLE public.reportes_cambios ADD COLUMN IF NOT EXISTS deshecho_por uuid;
+
+CREATE TABLE IF NOT EXISTS public.exportaciones_reportes (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    id_revision uuid NOT NULL REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    tipo varchar(10) NOT NULL CHECK (tipo IN ('XLSX','SUA')),
+    version integer NOT NULL,
+    sha256 char(64) NOT NULL,
+    rustfs_key varchar(700) NOT NULL,
+    resumen jsonb,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_export_rev_tipo_version UNIQUE (id_revision, tipo, version)
+);
+
+-- Respaldo de registros eliminados por procesos de depuración (permite reconstruir lo borrado)
+CREATE TABLE IF NOT EXISTS public.respaldo_depuracion (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    proceso varchar(60) NOT NULL,
+    tabla varchar(80) NOT NULL,
+    id_registro uuid NOT NULL,
+    id_sobreviviente uuid,
+    datos jsonb NOT NULL,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_respaldo_depuracion_proceso ON public.respaldo_depuracion(proceso, tabla);
+"#;
+
+/// Restricciones de integridad sobre datos existentes. Cada una se crea solo si no existe
+/// y no hay registros que la violen; si los hay, emite un aviso y continúa sin abortar.
+/// Migraciones de datos que deben ejecutarse UNA sola vez. Cada una se registra en
+/// `public.migraciones_aplicadas` y se omite en arranques posteriores.
+pub(crate) const SQL_MIGRACIONES_UNICAS: &str = r#"
+CREATE TABLE IF NOT EXISTS public.migraciones_aplicadas (
+    nombre varchar(120) PRIMARY KEY,
+    aplicada_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Fase 3: la bitácora debe sobrevivir al borrado de un reporte (p. ej. "Revertir" borra y recrea
+-- reportes): la FK a reportes_liquidaciones pasa de ON DELETE CASCADE a ON DELETE SET NULL.
+DO $$
+DECLARE nombre_fk text;
+BEGIN
+    SELECT c.conname INTO nombre_fk FROM pg_constraint c
+    WHERE c.conrelid = 'public.reportes_cambios'::regclass AND c.contype = 'f'
+      AND c.confrelid = 'public.reportes_liquidaciones'::regclass;
+    IF nombre_fk IS NOT NULL AND EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = nombre_fk AND confdeltype <> 'n'
+    ) THEN
+        EXECUTE format('ALTER TABLE public.reportes_cambios DROP CONSTRAINT %I', nombre_fk);
+        ALTER TABLE public.reportes_cambios ADD CONSTRAINT fk_reportes_cambios_reporte
+            FOREIGN KEY (id_reporte_liquidacion) REFERENCES public.reportes_liquidaciones(id)
+            ON UPDATE CASCADE ON DELETE SET NULL;
+    END IF;
+END $$;
+
+-- Fase 3: los reportes existentes antes de introducir `editado_usuario` pudieron ser trabajados por el
+-- analista (asignaciones de obra, días). No hay forma fiable de distinguirlos, así que se consideran
+-- editados: la sincronización incremental nunca borrará ni reasignará su contenido.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.migraciones_aplicadas WHERE nombre = 'fase3_reportes_historicos_editados') THEN
+        UPDATE public.reportes_liquidaciones SET editado_usuario = true WHERE editado_usuario = false;
+        INSERT INTO public.migraciones_aplicadas (nombre) VALUES ('fase3_reportes_historicos_editados');
+    END IF;
+END $$;
+"#;
+
+/// Correcciones IMSS/SIROC F0: el papel de trabajo de nóminas deja de borrarse; se marca su estado
+/// y se protegen las ediciones del analista y las nóminas sintéticas.
+pub(crate) const SQL_CORRECCIONES_F0_NOMINAS: &str = r#"
+ALTER TABLE public.reportes_nominas ADD COLUMN IF NOT EXISTS estado varchar(20) NOT NULL DEFAULT 'ACTIVO';
+ALTER TABLE public.reportes_nominas ADD COLUMN IF NOT EXISTS editado_usuario boolean NOT NULL DEFAULT false;
+ALTER TABLE public.reportes_nominas ADD COLUMN IF NOT EXISTS sintetica boolean NOT NULL DEFAULT false;
+ALTER TABLE IF EXISTS revision_history.reportes_nominas ADD COLUMN IF NOT EXISTS estado varchar(20);
+ALTER TABLE IF EXISTS revision_history.reportes_nominas ADD COLUMN IF NOT EXISTS editado_usuario boolean;
+ALTER TABLE IF EXISTS revision_history.reportes_nominas ADD COLUMN IF NOT EXISTS sintetica boolean;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_reportes_nominas_estado') THEN
+        ALTER TABLE public.reportes_nominas ADD CONSTRAINT chk_reportes_nominas_estado CHECK (estado IN ('ACTIVO','FUERA_ALCANCE'));
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_reportes_nominas_rev_estado ON public.reportes_nominas(id_revision, estado);
+
+-- Una sola copia por (revisión, nómina). Solo se crea si no hay duplicados; si los hay, solo avisa.
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_reportes_nominas_rev_nomina') THEN
+        SELECT COUNT(*) INTO n FROM (
+            SELECT 1 FROM public.reportes_nominas
+            WHERE id_nomina IS NOT NULL
+            GROUP BY id_revision, id_nomina
+            HAVING COUNT(*) > 1
+        ) g;
+        IF n = 0 THEN
+            CREATE UNIQUE INDEX uq_reportes_nominas_rev_nomina ON public.reportes_nominas(id_revision, id_nomina)
+                WHERE id_nomina IS NOT NULL;
+        ELSE
+            RAISE WARNING 'uq_reportes_nominas_rev_nomina omitida: existen % grupos duplicados en reportes_nominas', n;
+        END IF;
+    END IF;
+END $$;
+
+-- Marcado inicial (una sola vez): sintéticas = sin nómina maestra; editadas = días o sueldos distintos de la maestra.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.migraciones_aplicadas WHERE nombre = 'f0_reportes_nominas_marcas') THEN
+        UPDATE public.reportes_nominas SET sintetica = true WHERE id_nomina IS NULL AND sintetica = false;
+        UPDATE public.reportes_nominas rn
+        SET editado_usuario = true
+        FROM public.nominas n
+        WHERE n.id = rn.id_nomina
+          AND rn.editado_usuario = false
+          AND (
+              (
+                  ABS(COALESCE(rn.num_dias_pagados, 0) - COALESCE(n.num_dias_pagados, 0)) > 0.005
+                  AND ABS(COALESCE(rn.num_dias_pagados, 0) - COALESCE((n.fecha_final_pago - n.fecha_inicial_pago) + 1, n.num_dias_pagados, 0)) > 0.005
+              )
+              OR ABS(COALESCE(rn.total_sueldos, 0) - COALESCE(n.total_sueldos, 0)) > 0.005
+          );
+        INSERT INTO public.migraciones_aplicadas (nombre) VALUES ('f0_reportes_nominas_marcas');
+    END IF;
+END $$;
+"#;
+
+/// F1: borrado lógico de obras, CHECK de fechas (NOT VALID + validación solo si no hay violaciones)
+/// y referencia de obra en la bitácora para poder deshacer su eliminación. Solo agrega; no borra datos.
+pub(crate) const SQL_CORRECCIONES_F1_OBRAS: &str = r#"
+ALTER TABLE public.registros_obras ADD COLUMN IF NOT EXISTS activa boolean NOT NULL DEFAULT true;
+ALTER TABLE public.registros_obras ADD COLUMN IF NOT EXISTS desactivada_at timestamptz;
+ALTER TABLE IF EXISTS revision_history.registros_obras ADD COLUMN IF NOT EXISTS activa boolean;
+ALTER TABLE IF EXISTS revision_history.registros_obras ADD COLUMN IF NOT EXISTS desactivada_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_registros_obras_rev_activa ON public.registros_obras(id_revision) WHERE activa;
+
+ALTER TABLE public.reportes_cambios ADD COLUMN IF NOT EXISTS id_registro_obra uuid;
+ALTER TABLE IF EXISTS revision_history.reportes_cambios ADD COLUMN IF NOT EXISTS id_registro_obra uuid;
+
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_registros_obras_fechas') THEN
+        ALTER TABLE public.registros_obras
+            ADD CONSTRAINT chk_registros_obras_fechas CHECK (fecha_fin >= fecha_inicio) NOT VALID;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_registros_obras_fechas' AND NOT convalidated) THEN
+        SELECT COUNT(*) INTO n FROM public.registros_obras WHERE fecha_fin < fecha_inicio;
+        IF n = 0 THEN
+            ALTER TABLE public.registros_obras VALIDATE CONSTRAINT chk_registros_obras_fechas;
+        ELSE
+            RAISE WARNING 'chk_registros_obras_fechas sin validar: % obras con fecha_fin < fecha_inicio', n;
+        END IF;
+    END IF;
+END $$;
+"#;
+
+/// F5 (MOD-04): integridad RP ↔ revisión ↔ obra ↔ nómina. Solo agrega triggers, avisos y una FK NOT VALID;
+/// no modifica ni borra filas existentes (las asignaciones solo ocurren en escrituras nuevas).
+pub(crate) const SQL_CORRECCIONES_F5_INTEGRIDAD: &str = r#"
+-- Obra: su registro patronal es SIEMPRE el de su revisión. Se normaliza al insertar o actualizar
+-- (las obras automáticas de cédula pueden venir con el RP "equivalente" de otro cliente).
+-- No modifica filas existentes: solo actúa en escrituras nuevas.
+CREATE OR REPLACE FUNCTION public.normalizar_rp_obra() RETURNS trigger AS $$
+DECLARE rp_rev uuid;
+BEGIN
+    IF NEW.id_revision IS NOT NULL THEN
+        SELECT id_registro_patronal INTO rp_rev FROM public.revisiones WHERE id = NEW.id_revision;
+        IF rp_rev IS NOT NULL AND NEW.id_registro_patronal IS DISTINCT FROM rp_rev THEN
+            NEW.id_registro_patronal := rp_rev;
+        END IF;
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_normalizar_rp_obra ON public.registros_obras;
+CREATE TRIGGER trg_normalizar_rp_obra BEFORE INSERT OR UPDATE OF id_revision, id_registro_patronal
+    ON public.registros_obras FOR EACH ROW EXECUTE FUNCTION public.normalizar_rp_obra();
+
+-- Aviso (no corrige) de obras existentes con RP distinto al de su revisión.
+DO $$
+DECLARE n bigint;
+BEGIN
+    SELECT COUNT(*) INTO n FROM public.registros_obras ro JOIN public.revisiones r ON r.id = ro.id_revision
+    WHERE ro.id_registro_patronal IS DISTINCT FROM r.id_registro_patronal;
+    IF n > 0 THEN
+        RAISE WARNING 'registros_obras: % obras con registro patronal distinto al de su revisión (ver diagnóstico de integridad)', n;
+    END IF;
+END $$;
+
+-- Nómina → revisión: FK NOT VALID (aplica a filas nuevas); se valida solo si no hay huérfanas.
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_nominas_revision') THEN
+        ALTER TABLE public.nominas ADD CONSTRAINT fk_nominas_revision FOREIGN KEY (id_revision)
+            REFERENCES public.revisiones(id) ON UPDATE CASCADE ON DELETE SET NULL NOT VALID;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_nominas_revision' AND NOT convalidated) THEN
+        SELECT COUNT(*) INTO n FROM public.nominas n2
+        WHERE n2.id_revision IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.revisiones r WHERE r.id = n2.id_revision);
+        IF n = 0 THEN
+            ALTER TABLE public.nominas VALIDATE CONSTRAINT fk_nominas_revision;
+        ELSE
+            RAISE WARNING 'fk_nominas_revision sin validar: % nóminas con revisión inexistente', n;
+        END IF;
+    END IF;
+END $$;
+"#;
+
+pub(crate) const SQL_CORRECCIONES_F6_EMPLEADOS: &str = r#"
+-- D-8 c: true cuando el analista fijó a mano el estado (esta_activo) y debe prevalecer sobre la cédula.
+ALTER TABLE public.empleados ADD COLUMN IF NOT EXISTS estado_manual boolean NOT NULL DEFAULT false;
+ALTER TABLE IF EXISTS revision_history.empleados ADD COLUMN IF NOT EXISTS estado_manual boolean;
+CREATE INDEX IF NOT EXISTS idx_reportes_liquidaciones_empleado ON public.reportes_liquidaciones(id_empleado);
+CREATE INDEX IF NOT EXISTS idx_liquidaciones_empleado ON public.liquidaciones(id_empleado);
+"#;
+
+pub(crate) const SQL_CORRECCIONES_F7_ANALISTAS: &str = r#"
+-- ADD-05 niveles 1 y 2 (D-6 a): catálogo de analistas, autoría y bloqueo optimista. Solo aditivo.
+CREATE TABLE IF NOT EXISTS public.analistas (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    nombre varchar(150) NOT NULL UNIQUE,
+    activo boolean NOT NULL DEFAULT true,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP
+);
+ALTER TABLE public.registros_obras  ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.registros_obras  ADD COLUMN IF NOT EXISTS updated_by uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.revisiones       ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.revisiones       ADD COLUMN IF NOT EXISTS id_analista_responsable uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.archivos_cedulas ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.reportes_cambios ADD COLUMN IF NOT EXISTS id_analista uuid REFERENCES public.analistas(id) ON DELETE SET NULL;
+ALTER TABLE public.reportes_liquidaciones ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 0;
+-- Historial: mismas columnas sin restricciones (el trigger de historial copia por nombre de columna).
+ALTER TABLE IF EXISTS revision_history.registros_obras  ADD COLUMN IF NOT EXISTS created_by uuid;
+ALTER TABLE IF EXISTS revision_history.registros_obras  ADD COLUMN IF NOT EXISTS updated_by uuid;
+ALTER TABLE IF EXISTS revision_history.revisiones       ADD COLUMN IF NOT EXISTS created_by uuid;
+ALTER TABLE IF EXISTS revision_history.revisiones       ADD COLUMN IF NOT EXISTS id_analista_responsable uuid;
+ALTER TABLE IF EXISTS revision_history.archivos_cedulas ADD COLUMN IF NOT EXISTS created_by uuid;
+ALTER TABLE IF EXISTS revision_history.reportes_cambios ADD COLUMN IF NOT EXISTS id_analista uuid;
+ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones ADD COLUMN IF NOT EXISTS version integer;
+"#;
+
+pub(crate) const SQL_FASE1_RESTRICCIONES: &str = r#"
+-- a) Empleados: NSS único por cliente (solo NSS no vacíos)
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_empleados_cliente_nss')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_empleados_cliente_nss') THEN
+        SELECT COUNT(*) INTO n FROM (
+            SELECT 1 FROM public.empleados
+            WHERE nss IS NOT NULL AND BTRIM(nss) <> ''
+            GROUP BY id_cliente, nss
+            HAVING COUNT(*) > 1
+        ) g;
+        IF n = 0 THEN
+            CREATE UNIQUE INDEX uq_empleados_cliente_nss ON public.empleados(id_cliente, nss)
+                WHERE nss IS NOT NULL AND BTRIM(nss) <> '';
+        ELSE
+            RAISE WARNING 'uq_empleados_cliente_nss omitida: existen % registros que la violan; ejecutar depuracion de Fase 1', n;
+        END IF;
+    END IF;
+END $$;
+
+-- b) Liquidaciones: mes_periodo_int en 1..12 y NOT NULL (solo si no hay filas que lo violen)
+DO $$
+DECLARE n_bad bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_liquidaciones_mes_periodo_int') THEN
+        SELECT COUNT(*) INTO n_bad FROM public.liquidaciones
+        WHERE mes_periodo_int IS NULL OR mes_periodo_int NOT BETWEEN 1 AND 12;
+        IF n_bad = 0 THEN
+            ALTER TABLE public.liquidaciones ADD CONSTRAINT chk_liquidaciones_mes_periodo_int CHECK (mes_periodo_int BETWEEN 1 AND 12);
+            ALTER TABLE public.liquidaciones ALTER COLUMN mes_periodo_int SET NOT NULL;
+        ELSE
+            RAISE WARNING 'chk_liquidaciones_mes_periodo_int omitida: existen % registros que la violan; ejecutar depuracion de Fase 1', n_bad;
+        END IF;
+    END IF;
+END $$;
+
+-- c) Liquidaciones: un registro por patrón, empleado y periodo (NULLs tratados como iguales)
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_liquidaciones_rp_emp_periodo')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_liquidaciones_rp_emp_periodo') THEN
+        SELECT COUNT(*) INTO n FROM (
+            SELECT 1 FROM public.liquidaciones
+            GROUP BY id_registro_patronal, id_empleado, anio_periodo, mes_periodo_int
+            HAVING COUNT(*) > 1
+        ) g;
+        IF n = 0 THEN
+            ALTER TABLE public.liquidaciones ADD CONSTRAINT uq_liquidaciones_rp_emp_periodo
+                UNIQUE NULLS NOT DISTINCT (id_registro_patronal, id_empleado, anio_periodo, mes_periodo_int);
+        ELSE
+            RAISE WARNING 'uq_liquidaciones_rp_emp_periodo omitida: existen % registros que la violan; ejecutar depuracion de Fase 1', n;
+        END IF;
+    END IF;
+END $$;
+
+-- d) Reportes de liquidaciones: un registro por revisión, empleado y periodo
+DO $$
+DECLARE n bigint;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_rl_rev_emp_periodo')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_rl_rev_emp_periodo') THEN
+        SELECT COUNT(*) INTO n FROM (
+            SELECT 1 FROM public.reportes_liquidaciones
+            GROUP BY id_revision, id_empleado, anio_periodo, mes_periodo_int
+            HAVING COUNT(*) > 1
+        ) g;
+        IF n = 0 THEN
+            ALTER TABLE public.reportes_liquidaciones ADD CONSTRAINT uq_rl_rev_emp_periodo
+                UNIQUE NULLS NOT DISTINCT (id_revision, id_empleado, anio_periodo, mes_periodo_int);
+        ELSE
+            RAISE WARNING 'uq_rl_rev_emp_periodo omitida: existen % registros que la violan; ejecutar depuracion de Fase 1', n;
+        END IF;
+    END IF;
+END $$;
+"#;
+
+/// Nombres de las restricciones de integridad de la Fase 1 que deben existir tras `SQL_FASE1_RESTRICCIONES`.
+const RESTRICCIONES_FASE1: [&str; 4] = [
+    "uq_empleados_cliente_nss",
+    "chk_liquidaciones_mes_periodo_int",
+    "uq_liquidaciones_rp_emp_periodo",
+    "uq_rl_rev_emp_periodo",
+];
+
 fn exec_schema_step(
     client: &mut Client,
     step_name: &str,
@@ -688,6 +1079,8 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         END $$;
 
         -- Column additions to accommodate all fields from cédulas and nóminas
+        ALTER TABLE public.clientes ADD COLUMN IF NOT EXISTS representante_legal varchar(150);
+        COMMENT ON COLUMN public.clientes.representante_legal IS 'Nombre del representante legal que firma los entregables ante el IMSS';
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_delegacion varchar(10);
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS codigo_subdelegacion varchar(10);
         ALTER TABLE public.registros_patronales ADD COLUMN IF NOT EXISTS id_entidad_federativa uuid REFERENCES public.entidades_federativas(id) ON UPDATE CASCADE ON DELETE CASCADE;
@@ -1387,6 +1780,7 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         CREATE INDEX IF NOT EXISTS idx_detalles_liquidaciones_id_liquidacion ON public.detalles_liquidaciones(id_liquidacion);
         CREATE INDEX IF NOT EXISTS idx_vinculaciones_obras_id_obra ON public.vinculaciones_obras_liquidaciones(id_registro_obra);
         CREATE INDEX IF NOT EXISTS idx_vinculaciones_obras_id_liq ON public.vinculaciones_obras_liquidaciones(id_liquidacion);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_vol_liq_obra_id ON public.vinculaciones_obras_liquidaciones(id_liquidacion, id_registro_obra);
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_nomina ON public.reportes_nominas(id_nomina);
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_revision ON public.reportes_nominas(id_revision);
         CREATE INDEX IF NOT EXISTS idx_reportes_nominas_id_empleado ON public.reportes_nominas(id_empleado);
@@ -1870,6 +2264,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
                 IF NEW.razon_social IS NOT NULL THEN
                     NEW.razon_social := UPPER(NEW.razon_social);
                 END IF;
+                IF NEW.representante_legal IS NOT NULL THEN
+                    NEW.representante_legal := UPPER(BTRIM(NEW.representante_legal));
+                END IF;
             ELSIF TG_TABLE_NAME = 'registros_patronales' THEN
                 IF NEW.registro IS NOT NULL THEN
                     NEW.registro := UPPER(REGEXP_REPLACE(NEW.registro, '[^A-Za-z0-9]', '', 'g'));
@@ -1950,6 +2347,46 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
         DROP TABLE IF EXISTS revision_history.conexiones CASCADE;
         "#,
     );
+
+    // 10. La limpieza/reasignación de duplicados de reportes (cleanup_all_duplicate_reportes_detalles)
+    //     ya NO se ejecuta al arrancar: modificaba asignaciones de obra hechas por el analista.
+    //     Solo corre desde la acción manual "Reparar desde RustFS" (Vista 6).
+
+    // 11. Fase 1 de integridad: tablas/columnas nuevas (idempotente)
+    exec_schema_step(client, "4_fase1_integridad_ddl", SQL_FASE1_DDL)?;
+
+    // 12. Restricciones UNIQUE/CHECK de integridad (solo si no hay datos que las violen)
+    exec_schema_step(client, "4b_fase1_restricciones_guardadas", SQL_FASE1_RESTRICCIONES)?;
+
+    // 13. Migraciones de datos de una sola vez (registradas en public.migraciones_aplicadas)
+    exec_schema_step(client, "5_migraciones_unicas", SQL_MIGRACIONES_UNICAS)?;
+
+    // 14. Correcciones F0: estado/editado/sintética en reportes_nominas (no destructivo)
+    exec_schema_step(client, "6_correcciones_f0_nominas", SQL_CORRECCIONES_F0_NOMINAS)?;
+
+    // 15. Correcciones F1: borrado lógico de obras (activa), CHECK de fechas y referencia en bitácora
+    exec_schema_step(client, "7_correcciones_f1_obras", SQL_CORRECCIONES_F1_OBRAS)?;
+
+    // 16. Correcciones F5: RP de obra normalizado a su revisión y FK nómina→revisión NOT VALID (no destructivo)
+    exec_schema_step(client, "8_correcciones_f5_integridad", SQL_CORRECCIONES_F5_INTEGRIDAD)?;
+
+    // 17. Correcciones F6: estado manual del empleado (D-8 c) e índices de histórico (no destructivo)
+    exec_schema_step(client, "9_correcciones_f6_empleados", SQL_CORRECCIONES_F6_EMPLEADOS)?;
+
+    // 18. Correcciones F7: analistas, autoría (created_by/updated_by/id_analista) y versión de reportes (D-6 a)
+    exec_schema_step(client, "10_correcciones_f7_analistas", SQL_CORRECCIONES_F7_ANALISTAS)?;
+
+    match restricciones_fase1_pendientes(client) {
+        Ok(lista) if !lista.is_empty() => log::warn!(
+            "Restricciones de integridad pendientes (hay duplicados por depurar): {}",
+            lista.join(", ")
+        ),
+        Ok(_) => {}
+        Err(e) => log::warn!(
+            "No se pudo verificar restricciones de integridad pendientes: {}",
+            format_pg_error(&e)
+        ),
+    }
 
     log::info!("Esquema de base de datos verificado y listo.");
     Ok(())
@@ -2061,4 +2498,182 @@ pub fn backfill_empleados_curp_renapo(client: &mut Client) -> Result<usize, post
         log::info!("Se actualizaron {} CURPs oficiales de RENAPO para empleados.", count);
     }
     Ok(count)
+}
+
+/// Devuelve los nombres de las restricciones de integridad de la Fase 1 que aún no existen
+/// (ni como restricción ni como índice). Se usa para avisar en log, sin abortar el arranque.
+/// Genérica sobre `Client` o `Transaction` para poder verificarse dentro de la depuración.
+pub fn restricciones_fase1_pendientes<C: postgres::GenericClient>(
+    client: &mut C,
+) -> Result<Vec<&'static str>, postgres::Error> {
+    let mut pendientes = Vec::new();
+    for nombre in RESTRICCIONES_FASE1 {
+        let row = client.query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = $1::text) \
+             OR EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1::text)",
+            &[&nombre],
+        )?;
+        let existe: bool = row.get(0);
+        if !existe {
+            pendientes.push(nombre);
+        }
+    }
+    Ok(pendientes)
+}
+
+#[cfg(test)]
+mod tests_fase1_ddl {
+    use super::*;
+
+    #[test]
+    fn ddl_contiene_tablas_nuevas_y_no_es_destructivo() {
+        assert!(SQL_FASE1_DDL.contains("CREATE TABLE IF NOT EXISTS public.archivos_cedulas"));
+        assert!(SQL_FASE1_DDL.contains("public.respaldo_depuracion"));
+        assert!(!SQL_FASE1_DDL.contains("RAISE EXCEPTION"));
+        assert!(!SQL_FASE1_DDL.contains("DROP TABLE"));
+    }
+
+    #[test]
+    fn restricciones_son_unicas_no_bloqueantes_y_no_destructivas() {
+        assert!(SQL_FASE1_RESTRICCIONES.contains("NULLS NOT DISTINCT"));
+        assert!(SQL_FASE1_RESTRICCIONES.contains("RAISE WARNING"));
+        assert!(!SQL_FASE1_RESTRICCIONES.contains("RAISE EXCEPTION"));
+        assert!(!SQL_FASE1_RESTRICCIONES.contains("DROP TABLE"));
+    }
+
+    #[test]
+    fn correcciones_f0_nominas_es_aditiva_y_no_destructiva() {
+        for fragmento in [
+            "ADD COLUMN IF NOT EXISTS estado",
+            "ADD COLUMN IF NOT EXISTS editado_usuario",
+            "ADD COLUMN IF NOT EXISTS sintetica",
+            "uq_reportes_nominas_rev_nomina",
+            "RAISE WARNING",
+            "f0_reportes_nominas_marcas",
+        ] {
+            assert!(
+                SQL_CORRECCIONES_F0_NOMINAS.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F0_NOMINAS",
+                fragmento
+            );
+        }
+        for prohibido in ["RAISE EXCEPTION", "DROP TABLE", "DELETE FROM", "TRUNCATE"] {
+            assert!(
+                !SQL_CORRECCIONES_F0_NOMINAS.contains(prohibido),
+                "SQL_CORRECCIONES_F0_NOMINAS no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn correcciones_f1_obras_es_aditiva_y_no_destructiva() {
+        for fragmento in [
+            "activa boolean NOT NULL DEFAULT true",
+            "chk_registros_obras_fechas",
+            "NOT VALID",
+            "reportes_cambios ADD COLUMN IF NOT EXISTS id_registro_obra",
+        ] {
+            assert!(
+                SQL_CORRECCIONES_F1_OBRAS.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F1_OBRAS",
+                fragmento
+            );
+        }
+        for prohibido in [
+            "DELETE ",
+            "DROP TABLE",
+            "DROP COLUMN",
+            "TRUNCATE",
+            "UPDATE public.registros_obras",
+        ] {
+            assert!(
+                !SQL_CORRECCIONES_F1_OBRAS.contains(prohibido),
+                "SQL_CORRECCIONES_F1_OBRAS no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn correcciones_f5_integridad_no_modifica_datos() {
+        for fragmento in ["trg_normalizar_rp_obra", "fk_nominas_revision", "NOT VALID"] {
+            assert!(
+                SQL_CORRECCIONES_F5_INTEGRIDAD.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F5_INTEGRIDAD",
+                fragmento
+            );
+        }
+        // "ON DELETE SET NULL" es requerido por la FK; por eso se prohíbe "DELETE FROM" en lugar de "DELETE ".
+        for prohibido in [
+            "DELETE FROM",
+            "TRUNCATE",
+            "DROP TABLE",
+            "DROP COLUMN",
+            "UPDATE public.",
+        ] {
+            assert!(
+                !SQL_CORRECCIONES_F5_INTEGRIDAD.contains(prohibido),
+                "SQL_CORRECCIONES_F5_INTEGRIDAD no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn correcciones_f6_empleados_es_aditiva() {
+        for fragmento in ["estado_manual", "idx_liquidaciones_empleado"] {
+            assert!(
+                SQL_CORRECCIONES_F6_EMPLEADOS.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F6_EMPLEADOS",
+                fragmento
+            );
+        }
+        for prohibido in [
+            "DELETE FROM",
+            "UPDATE public.",
+            "DROP ",
+            "TRUNCATE",
+        ] {
+            assert!(
+                !SQL_CORRECCIONES_F6_EMPLEADOS.contains(prohibido),
+                "SQL_CORRECCIONES_F6_EMPLEADOS no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn correcciones_f7_analistas_es_aditiva() {
+        for fragmento in ["CREATE TABLE IF NOT EXISTS public.analistas", "version integer NOT NULL DEFAULT 0", "id_analista uuid"] {
+            assert!(
+                SQL_CORRECCIONES_F7_ANALISTAS.contains(fragmento),
+                "falta {} en SQL_CORRECCIONES_F7_ANALISTAS",
+                fragmento
+            );
+        }
+        for prohibido in [
+            "DELETE FROM",
+            "UPDATE public.",
+            "DROP ",
+            "TRUNCATE",
+        ] {
+            assert!(
+                !SQL_CORRECCIONES_F7_ANALISTAS.contains(prohibido),
+                "SQL_CORRECCIONES_F7_ANALISTAS no debe contener {}",
+                prohibido
+            );
+        }
+    }
+
+    #[test]
+    fn nombres_de_restricciones_coinciden_con_el_sql() {
+        for nombre in RESTRICCIONES_FASE1 {
+            assert!(
+                SQL_FASE1_RESTRICCIONES.contains(nombre),
+                "falta {} en SQL_FASE1_RESTRICCIONES",
+                nombre
+            );
+        }
+    }
 }

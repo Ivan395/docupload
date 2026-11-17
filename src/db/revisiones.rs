@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use chrono::NaiveDate;
-use postgres::Client;
+use postgres::{Client, GenericClient};
 use uuid::Uuid;
+
+use crate::revisiones_lote_logic::{EstadoRevisionLote, RevisionExistente, RevisionPrevia};
 
 #[derive(Clone, Debug, Default)]
 pub struct RevisionItem {
@@ -23,6 +25,10 @@ pub struct RevisionItem {
     pub fecha_entrega_revision: Option<NaiveDate>,
     pub fecha_aprobacion_prorroga: Option<NaiveDate>,
     pub fecha_entrega_con_prorroga: Option<NaiveDate>,
+    /// Inicio del periodo revisado (meses que cubre la corrección). None si no se capturó.
+    pub periodo_inicio: Option<NaiveDate>,
+    /// Fin del periodo revisado. None si no se capturó.
+    pub periodo_fin: Option<NaiveDate>,
     pub pidio_prorroga: bool,
     pub obras_count: i32,
     pub created_at: String,
@@ -40,7 +46,8 @@ pub struct RegistroObraItem {
     pub fecha_fin: Option<NaiveDate>,
     pub ubicacion: String,
     pub superficie_construido: f64,
-    pub monto: f64,
+    /// None = monto sin capturar (NULL o 0 en BD).
+    pub monto: Option<f64>,
     pub delegacion: String,
     pub subdelegacion: String,
     pub created_at: String,
@@ -139,8 +146,10 @@ pub fn fetch_revisiones_by_rp(client: &mut Client, id_rp: &str) -> Result<Vec<Re
             r.fecha_aprobacion_prorroga,
             r.fecha_entrega_con_prorroga,
             COALESCE(r.pidio_prorroga, false) AS pidio_prorroga,
-            (SELECT COUNT(*)::int FROM public.registros_obras ro WHERE ro.id_revision = r.id AND COALESCE(ro.creado_usuario, false) = true) AS obras_count,
-            TO_CHAR(r.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at_str
+            (SELECT COUNT(*)::int FROM public.registros_obras ro WHERE ro.id_revision = r.id AND COALESCE(ro.creado_usuario, false) = true AND ro.activa = true) AS obras_count,
+            TO_CHAR(r.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at_str,
+            r.periodo_inicio,
+            r.periodo_fin
         FROM public.revisiones r
         LEFT JOIN public.conceptos c ON c.id = r.id_concepto_diferencia
         LEFT JOIN public.estatus e_imss ON e_imss.id = r.id_estatus_imss
@@ -174,6 +183,8 @@ pub fn fetch_revisiones_by_rp(client: &mut Client, id_rp: &str) -> Result<Vec<Re
         let pidio_pror: bool = row.get(18);
         let obras_count: i32 = row.get(19);
         let created_at: String = row.get(20);
+        let periodo_ini: Option<NaiveDate> = row.get(21);
+        let periodo_fin_val: Option<NaiveDate> = row.get(22);
 
         list.push(RevisionItem {
             id: id_u.to_string(),
@@ -194,6 +205,8 @@ pub fn fetch_revisiones_by_rp(client: &mut Client, id_rp: &str) -> Result<Vec<Re
             fecha_entrega_revision: f_ent_rev,
             fecha_aprobacion_prorroga: f_aprob_pror,
             fecha_entrega_con_prorroga: f_ent_pror,
+            periodo_inicio: periodo_ini,
+            periodo_fin: periodo_fin_val,
             pidio_prorroga: pidio_pror,
             obras_count,
             created_at,
@@ -218,13 +231,13 @@ pub fn fetch_obras_by_revision(client: &mut Client, id_revision: &str) -> Result
             fecha_fin,
             COALESCE(ubicacion, '') AS ubicacion,
             COALESCE(superficie_construido, 0.0) AS superficie_construido,
-            COALESCE(monto, 0.0) AS monto,
+            monto,
             COALESCE(delegacion, '') AS delegacion,
             COALESCE(subdelegacion, '') AS subdelegacion,
             TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at_str,
             COALESCE(creado_usuario, false) AS creado_usuario
         FROM public.registros_obras
-        WHERE id_revision = $1 AND COALESCE(creado_usuario, false) = true
+        WHERE id_revision = $1 AND COALESCE(creado_usuario, false) = true AND activa = true
         ORDER BY created_at DESC;
     "#;
 
@@ -242,7 +255,8 @@ pub fn fetch_obras_by_revision(client: &mut Client, id_revision: &str) -> Result
         let fecha_fin: Option<NaiveDate> = row.get(7);
         let ubicacion: String = row.get(8);
         let superficie: f64 = row.get(9);
-        let monto: f64 = row.get(10);
+        let monto_db: Option<f64> = row.get(10);
+        let monto = monto_db.filter(|m| *m > 0.0);
         let delegacion: String = row.get(11);
         let subdelegacion: String = row.get(12);
         let created_at: String = row.get(13);
@@ -324,10 +338,15 @@ pub fn parse_optional_uuid(val: Option<&str>) -> Option<Uuid> {
 }
 
 pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<RevisionItem, String> {
+    create_revision_tx(client, item)
+}
+
+/// Versión genérica de `create_revision` para ejecutar dentro de una transacción.
+pub fn create_revision_tx<C: GenericClient>(c: &mut C, item: &RevisionItem) -> Result<RevisionItem, String> {
     let rp_uuid = Uuid::parse_str(&item.id_registro_patronal)
         .map_err(|e| format!("ID de Registro Patronal inválido: {}", e))?;
 
-    let rp_row = client
+    let rp_row = c
         .query_opt("SELECT registro FROM public.registros_patronales WHERE id = $1", &[&rp_uuid])
         .map_err(|e| format!("Error verificando registro patronal: {}", e))?;
     if let Some(r) = rp_row {
@@ -358,8 +377,11 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
             fecha_entrega_revision,
             fecha_aprobacion_prorroga,
             fecha_entrega_con_prorroga,
-            pidio_prorroga
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            pidio_prorroga,
+            periodo_inicio,
+            periodo_fin,
+            created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         RETURNING id, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS');
     "#;
 
@@ -370,8 +392,9 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
     } else {
         Some(clean_folio.clone())
     };
+    let autor = crate::db::analistas::id_analista_actual();
 
-    let row = client
+    let row = c
         .query_one(
             query,
             &[
@@ -390,6 +413,9 @@ pub fn create_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
                 &item.fecha_aprobacion_prorroga,
                 &item.fecha_entrega_con_prorroga,
                 &item.pidio_prorroga,
+                &item.periodo_inicio,
+                &item.periodo_fin,
+                &autor,
             ],
         )
         .map_err(|e| {
@@ -441,7 +467,9 @@ pub fn update_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
             fecha_entrega_revision = $12,
             fecha_aprobacion_prorroga = $13,
             fecha_entrega_con_prorroga = $14,
-            pidio_prorroga = $15
+            pidio_prorroga = $15,
+            periodo_inicio = $16,
+            periodo_fin = $17
         WHERE id = $1;
     "#;
 
@@ -472,6 +500,8 @@ pub fn update_revision(client: &mut Client, item: &RevisionItem) -> Result<Revis
                 &item.fecha_aprobacion_prorroga,
                 &item.fecha_entrega_con_prorroga,
                 &item.pidio_prorroga,
+                &item.periodo_inicio,
+                &item.periodo_fin,
             ],
         )
         .map_err(|e| {
@@ -535,24 +565,44 @@ pub fn delete_revision(client: &mut Client, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Obtiene el registro patronal al que pertenece una revisión. Error si la revisión no existe.
+fn fetch_rp_de_revision<C: GenericClient>(c: &mut C, rev_uuid: &Uuid) -> Result<Uuid, String> {
+    let row = c
+        .query_opt("SELECT id_registro_patronal FROM public.revisiones WHERE id = $1", &[rev_uuid])
+        .map_err(|e| format!("Error consultando la revisión: {}", e))?
+        .ok_or_else(|| "La revisión de la obra no existe.".to_string())?;
+    Ok(row.get(0))
+}
+
 pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<RegistroObraItem, String> {
+    create_obra_tx(client, item)
+}
+
+/// Versión genérica de `create_obra` para ejecutar dentro de una transacción.
+pub fn create_obra_tx<C: GenericClient>(c: &mut C, item: &RegistroObraItem) -> Result<RegistroObraItem, String> {
     let rev_uuid = Uuid::parse_str(&item.id_revision)
         .map_err(|e| format!("ID de Revisión inválido: {}", e))?;
     let rp_uuid = Uuid::parse_str(&item.id_registro_patronal)
         .map_err(|e| format!("ID de Registro Patronal inválido: {}", e))?;
 
-    let today = chrono::Local::now().date_naive();
-    let f_ini = item.fecha_inicio.unwrap_or(today);
-    let f_fin = item.fecha_fin.unwrap_or(today);
+    let valida = crate::validation::validar_obra(&item.numero, item.fecha_inicio, item.fecha_fin, item.monto)
+        .map_err(|errs| errs.join(" "))?;
+    let clean_numero = valida.numero.clone();
+    let f_ini = valida.fecha_inicio;
+    let f_fin = valida.fecha_fin;
+    let monto = valida.monto;
 
-    let clean_numero = item.numero.trim().to_uppercase();
-    crate::validation::validate_registro_obra(&clean_numero)
-        .map_err(|e| format!("Registro de obra inválido: {}", e))?;
+    let rp_rev = fetch_rp_de_revision(c, &rev_uuid)?;
+    if rp_uuid != rp_rev {
+        return Err("El registro patronal de la obra no coincide con el de la revisión.".to_string());
+    }
+
     let clean_clase = item.clase.trim().to_uppercase();
     let clean_tipo_obra = item.tipo_obra.trim().to_uppercase();
     let clean_ubicacion = item.ubicacion.trim().to_uppercase();
     let clean_delegacion = item.delegacion.trim().to_uppercase();
     let clean_subdelegacion = item.subdelegacion.trim().to_uppercase();
+    let autor = crate::db::analistas::id_analista_actual();
 
     let query = r#"
         INSERT INTO public.registros_obras (
@@ -568,8 +618,9 @@ pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
             monto,
             delegacion,
             subdelegacion,
-            creado_usuario
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true)
+            creado_usuario,
+            created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, $13)
         ON CONFLICT (id_revision, numero) DO UPDATE SET
             clase = EXCLUDED.clase,
             tipo_obra = EXCLUDED.tipo_obra,
@@ -580,11 +631,13 @@ pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
             monto = EXCLUDED.monto,
             delegacion = EXCLUDED.delegacion,
             subdelegacion = EXCLUDED.subdelegacion,
-            creado_usuario = true
+            creado_usuario = true,
+            activa = true,
+            updated_by = EXCLUDED.created_by
         RETURNING id, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS');
     "#;
 
-    let row = client
+    let row = c
         .query_one(
             query,
             &[
@@ -597,9 +650,10 @@ pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
                 &f_fin,
                 &clean_ubicacion,
                 &item.superficie_construido,
-                &item.monto,
+                &monto,
                 &clean_delegacion,
                 &clean_subdelegacion,
+                &autor,
             ],
         )
         .map_err(|e| {
@@ -613,12 +667,13 @@ pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
     crate::app_logger::log_db_write(
         "public.registros_obras",
         "INSERT",
-        &format!("id={}, id_revision={}, numero='{}', clase='{}', tipo='{}', monto={:?}", new_id, rev_uuid, clean_numero, clean_clase, clean_tipo_obra, item.monto),
+        &format!("id={}, id_revision={}, numero='{}', clase='{}', tipo='{}', monto={:?}", new_id, rev_uuid, clean_numero, clean_clase, clean_tipo_obra, monto),
         query,
     );
 
     let mut res = item.clone();
     res.id = new_id.to_string();
+    res.monto = monto;
     res.numero = clean_numero;
     res.clase = clean_clase;
     res.tipo_obra = clean_tipo_obra;
@@ -633,16 +688,28 @@ pub fn create_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
 }
 
 pub fn update_obra(client: &mut Client, item: &RegistroObraItem) -> Result<RegistroObraItem, String> {
+    update_obra_tx(client, item)
+}
+
+/// Versión genérica de `update_obra` para ejecutar dentro de una transacción.
+pub fn update_obra_tx<C: GenericClient>(c: &mut C, item: &RegistroObraItem) -> Result<RegistroObraItem, String> {
     let obra_uuid = Uuid::parse_str(&item.id)
         .map_err(|e| format!("ID de Obra inválido: {}", e))?;
 
-    let today = chrono::Local::now().date_naive();
-    let f_ini = item.fecha_inicio.unwrap_or(today);
-    let f_fin = item.fecha_fin.unwrap_or(today);
+    let valida = crate::validation::validar_obra(&item.numero, item.fecha_inicio, item.fecha_fin, item.monto)
+        .map_err(|errs| errs.join(" "))?;
+    let clean_numero = valida.numero.clone();
+    let f_ini = valida.fecha_inicio;
+    let f_fin = valida.fecha_fin;
+    let monto = valida.monto;
 
-    let clean_numero = item.numero.trim().to_uppercase();
-    crate::validation::validate_registro_obra(&clean_numero)
-        .map_err(|e| format!("Registro de obra inválido: {}", e))?;
+    let id_revision: Uuid = c
+        .query_opt("SELECT id_revision FROM public.registros_obras WHERE id = $1", &[&obra_uuid])
+        .map_err(|e| format!("Error consultando registro de obra: {}", e))?
+        .ok_or_else(|| "La obra no existe o fue eliminada.".to_string())?
+        .get(0);
+    let rp_rev = fetch_rp_de_revision(c, &id_revision)?;
+
     let clean_clase = item.clase.trim().to_uppercase();
     let clean_tipo_obra = item.tipo_obra.trim().to_uppercase();
     let clean_ubicacion = item.ubicacion.trim().to_uppercase();
@@ -661,11 +728,14 @@ pub fn update_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
             monto = $9,
             delegacion = $10,
             subdelegacion = $11,
-            creado_usuario = true
+            creado_usuario = true,
+            id_registro_patronal = $12,
+            updated_by = $13
         WHERE id = $1;
     "#;
+    let autor = crate::db::analistas::id_analista_actual();
 
-    client
+    let filas = c
         .execute(
             query,
             &[
@@ -677,24 +747,30 @@ pub fn update_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
                 &f_fin,
                 &clean_ubicacion,
                 &item.superficie_construido,
-                &item.monto,
+                &monto,
                 &clean_delegacion,
                 &clean_subdelegacion,
+                &rp_rev,
+                &autor,
             ],
         )
         .map_err(|e| {
             crate::app_logger::log_db_simple_error("public.registros_obras", "UPDATE", &e.to_string());
             format!("Error al actualizar registro de obra: {}", e)
         })?;
+    if filas == 0 {
+        return Err("La obra no existe o fue eliminada.".to_string());
+    }
 
     crate::app_logger::log_db_write(
         "public.registros_obras",
         "UPDATE",
-        &format!("id={}, numero='{}', clase='{}', tipo='{}', monto={:?}", obra_uuid, clean_numero, clean_clase, clean_tipo_obra, item.monto),
+        &format!("id={}, numero='{}', clase='{}', tipo='{}', monto={:?}", obra_uuid, clean_numero, clean_clase, clean_tipo_obra, monto),
         query,
     );
 
     let mut res = item.clone();
+    res.monto = monto;
     res.numero = clean_numero;
     res.clase = clean_clase;
     res.tipo_obra = clean_tipo_obra;
@@ -707,21 +783,142 @@ pub fn update_obra(client: &mut Client, item: &RegistroObraItem) -> Result<Regis
     Ok(res)
 }
 
+/// Borrado lógico de una obra (desactiva la obra y la quita de los tramos; ver `obras_ops`).
 pub fn delete_obra(client: &mut Client, id: &str) -> Result<(), String> {
     let obra_uuid = Uuid::parse_str(id).map_err(|e| format!("ID de Obra inválido: {}", e))?;
-    client
-        .execute("DELETE FROM public.registros_obras WHERE id = $1", &[&obra_uuid])
-        .map_err(|e| {
-            crate::app_logger::log_db_simple_error("public.registros_obras", "DELETE", &e.to_string());
-            format!("Error al eliminar registro de obra: {}", e)
-        })?;
+    crate::db::obras_ops::desactivar_obra(client, obra_uuid).map(|_| ())?;
     crate::app_logger::log_db_write(
         "public.registros_obras",
-        "DELETE",
+        "DESACTIVAR",
         &format!("id={}", obra_uuid),
-        "DELETE FROM public.registros_obras WHERE id = $1",
+        "UPDATE public.registros_obras SET activa = false, desactivada_at = now() WHERE id = $1",
     );
     Ok(())
+}
+
+/// Revisiones del registro patronal (nombre y folio) para clasificar el lote de alta masiva.
+pub fn fetch_revisiones_existentes<C: GenericClient>(c: &mut C, id_rp: Uuid) -> Result<Vec<RevisionExistente>, String> {
+    let rows = c
+        .query(
+            "SELECT TRIM(nombre), TRIM(folio) FROM public.revisiones WHERE id_registro_patronal = $1",
+            &[&id_rp],
+        )
+        .map_err(|e| format!("Error consultando revisiones existentes: {}", e))?;
+    Ok(rows
+        .iter()
+        .map(|r| RevisionExistente {
+            nombre: r.get(0),
+            folio: r.get(1),
+        })
+        .collect())
+}
+
+/// Id del concepto de diferencia por nombre (sin distinguir mayúsculas ni espacios).
+pub fn buscar_concepto_id<C: GenericClient>(c: &mut C, nombre: &str) -> Result<Option<Uuid>, String> {
+    let row = c
+        .query_opt(
+            "SELECT id FROM public.conceptos WHERE UPPER(TRIM(nombre)) = UPPER(TRIM($1)) LIMIT 1",
+            &[&nombre],
+        )
+        .map_err(|e| format!("Error buscando concepto: {}", e))?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// Id del estatus por nombre (sin distinguir mayúsculas ni espacios).
+pub fn buscar_estatus_id<C: GenericClient>(c: &mut C, nombre: &str) -> Result<Option<Uuid>, String> {
+    let row = c
+        .query_opt(
+            "SELECT id FROM public.estatus WHERE UPPER(TRIM(nombre)) = UPPER(TRIM($1)) LIMIT 1",
+            &[&nombre],
+        )
+        .map_err(|e| format!("Error buscando estatus: {}", e))?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResumenLoteRevisiones {
+    /// Nombres (normalizados) de las revisiones creadas.
+    pub creadas: Vec<String>,
+    pub omitidas: usize,
+}
+
+/// Crea las revisiones marcadas para incluir dentro de la transacción recibida. Cualquier error
+/// aborta el lote completo (el llamador debe revertir la transacción).
+pub fn crear_revisiones_lote_tx(
+    tx: &mut postgres::Transaction,
+    id_rp: Uuid,
+    filas: &[RevisionPrevia],
+    inhabiles: &HashSet<NaiveDate>,
+) -> Result<ResumenLoteRevisiones, String> {
+    let mut resumen = ResumenLoteRevisiones::default();
+    for p in filas {
+        if !p.incluir {
+            resumen.omitidas += 1;
+            continue;
+        }
+        let fila = &p.fila;
+        if p.estado != EstadoRevisionLote::Valida {
+            return Err(format!(
+                "Renglón {}: la fila no es válida y no puede crearse",
+                fila.renglon
+            ));
+        }
+
+        let concepto = fila.concepto.trim();
+        let id_concepto = if concepto.is_empty() {
+            None
+        } else {
+            buscar_concepto_id(tx, concepto)?
+        };
+        let estatus = fila.estatus.trim();
+        let id_estatus = if estatus.is_empty() {
+            None
+        } else {
+            buscar_estatus_id(tx, estatus)?
+        };
+
+        let item = RevisionItem {
+            id_registro_patronal: id_rp.to_string(),
+            id_concepto_diferencia: id_concepto.map(|u| u.to_string()),
+            concepto_diferencia: if id_concepto.is_some() {
+                concepto.to_string()
+            } else {
+                "Sin Concepto Asignado".to_string()
+            },
+            id_estatus: id_estatus.map(|u| u.to_string()),
+            estatus: estatus.to_string(),
+            nombre: fila.nombre.clone(),
+            folio: fila.folio.clone().unwrap_or_default(),
+            fecha_aprobacion_imss: fila.fecha_aprobacion_imss,
+            fecha_maxima_entrega_revision: fila
+                .fecha_aprobacion_imss
+                .map(|a| add_business_days(a, 40, Some(inhabiles))),
+            fecha_entrega_revision: fila.fecha_entrega_revision,
+            periodo_inicio: fila.periodo_inicio,
+            periodo_fin: fila.periodo_fin,
+            ..Default::default()
+        };
+
+        let creada = create_revision_tx(tx, &item).map_err(|e| format!("Renglón {}: {}", fila.renglon, e))?;
+        resumen.creadas.push(creada.nombre);
+    }
+    Ok(resumen)
+}
+
+/// Envoltorio de `crear_revisiones_lote_tx`: abre la transacción y hace COMMIT si todo sale bien.
+pub fn crear_revisiones_lote(
+    client: &mut Client,
+    id_rp: Uuid,
+    filas: &[RevisionPrevia],
+    inhabiles: &HashSet<NaiveDate>,
+) -> Result<ResumenLoteRevisiones, String> {
+    let mut tx = client
+        .transaction()
+        .map_err(|e| format!("No se pudo iniciar la transacción: {}", e))?;
+    let resumen = crear_revisiones_lote_tx(&mut tx, id_rp, filas, inhabiles)?;
+    tx.commit()
+        .map_err(|e| format!("No se pudo confirmar el lote de revisiones: {}", e))?;
+    Ok(resumen)
 }
 
 #[cfg(test)]
@@ -815,7 +1012,7 @@ mod tests {
             fecha_fin: f_fin,
             ubicacion: "".to_string(),
             superficie_construido: 0.0,
-            monto: 0.0,
+            monto: None,
             delegacion: "".to_string(),
             subdelegacion: "".to_string(),
             creado_usuario: true,
@@ -823,7 +1020,7 @@ mod tests {
         };
 
         // Sin monto total se alerta para el límite del 18%
-        let necesita_aviso_monto = item.monto <= 0.0;
+        let necesita_aviso_monto = item.monto.map_or(true, |m| m <= 0.0);
         assert!(necesita_aviso_monto, "Sin monto capturado debe emitir aviso para cálculo del 18%");
     }
 

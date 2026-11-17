@@ -46,16 +46,36 @@ pub mod nominas_upload_view_logic;
 pub mod nominas_view_logic;
 pub mod rustfs;
 pub mod reporte_view_logic;
+pub mod asignacion_view_logic;
+mod asistente_asignacion;
+mod carga_masiva;
+mod asignacion_obra_logic;
+mod obras_lote_logic;
+// Alta masiva de obras (ADD-01/ADD-02)
+mod obras_lote_view_logic;
+// Vista Empleados: estado laboral, filtros e histórico empleado × obra (D-8 / D-10 b)
+mod empleados_view_logic;
+// Selector de analista de la sesión (ADD-05, D-6 a)
+mod analista_view_logic;
+mod revisiones_lote_logic;
+// Alta masiva de revisiones (ADD-03)
+mod revisiones_lote_view_logic;
+mod entregable_logic;
+mod operacion_ui;
 pub mod sat;
 pub mod sua_export;
 pub mod updater;
 pub mod validation;
+#[cfg(test)]
+mod pruebas_golden_excel;
+#[cfg(test)] mod captura_ui;
 
 use crate::calendario_view_logic::*;
 use crate::db::{create_pool, ensure_schema, DbPool, CedulasDbStats};
 use crate::db::catalogos::*;
 use crate::db::revisiones::*;
 use crate::db::nominas_reporte::check_all_data_exists;
+use crate::db::ingesta::{ArchivoLote, ArchivoParaRegistrar, tipo_archivo_desde_empleados};
 use crate::cedulas::view_logic::*;
 use crate::reporte_view_logic::*;
 use crate::nominas_view_logic::*;
@@ -167,6 +187,18 @@ fn update_cedulas_ui(ui: &MainWindow, entries: &[SelectedFileEntry]) {
         .collect();
 
     app_data.set_cedulas_files(ModelRc::new(VecModel::from(models)));
+}
+
+/// Texto del efecto de una resincronización del universo de la revisión; vacío si no hubo cambios.
+fn mensaje_cambio_universo(c: &crate::db::obras_ops::CambioUniverso) -> String {
+    if c.a_fuera == 0 && c.a_activo == 0 {
+        String::new()
+    } else {
+        format!(
+            "Reporte de liquidaciones: {} fila(s) pasaron a fuera de periodo, {} regresaron al periodo.",
+            c.a_fuera, c.a_activo
+        )
+    }
 }
 
 pub fn show_toast_message(ui: &MainWindow, message: &str) {
@@ -603,6 +635,7 @@ fn load_clientes_ui(ui: &MainWindow, pool: &DbPool) {
                 id: c.id.into(),
                 nombre: c.nombre.into(),
                 razon_social: c.razon_social.into(),
+                representante_legal: c.representante_legal.into(),
                 rfc: c.rfc.into(),
                 curp: c.curp.into(),
                 tipo_persona: c.tipo_persona.into(),
@@ -706,12 +739,21 @@ fn load_empleados_ui(ui: &MainWindow, pool: &DbPool, client_id: &str) {
     let app_data = ui.global::<AppData>();
     let search = app_data.get_empleados_search().to_lowercase();
     let only_active = app_data.get_empleados_filter_active_only();
+    let filtro = app_data.get_empleados_filtro();
 
     let models: Vec<EmpleadoData> = emps
         .into_iter()
         .filter(|emp| {
-            if only_active && !emp.esta_activo {
+            // D-8: el filtro de activos usa el estado efectivo (cédula / fijado a mano).
+            let (activo_efectivo, _) = estado_empleado_efectivo(emp);
+            if only_active && !activo_efectivo {
                 return false;
+            }
+            match filtro {
+                1 if activo_efectivo => return false,
+                2 if emp.obras_actuales != 0 => return false,
+                3 if emp.obras_actuales < 2 => return false,
+                _ => {}
             }
             if !search.is_empty() {
                 let n = emp.nombre.to_lowercase();
@@ -730,7 +772,13 @@ fn load_empleados_ui(ui: &MainWindow, pool: &DbPool, client_id: &str) {
             } else {
                 "$0.00".to_string()
             };
+            let (activo_efectivo, estado_texto) = estado_empleado_efectivo(&emp);
             EmpleadoData {
+                estado_texto: estado_texto.into(),
+                estado_es_baja: !activo_efectivo,
+                estado_manual: emp.estado_manual,
+                obras_actuales: emp.obras_actuales as i32,
+                ultima_obra: emp.ultima_obra.clone().into(),
                 id: emp.id.into(),
                 id_cliente: emp.id_cliente.into(),
                 cliente_nombre: emp.cliente_nombre.into(),
@@ -875,6 +923,8 @@ fn load_revisiones_ui(ui: &MainWindow, pool: &DbPool, rp_id: &str) {
                 fecha_entrega_revision: format_date_opt(r.fecha_entrega_revision).into(),
                 fecha_aprobacion_prorroga: format_date_opt(r.fecha_aprobacion_prorroga).into(),
                 fecha_entrega_con_prorroga: format_date_opt(r.fecha_entrega_con_prorroga).into(),
+                periodo_inicio: r.periodo_inicio.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default().into(),
+                periodo_fin: r.periodo_fin.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default().into(),
                 pidio_prorroga: r.pidio_prorroga,
                 obras_count: r.obras_count,
                 created_at_str: r.created_at.into(),
@@ -920,7 +970,7 @@ fn load_obras_ui(ui: &MainWindow, pool: &DbPool, revision_id: &str) {
 
     for o in &obras {
         total_sup += o.superficie_construido;
-        total_monto += o.monto;
+        total_monto += o.monto.unwrap_or(0.0);
     }
 
     app_data.set_obras_superficie_total(total_sup as f32);
@@ -971,8 +1021,11 @@ fn load_obras_ui(ui: &MainWindow, pool: &DbPool, revision_id: &str) {
                 ubicacion: o.ubicacion.into(),
                 superficie_construida: o.superficie_construido as f32,
                 superficie_construida_str: format!("{:.2} m²", o.superficie_construido).into(),
-                monto: o.monto as f32,
-                monto_str: format!("${} MXN", format_monto_mexico(o.monto)).into(),
+                monto: o.monto.unwrap_or(0.0) as f32,
+                monto_str: match o.monto {
+                    Some(m) => format!("${} MXN", format_monto_mexico(m)).into(),
+                    None => "Sin monto".into(),
+                },
                 delegacion: o.delegacion.into(),
                 subdelegacion: o.subdelegacion.into(),
                 created_at_str: o.created_at.into(),
@@ -1042,7 +1095,7 @@ fn update_global_stats(ui: &MainWindow, pool: &DbPool) {
                 (SELECT COUNT(*) FROM public.registros_patronales)::int,
                 (SELECT COUNT(*) FROM public.empleados WHERE COALESCE(esta_activo, true) = true)::int,
                 (SELECT COUNT(*) FROM public.revisiones)::int,
-                (SELECT COUNT(*) FROM public.registros_obras WHERE COALESCE(creado_usuario, false) = true)::int
+                (SELECT COUNT(*) FROM public.registros_obras WHERE COALESCE(creado_usuario, false) = true AND activa = true)::int
             "#,
             &[],
         ) {
@@ -1465,6 +1518,21 @@ fn spawn_cedulas_worker(
     });
 }
 
+/// Archivo nuevo de cédulas subido a staging en este lote, pendiente de registrar/guardar.
+#[derive(Debug, Clone)]
+pub struct ArchivoPendienteCedula {
+    /// final_fname con hash: coincide con el file_name que el parser asigna a los trabajadores
+    pub nombre_archivo: String,
+    pub nombre_original: String,
+    pub sha256: String,
+    pub anio: i16,
+    pub mes: i16,
+    /// Clave definitiva en RustFS (sin prefijo .staging_)
+    pub clave_final: String,
+    /// Clave en RustFS dentro del prefijo .staging_<batch_id>/
+    pub clave_staging: String,
+}
+
 #[derive(Clone, Default)]
 pub struct CedulasViewState {
     pub files: Vec<CedulaFileCardInfo>,
@@ -1483,6 +1551,12 @@ pub struct CedulasViewState {
     pub pending_staged_local_paths: Vec<PathBuf>,
     pub pending_overwrite_months: Vec<(String, String)>,
     pub pending_overwrite_old_files: Vec<String>,
+    /// Tarjetas de archivos previos ocultadas por un posible reemplazo; se restauran si se elige "Fusionar"
+    pub pending_overwrite_old_cards: Vec<CedulaFileCardInfo>,
+    /// Cliente, registro patronal y revisión usados al subir a staging (necesarios para revertirlo)
+    pub pending_staging_ctx: Option<(String, String, String)>,
+    /// Archivos nuevos en staging de la última subida, pendientes de registrar en BD y guardar
+    pub pending_archivos: Vec<ArchivoPendienteCedula>,
 }
 
 fn update_cedulas_view_file_list_ui(ui: &MainWindow, state: &CedulasViewState) {
@@ -1959,9 +2033,13 @@ fn handle_cedulas_upload_and_inspect(
         //    sin modificar ni borrar datos definitivos hasta que PostgreSQL confirme el COMMIT.
         let batch_id = Uuid::now_v7().simple().to_string();
         let mut overwritten_count = 0;
-        let mut new_count = 0;
         let mut cleaned_months_in_batch: HashSet<(String, String)> = HashSet::new();
-        let mut batch_month_file_counters: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+        // Deduplicación por SHA-256: conexión de solo lectura para consultar la BD antes de subir
+        let id_rp_dedupe: Option<Uuid> = Uuid::parse_str(&rp_id).ok();
+        let mut conn_dedupe = pool_clone.as_ref().and_then(|p| p.get().ok());
+        let mut hashes_lote: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut omitidos: Vec<String> = Vec::new();
+        let mut pendientes: Vec<ArchivoPendienteCedula> = Vec::new();
         let mut staged_local_paths: Vec<PathBuf> = Vec::new();
         let mut overwrite_months: Vec<(String, String)> = Vec::new();
         let mut overwrite_old_files: Vec<String> = Vec::new();
@@ -2021,6 +2099,34 @@ fn handle_cedulas_upload_and_inspect(
                 continue;
             }
 
+            // Identificación por hash: omitir idénticos dentro del lote o ya cargados en la BD
+            let sha = crate::cedulas::almacen::sha256_hex(&data);
+            if let Some(primero) = hashes_lote.get(&sha) {
+                omitidos.push(format!("{}: idéntico a '{}' en esta misma selección", orig_display, primero));
+                continue;
+            }
+            if let (Some(conn), Some(id_rp)) = (conn_dedupe.as_mut(), id_rp_dedupe) {
+                let lote = crate::db::ingesta::ArchivoLote {
+                    nombre_original: orig_display.clone(),
+                    sha256: sha.clone(),
+                    tipo: "SUA".into(),
+                    anio: anio_str.parse::<i16>().unwrap_or(0),
+                    mes: crate::cedulas::business::month_to_num(&mes_str) as i16,
+                    trabajadores: 0,
+                    paginas: None,
+                };
+                match crate::db::ingesta::clasificar_lote(&mut **conn, id_rp, std::slice::from_ref(&lote)) {
+                    Ok(estados) => {
+                        if let Some(crate::db::ingesta::EstadoArchivoLote::IdenticoYaCargado { nombre_previo, .. }) = estados.first() {
+                            omitidos.push(format!("{}: ya estaba cargado como '{}'", orig_display, nombre_previo));
+                            continue;
+                        }
+                    }
+                    Err(e) => log::warn!("No se pudo clasificar {} por hash en BD: {}", orig_display, e),
+                }
+            }
+            hashes_lote.insert(sha.clone(), orig_display.clone());
+
             let month_key = (anio_str.clone(), mes_str.clone());
             if cleaned_months_in_batch.insert(month_key.clone()) {
                 // Primera vez que se toca este mes en el lote actual: verificar si existían archivos previos en RustFS
@@ -2040,21 +2146,10 @@ fn handle_cedulas_upload_and_inspect(
                     for old_card in existing_matches {
                         overwrite_old_files.push(old_card.filename.clone());
                     }
-                } else {
-                    new_count += 1;
                 }
-            } else {
-                new_count += 1;
             }
 
-            let file_seq = batch_month_file_counters.entry(month_key).or_insert(0);
-            *file_seq += 1;
-            let final_fname = if *file_seq == 1 {
-                std_fname.clone()
-            } else {
-                format!("{}__{}.pdf", std_fname.trim_end_matches(".pdf"), file_seq)
-            };
-
+            let final_fname = crate::cedulas::almacen::nombre_estandar_con_hash(&std_fname, &sha);
             let structured_rel_path = format!("{}/{}/{}", anio_str, mes_str, final_fname);
 
             let _ = prog_tx.send(CedulaProgressUpdate {
@@ -2066,7 +2161,7 @@ fn handle_cedulas_upload_and_inspect(
             });
 
             // Guardar primero en staging de RustFS (.staging_<batch_id>/Año/Mes/Archivo.pdf)
-            if let Err(e) = crate::rustfs::upload_staging_file_to_rustfs(
+            let clave_staging = match crate::rustfs::upload_staging_file_to_rustfs(
                 &c_nom,
                 &r_reg,
                 &rev_nom,
@@ -2075,6 +2170,8 @@ fn handle_cedulas_upload_and_inspect(
                 &structured_rel_path,
                 &data,
             ) {
+                Ok(clave) => clave,
+                Err(e) => {
                 log::error!("Error subiendo archivo {} a staging de RustFS: {}", structured_rel_path, e);
                 let _ = crate::rustfs::rollback_staging_files_in_rustfs(
                     &c_nom,
@@ -2102,7 +2199,8 @@ fn handle_cedulas_upload_and_inspect(
                     }
                 });
                 return;
-            }
+                }
+            };
 
             let local_dest = cache_dir.join("cedulas_de_cuotas").join(&structured_rel_path);
             if let Some(parent) = local_dest.parent() {
@@ -2110,6 +2208,23 @@ fn handle_cedulas_upload_and_inspect(
             }
             if std::fs::write(&local_dest, &data).is_ok() {
                 staged_local_paths.push(local_dest.clone());
+                // Clave definitiva con el mismo layout que usa commit_staging_files_in_rustfs
+                let clave_final = format!(
+                    "{}/{}/{}/Cedulas_de_cuotas/{}",
+                    crate::rustfs::sanitize_path_component(&c_nom),
+                    crate::rustfs::sanitize_path_component(&r_reg),
+                    crate::rustfs::sanitize_path_component(&rev_nom),
+                    crate::rustfs::sanitize_relative_path(&structured_rel_path),
+                );
+                pendientes.push(ArchivoPendienteCedula {
+                    nombre_archivo: final_fname.clone(),
+                    nombre_original: orig_display.clone(),
+                    sha256: sha.clone(),
+                    anio: anio_str.parse::<i16>().unwrap_or(0),
+                    mes: crate::cedulas::business::month_to_num(&mes_str) as i16,
+                    clave_final,
+                    clave_staging,
+                });
                 let exp_rfc_opt = if !c_rfc.trim().is_empty() { Some(c_rfc.trim()) } else { None };
                 let exp_rp_opt = if !r_reg.trim().is_empty() && r_reg != "GENERAL" { Some(r_reg.trim()) } else { None };
                 let mut card = crate::cedulas::view_logic::inspect_cedula_file_with_context(
@@ -2124,15 +2239,59 @@ fn handle_cedulas_upload_and_inspect(
 
         // Combinar tarjetas previas (excluyendo las que serán sobreescritas) con las tarjetas en staging
         let old_set: HashSet<String> = overwrite_old_files.iter().cloned().collect();
-        let mut final_cards: Vec<CedulaFileCardInfo> = existing_cards
+        let (old_cards, mut final_cards): (Vec<CedulaFileCardInfo>, Vec<CedulaFileCardInfo>) = existing_cards
             .into_iter()
-            .filter(|c| !old_set.contains(&c.filename))
-            .collect();
+            .partition(|c| old_set.contains(&c.filename));
         final_cards.extend(staged_cards);
+        drop(conn_dedupe);
 
         drop(prog_tx);
 
-        // 4. Actualizar la interfaz Slint e iniciar procesamiento y guardado persistente atómico
+        // Impacto del reemplazo: consulta por mes en este hilo de fondo (nunca en el hilo de UI)
+        let overwrite_summary: String = if overwrite_months.is_empty() {
+            String::new()
+        } else {
+            let mut lines: Vec<String> = Vec::new();
+            let mut db_conn = pool_clone.as_ref().and_then(|p| p.get().ok());
+            let rev_uuid_opt = Uuid::parse_str(&revision_id).ok();
+            for (anio, mes) in &overwrite_months {
+                let mes_up = mes.trim().to_uppercase();
+                let etiqueta = format!("{} {}", mes_up, anio);
+                let line = match (db_conn.as_mut(), rev_uuid_opt, anio.trim().parse::<i16>()) {
+                    (Some(client), Some(rev_uuid), Ok(anio_num)) => {
+                        let mes_num = crate::cedulas::business::month_to_num(&mes_up) as i16;
+                        match client.query_one(
+                            "SELECT COUNT(DISTINCT rl.id)::bigint,
+                                    COUNT(rdl.id) FILTER (WHERE rdl.id_registro_obra IS NOT NULL)::bigint
+                             FROM public.reportes_liquidaciones rl
+                             LEFT JOIN public.reportes_detalles_liquidaciones rdl ON rdl.id_reporte_liquidacion = rl.id
+                             WHERE rl.id_revision = $1 AND rl.anio_periodo = $2
+                               AND (UPPER(TRIM(rl.mes_periodo)) = $3 OR rl.mes_periodo_int = $4)",
+                            &[&rev_uuid, &anio_num, &mes_up, &mes_num],
+                        ) {
+                            Ok(row) => {
+                                let n_filas: i64 = row.get(0);
+                                let n_asig: i64 = row.get(1);
+                                format!("{}: {} filas de reporte, {} asignaciones de obra", etiqueta, n_filas, n_asig)
+                            }
+                            Err(e) => format!("{}: no se pudo consultar ({})", etiqueta, e),
+                        }
+                    }
+                    (None, _, _) | (_, None, _) => {
+                        format!("{}: no se pudo consultar (sin conexión a BD o revisión inválida)", etiqueta)
+                    }
+                    _ => format!("{}: no se pudo consultar (año no válido: {})", etiqueta, anio),
+                };
+                lines.push(line);
+            }
+            lines.push(format!("Archivos nuevos que reemplazan: {}", staged_local_paths.len()));
+            lines.join("\n")
+        };
+        let staging_ctx = (c_nom.clone(), r_reg.clone(), rev_nom.clone());
+        let hay_nuevos = !pendientes.is_empty();
+        let omitidos_msg = omitidos.join("\n");
+
+        // 4. Actualizar la interfaz Slint; si hay meses repetidos, pedir confirmación antes de procesar
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 {
@@ -2143,15 +2302,41 @@ fn handle_cedulas_upload_and_inspect(
                     sess.pending_staged_local_paths = staged_local_paths;
                     sess.pending_overwrite_months = overwrite_months;
                     sess.pending_overwrite_old_files = overwrite_old_files;
+                    sess.pending_overwrite_old_cards = old_cards;
+                    sess.pending_staging_ctx = Some(staging_ctx);
+                    sess.pending_archivos = pendientes;
                     update_cedulas_view_file_list_ui(&ui, &sess);
                 }
 
-                if overwritten_count > 0 {
-                    show_toast_message(&ui, &format!("Se prepararon {} cédula(s) nueva(s) y {} para actualizar meses existentes.", new_count, overwritten_count));
+                let app_data = ui.global::<AppData>();
+                if !omitidos_msg.is_empty() {
+                    app_data.set_cedulas_duplicate_files_msg(omitidos_msg.into());
+                    app_data.set_show_cedulas_duplicate_modal(true);
                 }
 
-                // Iniciar procesamiento y guardado atómico bidireccional (PostgreSQL + rustfs)
-                spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
+                if !hay_nuevos {
+                    // Todos los archivos eran idénticos o inválidos: no hay nada que procesar
+                    app_data.set_cedulas_view_is_processing(false);
+                    app_data.set_is_processing(false);
+                    app_data.set_cedulas_view_progress_fraction(0.0);
+                    app_data.set_cedulas_view_progress_text("".into());
+                    app_data.set_progress_percentage(0.0);
+                } else if overwritten_count > 0 {
+                    // Sin confirmación no se procesa nada: el worker se lanza desde el modal.
+                    // Se apaga el indicador de "Procesando" (su capa z:9999 taparía el modal);
+                    // spawn_cedulas_view_worker lo vuelve a encender al elegir Fusionar/Reemplazar.
+                    let app_data = ui.global::<AppData>();
+                    app_data.set_cedulas_view_is_processing(false);
+                    app_data.set_is_processing(false);
+                    app_data.set_cedulas_view_progress_fraction(0.0);
+                    app_data.set_cedulas_view_progress_text("".into());
+                    app_data.set_progress_percentage(0.0);
+                    app_data.set_cedulas_overwrite_confirm_msg(overwrite_summary.into());
+                    app_data.set_show_cedulas_overwrite_confirm_modal(true);
+                } else {
+                    // Iniciar procesamiento y guardado atómico bidireccional (PostgreSQL + rustfs)
+                    spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
+                }
             }
         });
     });
@@ -2174,6 +2359,7 @@ fn spawn_cedulas_view_worker(
         staged_local_paths,
         overwrite_months,
         overwrite_old_files,
+        archivos_pendientes,
     ) = {
         let Some(ui) = ui_weak.upgrade() else { return; };
         let app_data = ui.global::<AppData>();
@@ -2223,6 +2409,10 @@ fn spawn_cedulas_view_worker(
         let st_locals = std::mem::take(&mut session.pending_staged_local_paths);
         let ov_months = std::mem::take(&mut session.pending_overwrite_months);
         let ov_files = std::mem::take(&mut session.pending_overwrite_old_files);
+        // Reemplazo confirmado (o sin meses repetidos): las tarjetas ocultadas ya no se restauran
+        session.pending_overwrite_old_cards.clear();
+        // Los archivos nuevos del lote pasan al worker de guardado (solo ellos se registran en BD)
+        let archivos_pendientes = std::mem::take(&mut session.pending_archivos);
         (
             paths,
             rfc,
@@ -2235,6 +2425,7 @@ fn spawn_cedulas_view_worker(
             st_locals,
             ov_months,
             ov_files,
+            archivos_pendientes,
         )
     };
 
@@ -2433,6 +2624,62 @@ fn spawn_cedulas_view_worker(
                         let ov_files_hook = overwrite_old_files.clone();
                         let cache_dir_hook = cache_dir.clone();
 
+
+                        // Solo se registran en BD los trabajadores de archivos NUEVOS del lote;
+                        // los PDFs ya cargados no se reprocesan (la regla "gana la más reciente" los pisaría)
+                        let nombres_nuevos: HashSet<&str> = archivos_pendientes
+                            .iter()
+                            .map(|a| a.nombre_archivo.as_str())
+                            .collect();
+                        let businesses_nuevos: Vec<crate::cedulas::business::Business> = businesses
+                            .iter()
+                            .filter_map(|b| {
+                                let mut nb = b.clone();
+                                nb.employees.retain(|e| {
+                                    e.file_name.as_deref().map_or(false, |f| nombres_nuevos.contains(f))
+                                });
+                                if nb.employees.is_empty() { None } else { Some(nb) }
+                            })
+                            .collect();
+
+                        let mut archivos_registrar: Vec<ArchivoParaRegistrar> = Vec::new();
+                        for pend in &archivos_pendientes {
+                            let emps: Vec<&crate::cedulas::employees::Employee> = businesses_nuevos
+                                .iter()
+                                .flat_map(|b| b.employees.iter())
+                                .filter(|e| e.file_name.as_deref() == Some(pend.nombre_archivo.as_str()))
+                                .collect();
+                            if emps.is_empty() {
+                                log::info!(
+                                    "Cédulas: '{}' sin trabajadores válidos; no se registra en BD",
+                                    pend.nombre_original
+                                );
+                                continue;
+                            }
+                            archivos_registrar.push(ArchivoParaRegistrar {
+                                nombre_archivo: pend.nombre_archivo.clone(),
+                                lote: ArchivoLote {
+                                    nombre_original: pend.nombre_original.clone(),
+                                    sha256: pend.sha256.clone(),
+                                    tipo: tipo_archivo_desde_empleados(&emps).to_string(),
+                                    anio: pend.anio,
+                                    mes: pend.mes,
+                                    trabajadores: emps.len() as i32,
+                                    paginas: None,
+                                },
+                                clave_final: pend.clave_final.clone(),
+                                clave_staging: pend.clave_staging.clone(),
+                            });
+                        }
+
+                        // Promoción en RustFS (se ejecuta DESPUÉS del COMMIT de PostgreSQL):
+                        // 1) mueve a Trash los archivos sustituidos; 2) promueve SOLO los PDFs registrados en BD
+                        //    (los rechazados por la auditoría no deben llegar a la ruta final);
+                        // 3) descarta el resto del staging del lote.
+                        let claves_a_promover: Vec<(String, String)> = archivos_registrar
+                            .iter()
+                            .map(|a| (a.clave_staging.clone(), a.clave_final.clone()))
+                            .collect();
                         let rustfs_commit_hook = move || -> Result<(), String> {
                             if let Some(ref batch_id) = batch_hook_opt {
                                 for old_fname in &ov_files_hook {
@@ -2446,7 +2693,18 @@ fn spawn_cedulas_view_worker(
                                     let old_local = cache_dir_hook.join("cedulas_de_cuotas").join(old_fname);
                                     let _ = std::fs::remove_file(&old_local);
                                 }
-                                crate::rustfs::commit_staging_files_in_rustfs(
+                                let almacen = crate::cedulas::almacen::AlmacenRustfs;
+                                let mut fallos: Vec<String> = Vec::new();
+                                for (staging, final_key) in &claves_a_promover {
+                                    if let Err(e) = crate::cedulas::almacen::AlmacenArchivos::promover(&almacen, staging, final_key) {
+                                        fallos.push(e);
+                                    }
+                                }
+                                if !fallos.is_empty() {
+                                    // El staging se conserva para que reintentar_promociones_pendientes lo complete
+                                    return Err(fallos.join("; "));
+                                }
+                                crate::rustfs::rollback_staging_files_in_rustfs(
                                     &c_nom_hook,
                                     &rp_hook,
                                     &rev_nom_hook,
@@ -2457,37 +2715,55 @@ fn spawn_cedulas_view_worker(
                             Ok(())
                         };
 
-                        match save_cedulas_audit_to_db(
-                            pool,
-                            &target_sync_id,
-                            &businesses,
-                            &overwrite_months,
-                            Some(&rustfs_commit_hook),
-                            Some(&db_progress_cb),
-                        ) {
-                            Ok(stats) => {
-                                db_saved_summary = format!(
-                                    "Guardadas {} liquidaciones y {} detalles de cédulas.",
-                                    stats.liquidaciones_guardadas, stats.detalles_guardados
+                        if archivos_registrar.is_empty() {
+                            // Sin archivos nuevos válidos: se descarta el staging del lote para no dejar huérfanos
+                            log::info!("Cédulas: ningún archivo nuevo válido que registrar; se descarta el staging del lote");
+                            if let Some(ref batch_id) = staging_batch_id_opt {
+                                let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                                    &client_nombre,
+                                    &rp_for_rustfs,
+                                    &revision_nombre,
+                                    "Cedulas_de_cuotas",
+                                    batch_id,
                                 );
-                                log::info!("Guardado Atómico DB + rustfs Cédulas exitoso: {:?}", stats);
-                                saved_stats_opt = Some(stats);
                             }
-                            Err(e) => {
-                                log::error!("Error en guardado atómico de cédulas (ejecutando rollback): {}", e);
-                                if let Some(ref batch_id) = staging_batch_id_opt {
-                                    let _ = crate::rustfs::rollback_staging_files_in_rustfs(
-                                        &client_nombre,
-                                        &rp_for_rustfs,
-                                        &revision_nombre,
-                                        "Cedulas_de_cuotas",
-                                        batch_id,
+                            for p in &staged_local_paths {
+                                let _ = std::fs::remove_file(p);
+                            }
+                        } else {
+                            match guardar_cedulas_lote(
+                                pool,
+                                &target_sync_id,
+                                &businesses_nuevos,
+                                &archivos_registrar,
+                                &overwrite_months,
+                                Some(&rustfs_commit_hook),
+                                Some(&db_progress_cb),
+                            ) {
+                                Ok(stats) => {
+                                    db_saved_summary = format!(
+                                        "Guardadas {} liquidaciones y {} detalles de cédulas.",
+                                        stats.liquidaciones_guardadas, stats.detalles_guardados
                                     );
+                                    log::info!("Guardado Atómico DB + rustfs Cédulas exitoso: {:?}", stats);
+                                    saved_stats_opt = Some(stats);
                                 }
-                                for p in &staged_local_paths {
-                                    let _ = std::fs::remove_file(p);
+                                Err(e) => {
+                                    log::error!("Error en guardado atómico de cédulas (ejecutando rollback): {}", e);
+                                    if let Some(ref batch_id) = staging_batch_id_opt {
+                                        let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                                            &client_nombre,
+                                            &rp_for_rustfs,
+                                            &revision_nombre,
+                                            "Cedulas_de_cuotas",
+                                            batch_id,
+                                        );
+                                    }
+                                    for p in &staged_local_paths {
+                                        let _ = std::fs::remove_file(p);
+                                    }
+                                    atomic_save_err = Some(e);
                                 }
-                                atomic_save_err = Some(e);
                             }
                         }
                     } else {
@@ -2738,14 +3014,40 @@ fn spawn_cedulas_view_worker(
                             } else {
                                 "La información de estas cédulas ya se encontraba previamente registrada en la base de datos PostgreSQL. No se duplicaron liquidaciones ni detalles.".to_string()
                             };
-                            let msg_obras = if stats.vinculaciones_guardadas > 0 {
+                            let msg_obras = if stats.registros_obras_guardados > 0 || stats.vinculaciones_guardadas > 0 {
                                 format!(
-                                    "Se vincularon {} liquidaciones a las obras creadas por el usuario en esta revisión. No se crearon registros de obra nuevos.",
-                                    stats.vinculaciones_guardadas
+                                    "Se leyeron de las cédulas {} registro(s) de obra nuevos (quedan como 'detectados en cédula', no visibles en Registros de Obras hasta que los registres) y se crearon {} vinculaciones de liquidaciones con obras.",
+                                    stats.registros_obras_guardados, stats.vinculaciones_guardadas
                                 )
                             } else {
-                                "No se crearon registros de obra en la base de datos. Se conservan exclusivamente las obras creadas por el usuario.".to_string()
+                                "Las cédulas no traían registros de obra nuevos ni vinculaciones nuevas.".to_string()
                             };
+
+                            // Omitidos/avisos de la ingesta: contador y lista truncada para el modal
+                            const MAX_OMITIDOS_UI: usize = 200;
+                            for aviso in &stats.errores {
+                                log::warn!("Cédulas — {}", aviso);
+                            }
+                            let omitidos_count = stats.errores.len();
+                            let omitidos_msg = if omitidos_count == 0 {
+                                String::new()
+                            } else {
+                                let mut lineas: Vec<String> = stats
+                                    .errores
+                                    .iter()
+                                    .take(MAX_OMITIDOS_UI)
+                                    .cloned()
+                                    .collect();
+                                if omitidos_count > MAX_OMITIDOS_UI {
+                                    lineas.push(format!(
+                                        "... y {} más (ver log)",
+                                        omitidos_count - MAX_OMITIDOS_UI
+                                    ));
+                                }
+                                lineas.join("\n")
+                            };
+                            app_data.set_cedulas_success_omitidos_count(omitidos_count as i32);
+                            app_data.set_cedulas_success_omitidos_msg(omitidos_msg.into());
                             let msg_rev = format!(
                                 "Todas las liquidaciones y detalles fueron asociadas a la revisión activa: '{}'. No se crearon revisiones nuevas.",
                                 rev_title
@@ -3362,6 +3664,31 @@ fn main() -> Result<(), slint::PlatformError> {
             (None, Arc::new(RwLock::new(HashSet::new())))
         }
     };
+
+    // Reintento de promociones de cédulas pendientes (solo filas STAGED) en segundo plano
+    if let Some(pool_reintento) = db_pool.clone() {
+        let spawn_reintento = std::thread::Builder::new()
+            .name("reintento_promociones_cedulas".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(8));
+                match pool_reintento.get() {
+                    Ok(mut client) => match crate::db::ingesta::reintentar_promociones_pendientes(
+                        &mut client,
+                        &crate::cedulas::almacen::AlmacenRustfs,
+                        5,
+                    ) {
+                        Ok((promovidos, fallidos)) => {
+                            log::info!("Reintento de promociones de cédulas: promovidos={}, fallidos={}", promovidos, fallidos);
+                        }
+                        Err(e) => log::warn!("Reintento de promociones de cédulas falló: {}", e),
+                    },
+                    Err(e) => log::warn!("Reintento de promociones de cédulas: sin conexión al pool: {}", e),
+                }
+            });
+        if let Err(e) = spawn_reintento {
+            log::warn!("No se pudo lanzar el hilo de reintento de promociones de cédulas: {}", e);
+        }
+    }
 
     // Diagnóstico y Estado Inicial de Base de Datos PostgreSQL
     let diag = crate::db::diagnose_postgres();
@@ -4286,8 +4613,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
 
                 if view_idx == 7 {
-                    let target_id = if !rev_id.is_empty() { rev_id.clone() } else { rp_id.clone() };
-                    sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &target_id);
+                    // El reporte requiere una revisión seleccionada (nunca trabaja sobre el registro patronal)
+                    if !rev_id.is_empty() {
+                        sync_and_load_reporte_data(&ui, &pool_clone, &reporte_session_clone, &rev_id, false);
+                    } else {
+                        crate::show_toast_message(&ui, "Selecciona primero una revisión para ver el Reporte de Liquidaciones.");
+                    }
                 }
 
 
@@ -4580,6 +4911,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_rev_form_pidio_prorroga(false);
                 app_data.set_rev_form_fecha_aprobacion_prorroga("".into());
                 app_data.set_rev_form_fecha_entrega_con_prorroga("".into());
+                app_data.set_rev_form_periodo_inicio("".into());
+                app_data.set_rev_form_periodo_fin("".into());
                 app_data.set_show_revision_modal(true);
             }
         });
@@ -4676,6 +5009,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                     r.fecha_entrega_con_prorroga
                                 };
                                 app_data.set_rev_form_fecha_entrega_con_prorroga(format_date_opt(f_ent_pror).into());
+                                app_data.set_rev_form_periodo_inicio(format_date_opt(r.periodo_inicio).into());
+                                app_data.set_rev_form_periodo_fin(format_date_opt(r.periodo_fin).into());
                                 app_data.set_show_revision_modal(true);
 
                                 // Verificar qué datos existen para esta revisión y actualizar propiedades de navegación
@@ -4710,7 +5045,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
         let holidays_clone = imss_inhabiles.clone();
-        app_logic.on_submit_revision(move |id, nombre, folio, concepto_val, estatus_val, estatus_imss_val, f_ent_rev, f_max_ent_rev, f_ent_imss, f_max_ent_imss, f_aprob_imss, pidio_pror, f_aprob_pror, f_ent_pror| {
+        app_logic.on_submit_revision(move |id, nombre, folio, concepto_val, estatus_val, estatus_imss_val, f_ent_rev, f_max_ent_rev, f_ent_imss, f_max_ent_imss, f_aprob_imss, pidio_pror, f_aprob_pror, f_ent_pror, per_ini, per_fin| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
                 let rp_id = app_data.get_selected_rp_id().to_string();
@@ -4723,6 +5058,25 @@ fn main() -> Result<(), slint::PlatformError> {
                     show_toast_message(&ui, "El nombre de la revisión es obligatorio.");
                     return;
                 }
+
+                // Periodo revisado: ambas fechas deben ser válidas y en orden, o ambas vacías
+                let d_per_ini = parse_date_opt(per_ini.as_str());
+                let d_per_fin = parse_date_opt(per_fin.as_str());
+                if let (Some(i), Some(f)) = (d_per_ini, d_per_fin) {
+                    if i > f {
+                        show_toast_message(&ui, "El periodo revisado es inválido: el inicio es posterior al fin.");
+                        return;
+                    }
+                }
+                let (periodo_ini_val, periodo_fin_val, periodo_warn) = match (d_per_ini, d_per_fin) {
+                    (Some(i), Some(f)) => (Some(i), Some(f), None),
+                    (None, None) => (None, None, None),
+                    _ => (
+                        None,
+                        None,
+                        Some("Captura inicio y fin del periodo revisado (o deja ambos vacíos)."),
+                    ),
+                };
                 if let Some(ref pool) = pool_clone {
                     let mut client = match pool.get() {
                         Ok(c) => c,
@@ -4796,6 +5150,8 @@ fn main() -> Result<(), slint::PlatformError> {
                         pidio_prorroga: pidio_pror,
                         fecha_aprobacion_prorroga: d_aprob_pror,
                         fecha_entrega_con_prorroga: d_ent_pror,
+                        periodo_inicio: periodo_ini_val,
+                        periodo_fin: periodo_fin_val,
                         ..Default::default()
                     };
 
@@ -4815,11 +5171,44 @@ fn main() -> Result<(), slint::PlatformError> {
                                 let _ = crate::rustfs::ensure_revision_structure(&client_nom, &rp_reg, &rev_nom);
                             });
 
+                            // Al editar, el universo de reportes depende de las fechas/periodo: resincronizar.
+                            if is_edit {
+                                if let Ok(uuid_rev) = Uuid::parse_str(&item.id) {
+                                    let ui_weak2 = ui_weak.clone();
+                                    let pool_bg = pool.clone();
+                                    thread::spawn(move || {
+                                        let res_sync = match pool_bg.get() {
+                                            Ok(mut client_bg) => crate::db::obras_ops::resincronizar_universo(&mut client_bg, uuid_rev),
+                                            Err(e) => Err(format!("Error de conexión: {}", e)),
+                                        };
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(ui) = ui_weak2.upgrade() {
+                                                match res_sync {
+                                                    Ok(cambio) => {
+                                                        let texto = mensaje_cambio_universo(&cambio);
+                                                        if !texto.is_empty() {
+                                                            show_toast_message(&ui, &texto);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        show_toast_message(&ui, &format!("No se pudo resincronizar el reporte: {}", e));
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    });
+                                }
+                            }
+
                             app_data.set_show_revision_modal(false);
                             load_revisiones_ui(&ui, pool, &rp_id);
                             update_global_stats(&ui, pool);
                             let msg = if is_edit { "Revisión actualizada exitosamente." } else { "Revisión creada exitosamente." };
-                            show_toast_message(&ui, msg);
+                            let msg_final = match periodo_warn {
+                                Some(w) => format!("{} {}", msg, w),
+                                None => msg.to_string(),
+                            };
+                            show_toast_message(&ui, &msg_final);
                         }
                         Err(e) => {
                             show_toast_message(&ui, &format!("Error al guardar revisión: {}", e));
@@ -5322,8 +5711,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_obra_form_fecha_fin(format_date_opt(o.fecha_fin).into());
                                 app_data.set_obra_form_ubicacion(o.ubicacion.into());
                                 app_data.set_obra_form_superficie(format!("{:.2}", o.superficie_construido).into());
-                                let monto_fmt = if o.monto > 0.0 { format_monto_mexico(o.monto) } else { "".to_string() };
-                                let monto_preview = if o.monto > 0.0 { format!("${} MXN", monto_fmt) } else { "".to_string() };
+                                let monto_fmt = match o.monto { Some(m) if m > 0.0 => format_monto_mexico(m), _ => "".to_string() };
+                                let monto_preview = if monto_fmt.is_empty() { "".to_string() } else { format!("${} MXN", monto_fmt) };
                                 app_data.set_obra_form_monto(monto_fmt.into());
                                 app_data.set_obra_form_monto_preview(monto_preview.into());
                                 app_data.set_obra_form_delegacion(o.delegacion.into());
@@ -5377,18 +5766,23 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
 
                 let sup: f64 = sup_str.trim().parse().unwrap_or(0.0);
-                let clean_monto_str = monto_str.replace(',', "");
-                let monto: f64 = clean_monto_str.trim().parse().unwrap_or(0.0);
+                let monto: Option<f64> = {
+                    let s = monto_str.replace(',', "");
+                    let s = s.trim();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        match s.parse::<f64>() {
+                            Ok(v) => Some(v),
+                            Err(_) => {
+                                show_toast_message(&ui, "El monto de la obra no es un número válido.");
+                                return;
+                            }
+                        }
+                    }
+                };
 
                 if let Some(ref pool) = pool_clone {
-                    let mut client = match pool.get() {
-                        Ok(c) => c,
-                        Err(e) => {
-                            show_toast_message(&ui, &format!("Error de conexión: {}", e));
-                            return;
-                        }
-                    };
-
                     let item = RegistroObraItem {
                         id: id.to_string(),
                         id_revision: rev_id.clone(),
@@ -5407,34 +5801,52 @@ fn main() -> Result<(), slint::PlatformError> {
                     };
 
                     let is_edit = !id.is_empty();
-                    let res = if is_edit {
-                        update_obra(&mut client, &item)
-                    } else {
-                        create_obra(&mut client, &item)
-                    };
+                    show_toast_message(&ui, "Guardando registro de obra...");
 
-                    match res {
-                        Ok(_) => {
-                            app_data.set_show_obra_modal(false);
-                            app_data.set_obra_form_numero_status("".into());
-                            app_data.set_obra_form_numero_msg("".into());
-                            load_obras_ui(&ui, pool, &rev_id);
-                            update_global_stats(&ui, pool);
-                            let msg = if monto > 0.0 {
-                                if is_edit { "Obra actualizada exitosamente." } else { "Registro de obra creado exitosamente." }
-                            } else {
-                                if is_edit {
-                                    "Obra actualizada. Aviso: Monto Total en 0; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
-                                } else {
-                                    "Registro de obra creado. Aviso: Monto Total en 0; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
+                    let ui_weak2 = ui_weak.clone();
+                    let pool_bg = pool.clone();
+                    let rev_id_bg = rev_id.clone();
+                    thread::spawn(move || {
+                        let res = match pool_bg.get() {
+                            Ok(mut client) => crate::db::obras_ops::guardar_obra_y_resincronizar(&mut client, &item, is_edit),
+                            Err(e) => Err(format!("Error de conexión: {}", e)),
+                        };
+
+                        let pool_for_ui = pool_bg.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak2.upgrade() {
+                                match res {
+                                    Ok((_, cambio)) => {
+                                        let app_data = ui.global::<AppData>();
+                                        app_data.set_show_obra_modal(false);
+                                        app_data.set_obra_form_numero_status("".into());
+                                        app_data.set_obra_form_numero_msg("".into());
+                                        load_obras_ui(&ui, &pool_for_ui, &rev_id_bg);
+                                        update_global_stats(&ui, &pool_for_ui);
+                                        let msg_base = if monto.map_or(false, |m| m > 0.0) {
+                                            if is_edit { "Obra actualizada exitosamente." } else { "Registro de obra creado exitosamente." }
+                                        } else {
+                                            if is_edit {
+                                                "Obra actualizada. Aviso: Sin monto capturado; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
+                                            } else {
+                                                "Registro de obra creado. Aviso: Sin monto capturado; recuerde capturarlo para poder calcular el límite del 18% en Reporte Liquidaciones."
+                                            }
+                                        };
+                                        let extra = mensaje_cambio_universo(&cambio);
+                                        let msg = if extra.is_empty() {
+                                            msg_base.to_string()
+                                        } else {
+                                            format!("{} {}", msg_base, extra)
+                                        };
+                                        show_toast_message(&ui, &msg);
+                                    }
+                                    Err(e) => {
+                                        show_toast_message(&ui, &format!("Error al guardar obra: {}", e));
+                                    }
                                 }
-                            };
-                            show_toast_message(&ui, msg);
-                        }
-                        Err(e) => {
-                            show_toast_message(&ui, &format!("Error al guardar obra: {}", e));
-                        }
-                    }
+                            }
+                        });
+                    });
                 }
             }
         });
@@ -5477,12 +5889,45 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
         app_logic.on_open_delete_obra_dialog(move |id, numero| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
-                app_data.set_delete_obra_id(id);
+                app_data.set_delete_obra_id(id.clone());
                 app_data.set_delete_obra_numero(numero);
+                app_data.set_delete_obra_impacto("Calculando impacto...".into());
                 app_data.set_show_delete_obra_modal(true);
+
+                if let Some(ref pool) = pool_clone {
+                    let ui_weak2 = ui_weak.clone();
+                    let pool_bg = pool.clone();
+                    let obra_id_str = id.to_string();
+                    thread::spawn(move || {
+                        let res = match Uuid::parse_str(&obra_id_str) {
+                            Err(_) => Err("ID de obra inválido".to_string()),
+                            Ok(uuid) => match pool_bg.get() {
+                                Ok(mut client) => crate::db::obras_ops::contar_impacto_obra(&mut client, uuid),
+                                Err(e) => Err(format!("Error de conexión: {}", e)),
+                            },
+                        };
+
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak2.upgrade() {
+                                let texto = match res {
+                                    Ok(imp) if imp.empleado_mes == 0 => {
+                                        "La obra no tiene empleados asignados en el reporte de liquidaciones.".to_string()
+                                    }
+                                    Ok(imp) => format!(
+                                        "La obra está asignada a {} empleado(s) en {} empleado-mes ({} tramos). Al eliminarla, esos tramos quedan sin obra y se recalculan los importes. Puedes deshacerlo desde Asignación por empleado → Deshacer.",
+                                        imp.empleados, imp.empleado_mes, imp.tramos
+                                    ),
+                                    Err(e) => format!("No se pudo calcular el impacto: {}", e),
+                                };
+                                ui.global::<AppData>().set_delete_obra_impacto(texto.into());
+                            }
+                        });
+                    });
+                }
             }
         });
     }
@@ -5510,21 +5955,31 @@ fn main() -> Result<(), slint::PlatformError> {
 
                 thread::spawn(move || {
                     if let Some(ref pool) = pool_opt {
-                        let res = match pool.get() {
-                            Ok(mut client) => delete_obra(&mut client, obra_id_str.as_str()),
-                            Err(e) => Err(format!("Error obteniendo conexión a la BD: {}", e)),
+                        let res = match Uuid::parse_str(obra_id_str.as_str()) {
+                            Err(_) => Err("ID de obra inválido".to_string()),
+                            Ok(uuid) => match pool.get() {
+                                Ok(mut client) => crate::db::obras_ops::desactivar_obra(&mut client, uuid),
+                                Err(e) => Err(format!("Error obteniendo conexión a la BD: {}", e)),
+                            },
                         };
 
                         let pool_for_ui = pool.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = ui_weak2.upgrade() {
                                 match res {
-                                    Ok(_) => {
+                                    Ok(r) => {
                                         let app_data = ui.global::<AppData>();
                                         let rev_id = app_data.get_selected_revision_id().to_string();
                                         load_obras_ui(&ui, &pool_for_ui, &rev_id);
                                         update_global_stats(&ui, &pool_for_ui);
-                                        show_toast_message(&ui, "Registro de obra eliminado correctamente.");
+                                        let mut msg = "Registro de obra eliminado.".to_string();
+                                        if r.hay_bitacora {
+                                            msg.push_str(&format!(
+                                                " Se quitaron sus asignaciones en {} empleado-mes; puedes deshacerlo desde Asignación por empleado → Deshacer.",
+                                                r.reportes_afectados
+                                            ));
+                                        }
+                                        show_toast_message(&ui, &msg);
                                     }
                                     Err(e) => {
                                         show_toast_message(&ui, &format!("Error al eliminar registro de obra: {}", e));
@@ -5588,6 +6043,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_new_cliente_nombre("".into());
                 app_data.set_new_cliente_rfc("".into());
                 app_data.set_new_cliente_razon_social("".into());
+                app_data.set_new_cliente_representante_legal("".into());
                 app_data.set_new_cliente_curp("".into());
                 app_data.set_new_cliente_tipo_persona_val("-- Seleccionar Tipo Persona --".into());
                 app_data.set_new_cliente_regimen_val("-- Seleccione primero Tipo Persona --".into());
@@ -5612,6 +6068,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app_data.set_new_cliente_nombre("".into());
                 app_data.set_new_cliente_rfc("".into());
                 app_data.set_new_cliente_razon_social("".into());
+                app_data.set_new_cliente_representante_legal("".into());
                 app_data.set_new_cliente_curp("".into());
             }
         });
@@ -5666,7 +6123,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
-        app_logic.on_submit_new_cliente(move |nombre, rfc, razon_social, curp, tp_val, reg_val| {
+        app_logic.on_submit_new_cliente(move |nombre, rfc, razon_social, curp, tp_val, reg_val, representante_legal| {
             if let Some(ui) = ui_weak.upgrade() {
                 let tp_opt = if tp_val.to_uppercase().contains("MORAL") {
                     Some("MORAL")
@@ -5712,6 +6169,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 nombre.as_str(),
                                 rfc.as_str(),
                                 razon_social.as_str(),
+                                representante_legal.as_str(),
                                 curp.as_str(),
                                 &id_tp,
                                 &id_rf,
@@ -5722,6 +6180,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                     app_data.set_new_cliente_nombre("".into());
                                     app_data.set_new_cliente_rfc("".into());
                                     app_data.set_new_cliente_razon_social("".into());
+                                    app_data.set_new_cliente_representante_legal("".into());
                                     app_data.set_new_cliente_curp("".into());
                                     show_toast_message(&ui, &format!("Cliente '{}' registrado exitosamente.", new_cli.nombre));
                                     load_clientes_ui(&ui, pool);
@@ -5763,6 +6222,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_edit_cliente_id(c.id.into());
                                 app_data.set_edit_cliente_nombre(c.nombre.into());
                                 app_data.set_edit_cliente_razon_social(c.razon_social.into());
+                                app_data.set_edit_cliente_representante_legal(c.representante_legal.into());
                                 app_data.set_edit_cliente_rfc(c.rfc.into());
                                 app_data.set_edit_cliente_curp(c.curp.into());
                                 app_data.set_edit_cliente_has_data(c.has_ingested_data);
@@ -5874,7 +6334,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = main_window.as_weak();
         let pool_clone = db_pool.clone();
-        app_logic.on_submit_edit_cliente(move |id, nombre, razon_social, rfc, curp, tp_val, reg_val| {
+        app_logic.on_submit_edit_cliente(move |id, nombre, razon_social, rfc, curp, tp_val, reg_val, representante_legal| {
             if let Some(ui) = ui_weak.upgrade() {
                 let tp_opt = if tp_val.to_uppercase().contains("MORAL") {
                     Some("MORAL")
@@ -5920,6 +6380,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 id.as_str(),
                                 nombre.as_str(),
                                 razon_social.as_str(),
+                                representante_legal.as_str(),
                                 rfc.as_str(),
                                 curp.as_str(),
                                 &id_tp,
@@ -6516,6 +6977,21 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // D-8: filtro por estado laboral / obras actuales (0 Todos, 1 Bajas, 2 Sin obra, 3 Con 2+ obras)
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_clone = db_pool.clone();
+        app_logic.on_empleados_cambiar_filtro(move |filtro| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_empleados_filtro(filtro);
+                if let Some(ref pool) = pool_clone {
+                    let client_id = ui.global::<AppData>().get_selected_cliente_id().to_string();
+                    load_empleados_ui(&ui, pool, &client_id);
+                }
+            }
+        });
+    }
+
     // 36. Toggle Filtro Solo Empleados Activos
     {
         let ui_weak = main_window.as_weak();
@@ -6986,6 +7462,86 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // 54c. Confirmar reemplazo de meses ya cargados: lanza el procesamiento
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = cedulas_session.clone();
+        let pool_clone = db_pool.clone();
+        app_logic.on_confirmar_sobrescribir_cedulas(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_cedulas_overwrite_confirm_modal(false);
+                spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
+            }
+        });
+    }
+
+    // 54c-bis. Fusionar meses ya cargados: procesa los archivos nuevos sin borrar meses existentes
+    // (el worker hace upsert por trabajador); los archivos previos no se mandan a Trash
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = cedulas_session.clone();
+        let pool_clone = db_pool.clone();
+        app_logic.on_fusionar_cedulas_meses_existentes(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_cedulas_overwrite_confirm_modal(false);
+                let n_archivos = {
+                    let mut sess = session_clone.lock().unwrap();
+                    sess.pending_overwrite_months.clear();
+                    sess.pending_overwrite_old_files.clear();
+                    // En fusión los PDFs previos siguen vigentes: vuelven a la lista y a la auditoría
+                    let previos = std::mem::take(&mut sess.pending_overwrite_old_cards);
+                    sess.files.extend(previos);
+                    update_cedulas_view_file_list_ui(&ui, &sess);
+                    sess.pending_archivos.len()
+                };
+                log::info!("Cédulas: carga en modo fusión ({} archivos nuevos)", n_archivos);
+                spawn_cedulas_view_worker(ui_weak.clone(), session_clone.clone(), pool_clone.clone());
+            }
+        });
+    }
+
+    // 54d. Cancelar reemplazo: revierte el staging en RustFS y limpia copias locales; no toca la BD
+    {
+        let ui_weak = main_window.as_weak();
+        let session_clone = cedulas_session.clone();
+        app_logic.on_cancelar_sobrescribir_cedulas(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            ui.global::<AppData>().set_show_cedulas_overwrite_confirm_modal(false);
+            let (batch_opt, ctx_opt) = {
+                let mut sess = session_clone.lock().unwrap();
+                let batch = sess.pending_staging_batch_id.take();
+                for p in std::mem::take(&mut sess.pending_staged_local_paths) {
+                    let _ = std::fs::remove_file(&p);
+                }
+                sess.pending_overwrite_months.clear();
+                sess.pending_overwrite_old_files.clear();
+                sess.pending_overwrite_old_cards.clear();
+                sess.pending_archivos.clear();
+                (batch, sess.pending_staging_ctx.take())
+            };
+            if let Some(batch_id) = batch_opt {
+                match ctx_opt {
+                    Some((c_nom, r_reg, rev_nom)) => {
+                        std::thread::spawn(move || {
+                            if let Err(e) = crate::rustfs::rollback_staging_files_in_rustfs(
+                                &c_nom,
+                                &r_reg,
+                                &rev_nom,
+                                "Cedulas_de_cuotas",
+                                &batch_id,
+                            ) {
+                                log::warn!("No se pudo revertir el staging de cédulas en RustFS (batch {}): {}", batch_id, e);
+                            }
+                        });
+                    }
+                    None => log::warn!("Staging de cédulas (batch {}) sin contexto de cliente/RP/revisión; no se revirtió en RustFS", batch_id),
+                }
+            }
+            ui.global::<AppLogic>().invoke_recargar_cedulas_view();
+            show_toast_message(&ui, "Carga cancelada: no se modificó ningún mes.");
+        });
+    }
+
     // 54b. Cerrar modal global de error del sistema
     {
         let ui_weak = main_window.as_weak();
@@ -6998,6 +7554,19 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 55. Callbacks de Reporte Liquidaciones
     wire_reporte_liquidaciones_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
+    // Alta masiva de revisiones (ADD-03)
+    revisiones_lote_view_logic::wire_revisiones_lote_callbacks(&main_window, db_pool.clone(), imss_inhabiles.clone());
+    // Texto de atajos según el sistema operativo (Ctrl en Windows/Linux, ⌘ en macOS)
+    main_window.global::<AppData>().set_asig_atajos_texto(crate::operacion_ui::texto_atajos().into());
+    main_window.global::<AppData>().set_reporte_atajos_texto(crate::operacion_ui::texto_atajos_reporte().into());
+    crate::asignacion_view_logic::wire_asignacion_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
+    crate::asistente_asignacion::wire_asistente_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
+    crate::asignacion_obra_logic::wire_asignacion_obra_callbacks(&main_window, db_pool.clone(), reporte_session.clone());
+    // Alta masiva de obras (ADD-01/ADD-02)
+    crate::obras_lote_view_logic::wire_obras_lote_callbacks(&main_window, db_pool.clone());
+    crate::empleados_view_logic::wire_empleados_callbacks(&main_window, db_pool.clone());
+    // Selector de analista de la sesión (ADD-05)
+    analista_view_logic::wire_analista_callbacks(&main_window, db_pool.clone());
 
     // 56. Callbacks de Calendario Fiscal & Revisiones IMSS
     register_calendar_callbacks(&main_window, db_pool.clone(), imss_inhabiles.clone());
@@ -7040,7 +7609,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     .get()
                     .ok()
                     .and_then(|mut client| {
-                        crate::db::nominas_reporte::fetch_nominas_reporte(&mut client, None).ok()
+                        crate::db::nominas_reporte::fetch_nominas_reporte(&mut client, crate::db::nominas_reporte::AlcanceNominas::Todo).ok()
                     })
                     .map(|v| !v.is_empty())
                     .unwrap_or(false);
@@ -7053,6 +7622,113 @@ fn main() -> Result<(), slint::PlatformError> {
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
+    }
+
+    // ==========================================
+    // REPARACIÓN MANUAL DE CÉDULAS DESDE RUSTFS (no se ejecuta al arrancar)
+    // ==========================================
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_abrir_reparar_rustfs(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let app_data = ui.global::<AppData>();
+                if !app_data.get_reparar_rustfs_en_curso() {
+                    app_data.set_show_reparar_rustfs_modal(true);
+                }
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        app_logic.on_cancelar_reparar_rustfs(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.global::<AppData>().set_show_reparar_rustfs_modal(false);
+            }
+        });
+    }
+
+    {
+        let ui_weak = main_window.as_weak();
+        let pool_rep = db_pool.clone();
+        app_logic.on_confirmar_reparar_rustfs(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let app_data = ui.global::<AppData>();
+            app_data.set_show_reparar_rustfs_modal(false);
+            if app_data.get_reparar_rustfs_en_curso() {
+                return;
+            }
+            app_data.set_reparar_rustfs_en_curso(true);
+            show_toast_message(&ui, "Reparación iniciada en segundo plano...");
+
+            let pool_hilo = pool_rep.clone();
+            let ui_hilo = ui_weak.clone();
+            let spawn_result = std::thread::Builder::new()
+                .name("rustfs_reparacion_manual".into())
+                .spawn(move || {
+                    // Fallo del paso 1 (limpieza): no aborta la reconciliación, pero se informa al usuario
+                    let mut aviso_limpieza: Option<String> = None;
+                    let resultado: Result<crate::rustfs::ReconcileStats, String> = match pool_hilo {
+                        None => Err("No hay conexión a la base de datos disponible".to_string()),
+                        Some(pool) => match pool.get() {
+                            Err(e) => Err(format!("No se pudo obtener conexión: {}", e)),
+                            Ok(mut client) => {
+                                log::info!("Reparación manual: limpieza y normalización de claves en liquidaciones...");
+                                if let Err(e) = crate::rustfs::clean_and_repair_detalles_liquidaciones_database(&mut client) {
+                                    log::warn!("Limpieza de claves (reparación manual) falló: {}", e);
+                                    aviso_limpieza = Some(e);
+                                } else {
+                                    log::info!("Limpieza de claves completada");
+                                }
+                                // La limpieza automática de tramos duplicados (cleanup_all_duplicate_reportes_detalles)
+                                // ya no se ejecuta: reasignaba trabajo del analista sin respetar editado_usuario.
+                                // Las restricciones UNIQUE y las operaciones atómicas evitan esos duplicados.
+                                log::info!("Reparación manual: reconciliación de vinculaciones desde RustFS...");
+                                match crate::rustfs::reconcile_all_liquidaciones_vinculaciones_from_rustfs(&mut client) {
+                                    Ok(stats) => {
+                                        log::info!("Reconciliación manual completada: {:?}", stats);
+                                        Ok(stats)
+                                    }
+                                    Err(e) => {
+                                        log::warn!("Reconciliación manual falló: {}", e);
+                                        Err(e)
+                                    }
+                                }
+                            }
+                        },
+                    };
+
+                    let mensaje = match resultado {
+                        Ok(stats) => format!(
+                            "Reparación completada: {} PDF inspeccionados, {} vinculaciones actualizadas, {} vinculaciones inválidas eliminadas, {} revisiones sincronizadas.",
+                            stats.total_files_inspected,
+                            stats.vinculaciones_upserted,
+                            stats.fake_vinculaciones_removed,
+                            stats.revisions_synced
+                        ),
+                        Err(e) => format!("La reparación falló: {}", e),
+                    };
+                    let mensaje = match aviso_limpieza {
+                        Some(e) => format!("{} (Atención: la limpieza de claves falló: {})", mensaje, e),
+                        None => mensaje,
+                    };
+
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_hilo.upgrade() {
+                            ui.global::<AppData>().set_reparar_rustfs_en_curso(false);
+                            show_toast_message(&ui, &mensaje);
+                            ui.global::<AppLogic>().invoke_recargar_cedulas_view();
+                        }
+                    });
+                });
+
+            if spawn_result.is_err() {
+                app_data.set_reparar_rustfs_en_curso(false);
+                show_toast_message(&ui, "Error: no se pudo iniciar el hilo de reparación");
             }
         });
     }
@@ -7531,6 +8207,9 @@ mod tests_ui {
                 subtotal_orig: 1792.40,
                 tiene_inconsistencia: false,
                 observacion_validacion: String::new(),
+                estado: "ACTIVO".to_string(),
+                cedula_actualizada: false,
+                editado_usuario: false,
             };
 
             recalculate_row_in_memory(&mut r);
@@ -7637,6 +8316,48 @@ mod tests_ui {
         for r in &state.all_rows {
             assert_eq!(r.subtotal, r.subtotal_orig);
         }
+
+        // Atajo Ctrl/⌘+F en Reporte de Liquidaciones
+        // Reutiliza la misma ventana: no se crea un segundo event loop (winit solo permite uno por proceso).
+        {
+            use slint::platform::{Key, WindowEvent};
+            let ad = win.global::<AppData>();
+            ad.set_current_view(7);
+            ad.set_reporte_tab_idx(0);
+            slint::platform::update_timers_and_animations();
+
+            let antes = ad.get_reporte_focus_buscar();
+            let ventana = win.window();
+            ventana.dispatch_event(WindowEvent::WindowActiveChanged(true));
+            ventana.dispatch_event(WindowEvent::KeyPressed { text: Key::Control.into() });
+            ventana.dispatch_event(WindowEvent::KeyPressed { text: "f".into() });
+            ventana.dispatch_event(WindowEvent::KeyReleased { text: "f".into() });
+            ventana.dispatch_event(WindowEvent::KeyReleased { text: Key::Control.into() });
+            slint::platform::update_timers_and_animations();
+
+            assert_eq!(ad.get_reporte_focus_buscar(), antes + 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_mensajes_obras {
+    use super::*;
+    use crate::db::obras_ops::CambioUniverso;
+
+    #[test]
+    fn mensaje_cambio_universo_sin_cambios_es_vacio() {
+        let c = CambioUniverso { a_fuera: 0, a_activo: 0 };
+        assert_eq!(mensaje_cambio_universo(&c), "");
+    }
+
+    #[test]
+    fn mensaje_cambio_universo_con_cambios() {
+        let c = CambioUniverso { a_fuera: 2, a_activo: 1 };
+        assert_eq!(
+            mensaje_cambio_universo(&c),
+            "Reporte de liquidaciones: 2 fila(s) pasaron a fuera de periodo, 1 regresaron al periodo."
+        );
     }
 }
 

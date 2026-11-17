@@ -166,50 +166,51 @@ pub fn resolver_rfc_valido(rfc: &str, curp: &str, nombre: &str, nss: &str) -> St
 }
 
 /// Obtiene el nombre del estado (hasta 25 caracteres) y la clave del lugar (2 dígitos: 01 a 33)
-/// a partir del código de entidad de la CURP (posiciones 11 y 12), según el catálogo oficial del SUA.
-pub fn estado_y_clave_lugar_desde_curp(curp: &str) -> (&'static str, &'static str) {
+/// a partir del código de entidad de la CURP (posiciones 12 y 13), según el catálogo oficial del SUA.
+/// Devuelve `None` si la CURP es corta o la clave de entidad no existe en el catálogo;
+/// el llamador debe dejar el campo en blanco en lugar de inventar un valor.
+pub fn estado_y_clave_lugar_desde_curp(curp: &str) -> Option<(&'static str, &'static str)> {
     let clean: String = curp.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let upper = clean.to_ascii_uppercase();
-    if upper.len() >= 13 {
-        let code = &upper[11..13];
-        match code {
-            "AS" => ("AGUASCALIENTES", "01"),
-            "BC" => ("BAJA CALIFORNIA", "02"),
-            "BS" => ("BAJA CALIFORNIA SUR", "03"),
-            "CC" => ("CAMPECHE", "04"),
-            "CL" => ("COAHUILA", "05"),
-            "CM" => ("COLIMA", "06"),
-            "CS" => ("CHIAPAS", "07"),
-            "CH" => ("CHIHUAHUA", "08"),
-            "DF" => ("CIUDAD DE MEXICO", "09"),
-            "DG" => ("DURANGO", "10"),
-            "GT" => ("GUANAJUATO", "11"),
-            "GR" => ("GUERRERO", "12"),
-            "HG" => ("HIDALGO", "13"),
-            "JC" => ("JALISCO", "14"),
-            "MC" => ("ESTADO DE MEXICO", "15"),
-            "MN" => ("MICHOACAN", "16"),
-            "MS" => ("MORELOS", "17"),
-            "NT" => ("NAYARIT", "18"),
-            "NL" => ("NUEVO LEON", "19"),
-            "OC" => ("OAXACA", "20"),
-            "PL" => ("PUEBLA", "21"),
-            "QT" => ("QUERETARO", "22"),
-            "QR" => ("QUINTANA ROO", "23"),
-            "SP" => ("SAN LUIS POTOSI", "24"),
-            "SL" => ("SINALOA", "25"),
-            "SR" => ("SONORA", "26"),
-            "TC" => ("TABASCO", "27"),
-            "TS" => ("TAMAULIPAS", "28"),
-            "TL" => ("TLAXCALA", "29"),
-            "VZ" => ("VERACRUZ", "30"),
-            "YN" => ("YUCATAN", "31"),
-            "ZS" => ("ZACATECAS", "32"),
-            "NE" => ("EXTRANJERO", "33"),
-            _ => ("COAHUILA", "05"),
-        }
-    } else {
-        ("COAHUILA", "05")
+    if upper.len() < 13 {
+        return None;
+    }
+    let code = &upper[11..13];
+    match code {
+        "AS" => Some(("AGUASCALIENTES", "01")),
+        "BC" => Some(("BAJA CALIFORNIA", "02")),
+        "BS" => Some(("BAJA CALIFORNIA SUR", "03")),
+        "CC" => Some(("CAMPECHE", "04")),
+        "CL" => Some(("COAHUILA", "05")),
+        "CM" => Some(("COLIMA", "06")),
+        "CS" => Some(("CHIAPAS", "07")),
+        "CH" => Some(("CHIHUAHUA", "08")),
+        "DF" => Some(("CIUDAD DE MEXICO", "09")),
+        "DG" => Some(("DURANGO", "10")),
+        "GT" => Some(("GUANAJUATO", "11")),
+        "GR" => Some(("GUERRERO", "12")),
+        "HG" => Some(("HIDALGO", "13")),
+        "JC" => Some(("JALISCO", "14")),
+        "MC" => Some(("ESTADO DE MEXICO", "15")),
+        "MN" => Some(("MICHOACAN", "16")),
+        "MS" => Some(("MORELOS", "17")),
+        "NT" => Some(("NAYARIT", "18")),
+        "NL" => Some(("NUEVO LEON", "19")),
+        "OC" => Some(("OAXACA", "20")),
+        "PL" => Some(("PUEBLA", "21")),
+        "QT" => Some(("QUERETARO", "22")),
+        "QR" => Some(("QUINTANA ROO", "23")),
+        "SP" => Some(("SAN LUIS POTOSI", "24")),
+        "SL" => Some(("SINALOA", "25")),
+        "SR" => Some(("SONORA", "26")),
+        "TC" => Some(("TABASCO", "27")),
+        "TS" => Some(("TAMAULIPAS", "28")),
+        "TL" => Some(("TLAXCALA", "29")),
+        "VZ" => Some(("VERACRUZ", "30")),
+        "YN" => Some(("YUCATAN", "31")),
+        "ZS" => Some(("ZACATECAS", "32")),
+        "NE" => Some(("EXTRANJERO", "33")),
+        _ => None,
     }
 }
 
@@ -316,6 +317,18 @@ pub struct SuaWorkerRecord {
     pub clave_ubicacion: String,
     pub num_empleado: String,
     pub tipo_trabajador: char, // Siempre '1' según especificación requerida
+    /// Código postal para 2_AFIL: el del registro patronal (5 dígitos) o vacío si no está capturado.
+    pub codigo_postal: String,
+}
+
+/// CP de 5 dígitos para el SUA, o 5 espacios si no es un código postal válido.
+pub fn codigo_postal_sua(cp: &str) -> String {
+    let limpio: String = cp.chars().filter(|c| !c.is_whitespace()).collect();
+    if limpio.len() == 5 && limpio.chars().all(|c| c.is_ascii_digit()) {
+        limpio
+    } else {
+        " ".repeat(5)
+    }
 }
 
 /// Formatea una línea para `1_ASEG_<Folio>.TXT` (Longitud fija estricta oficial SUA: 164 caracteres)
@@ -399,16 +412,21 @@ pub fn format_afil_line(rec: &SuaWorkerRecord) -> String {
     let nss_base = &clean_nss[..10]; // 10
     let nss_dv = &clean_nss[10..11]; // 1
 
-    let cp_5 = "64000"; // 5 (Código Postal default de la región)
+    // 5: código postal del registro patronal; sin un CP válido de 5 dígitos el campo queda en blanco
+    // (antes se usaba "64000" fijo para todos los trabajadores).
+    let cp_5 = codigo_postal_sua(&rec.codigo_postal);
 
     // Extraer fecha de nacimiento y sexo desde CURP oficial validada
     let curp = resolver_curp_valida(&rec.curp, &rec.nombre_completo, &rec.rfc, &rec.nss);
     let (fecha_nac_8, sexo_1) = extraer_datos_curp(&curp); // 8 y 1
 
-    // Lugar de nacimiento y clave de entidad según catálogo oficial de SUA
-    let (nombre_estado, clave_lugar) = estado_y_clave_lugar_desde_curp(&curp);
-    let lugar_nac_25 = format!("{:<25}", nombre_estado); // 25
-    let clave_entidad_2 = format!("{:0>2}", clave_lugar); // 2
+    // Lugar de nacimiento y clave de entidad según catálogo oficial de SUA.
+    // Solo se toma de la CURP ORIGINAL válida del trabajador: una CURP calculada por el sistema lleva
+    // una entidad por defecto (no real). Sin entidad real el campo queda en blanco (nunca se asume).
+    let (lugar_nac_25, clave_entidad_2) = match entidad_nacimiento_real(rec) {
+        Some((nombre_estado, clave_lugar)) => (format!("{:<25}", nombre_estado), format!("{:0>2}", clave_lugar)),
+        None => (" ".repeat(25), "  ".to_string()),
+    };
     let umf_3 = "000"; // 3 dígitos numéricos (el SUA requiere que UMF sea numérica; 000 por omisión)
     let ocupacion_12 = "            "; // 12 espacios
     let tipo_salario_1 = '0'; // 1 (0=Fijo)
@@ -610,6 +628,30 @@ pub struct SuaExportResult {
     pub mov_obra_filename: String,
     pub mov_obra_count: usize,
     pub total_workers: usize,
+    /// Avisos no bloqueantes para el usuario (p. ej. lugar de nacimiento desconocido)
+    pub advertencias: Vec<String>,
+}
+
+/// Entidad de nacimiento REAL del trabajador: solo si su CURP original (la capturada o leída de la
+/// cédula) es válida y su clave de entidad existe en el catálogo SUA. Una CURP que el sistema tuvo que
+/// calcular no cuenta: el generador usa una entidad por defecto que no proviene del trabajador.
+fn entidad_nacimiento_real(rec: &SuaWorkerRecord) -> Option<(&'static str, &'static str)> {
+    let original: String = rec
+        .curp
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if original.len() == 18 && crate::cedulas::curp_renapo::validar_curp_formato(&original) {
+        estado_y_clave_lugar_desde_curp(&original)
+    } else {
+        None
+    }
+}
+
+/// Indica si el trabajador tiene una entidad de nacimiento real para el renglón 2_AFIL.
+fn curp_tiene_entidad_valida(rec: &SuaWorkerRecord) -> bool {
+    entidad_nacimiento_real(rec).is_some()
 }
 
 /// Genera el paquete completo de 6 archivos SUA con formato estricto y orden numérico para importación:
@@ -624,6 +666,7 @@ pub fn export_sua_files(
     folio_revision: &str,
     rows: &[crate::db::reporte_liquidaciones::ReporteLiquidacionRowDb],
     obras: &[crate::db::reporte_liquidaciones::ObraOptionDb],
+    cp_patronal: &str,
 ) -> Result<SuaExportResult, String> {
     if rows.is_empty() {
         return Err("No hay registros disponibles para exportar al SUA.".to_string());
@@ -742,6 +785,7 @@ pub fn export_sua_files(
             clave_ubicacion: ubicacion_final,
             num_empleado: num_emp_final,
             tipo_trabajador: '1',
+            codigo_postal: cp_patronal.to_string(),
         };
 
         // Agrupar filas del empleado cronológicamente por mes
@@ -990,6 +1034,23 @@ pub fn export_sua_files(
     // Ordenar trabajadores alfabéticamente
     workers.sort_by(|a, b| a.nombre_completo.cmp(&b.nombre_completo));
 
+    // Advertencias: un aviso por trabajador (NSS) cuyo lugar de nacimiento no se pudo determinar
+    let mut advertencias: Vec<String> = Vec::new();
+    if codigo_postal_sua(cp_patronal).trim().is_empty() {
+        advertencias.push(
+            "Código postal del registro patronal no capturado o inválido: campo CP en blanco en 2_AFIL (captúralo en Registros Patronales)".to_string(),
+        );
+    }
+    let mut nss_advertidos: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for w in &workers {
+        if !curp_tiene_entidad_valida(w) && nss_advertidos.insert(w.nss.clone()) {
+            advertencias.push(format!(
+                "{} {}: lugar de nacimiento desconocido (sin CURP original válida o sin entidad real); campo en blanco en 2_AFIL",
+                w.nss, w.nombre_completo
+            ));
+        }
+    }
+
     // 2. Generar contenidos con terminación CRLF (\r\n) estricta para SUA
     let mut aseg_content = String::new();
     for w in &workers {
@@ -1075,6 +1136,7 @@ pub fn export_sua_files(
         mov_obra_filename,
         mov_obra_count: unique_mov_obra_count,
         total_workers: workers.len(),
+        advertencias,
     })
 }
 
@@ -1146,6 +1208,7 @@ mod tests {
             clave_ubicacion: "OBRA-C01".into(),
             num_empleado: "EMP001".into(),
             tipo_trabajador: '1',
+            codigo_postal: "64000".to_string(),
         };
 
         let line = format_aseg_line(&rec);
@@ -1176,6 +1239,7 @@ mod tests {
             clave_ubicacion: "ALTA".into(),
             num_empleado: "ALTA".into(),
             tipo_trabajador: '1',
+            codigo_postal: "64000".to_string(),
         };
 
         let line = format_aseg_line(&rec);
@@ -1209,29 +1273,73 @@ mod tests {
     #[test]
     fn test_estado_y_clave_lugar_catalogo() {
         // Coahuila
-        let (edo, cve) = estado_y_clave_lugar_desde_curp("AOJD821108HCLCRN06");
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("AOJD821108HCLCRN06").unwrap();
         assert_eq!(edo, "COAHUILA");
         assert_eq!(cve, "05");
 
         // CDMX
-        let (edo, cve) = estado_y_clave_lugar_desde_curp("CASM830208MDFSNR07");
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("CASM830208MDFSNR07").unwrap();
         assert_eq!(edo, "CIUDAD DE MEXICO");
         assert_eq!(cve, "09");
 
         // Zacatecas
-        let (edo, cve) = estado_y_clave_lugar_desde_curp("COTG930602HZSNRD02");
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("COTG930602HZSNRD02").unwrap();
         assert_eq!(edo, "ZACATECAS");
         assert_eq!(cve, "32");
 
         // Aguascalientes
-        let (edo, cve) = estado_y_clave_lugar_desde_curp("EACG990219HASSMR03");
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("EACG990219HASSMR03").unwrap();
         assert_eq!(edo, "AGUASCALIENTES");
         assert_eq!(cve, "01");
 
         // Extranjero
-        let (edo, cve) = estado_y_clave_lugar_desde_curp("RUJA910101HNEXXX00");
+        let (edo, cve) = estado_y_clave_lugar_desde_curp("RUJA910101HNEXXX00").unwrap();
         assert_eq!(edo, "EXTRANJERO");
         assert_eq!(cve, "33");
+    }
+
+    #[test]
+    fn test_estado_y_clave_lugar_sin_entidad_valida_devuelve_none() {
+        // Clave de entidad inexistente en el catálogo
+        assert_eq!(estado_y_clave_lugar_desde_curp("AOJD821108HXXXRN06"), None);
+        // CURP corta: no hay posiciones de entidad
+        assert_eq!(estado_y_clave_lugar_desde_curp("AOJD82"), None);
+        // CURP vacía (campo en blanco)
+        assert_eq!(estado_y_clave_lugar_desde_curp(""), None);
+    }
+
+    #[test]
+    fn test_format_afil_sin_entidad_deja_lugar_en_blanco_longitud_fija() {
+        let rec = SuaWorkerRecord {
+            registro_patronal: "Y6312345101".into(),
+            nss: "12345678901".into(),
+            rfc: "XAXX010101000".into(),
+            curp: "AOJD821108HXXXRN06".into(), // entidad inexistente
+            nombre_completo: "SIN ENTIDAD PRUEBA".into(),
+            pensionado: String::new(),
+            fecha_alta: Some(NaiveDate::from_ymd_opt(2024, 9, 2).unwrap()),
+            mes_periodo: 9,
+            anio_periodo: 2024,
+            sdi: 348.50,
+            clave_ubicacion: "OBRA-C01".into(),
+            num_empleado: "EMP002".into(),
+            tipo_trabajador: '1',
+            codigo_postal: "64000".to_string(),
+        };
+
+        let line = format_afil_line(&rec);
+        assert_eq!(line.len(), 80, "Debe ser de exactamente 80 caracteres para SUA");
+        assert!(!line.contains("COAHUILA"), "No debe asumirse un estado por defecto");
+        assert!(!curp_tiene_entidad_valida(&rec));
+    }
+
+    #[test]
+    fn test_codigo_postal_sua_valido_o_en_blanco() {
+        assert_eq!(codigo_postal_sua("25000"), "25000");
+        assert_eq!(codigo_postal_sua(" 25 000 "), "25000");
+        assert_eq!(codigo_postal_sua(""), "     ");
+        assert_eq!(codigo_postal_sua("2500"), "     ");
+        assert_eq!(codigo_postal_sua("25A00"), "     ");
     }
 
     #[test]
@@ -1250,6 +1358,7 @@ mod tests {
             clave_ubicacion: "OBRA-C01".into(),
             num_empleado: "EMP001".into(),
             tipo_trabajador: '1',
+            codigo_postal: "64000".to_string(),
         };
 
         let line = format_afil_line(&rec);
@@ -1383,6 +1492,9 @@ mod tests {
             subtotal_orig: 1000.0,
             tiene_inconsistencia: false,
             observacion_validacion: String::new(),
+            estado: "ACTIVO".to_string(),
+            cedula_actualizada: false,
+            editado_usuario: false,
         }
     }
 
@@ -1404,7 +1516,7 @@ mod tests {
         row.obra_numero = "C0896231".into();
         row.dias_obra = 30;
 
-        let res = export_sua_files(&temp_dir, "REV1", &[row], &[]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV1", &[row], &[], "64000").expect("export should succeed");
         assert_eq!(res.aseg_filename, "1_ASEG_REV1.TXT");
         assert_eq!(res.afil_filename, "2_AFIL_REV1.TXT");
         assert_eq!(res.mov_obra_filename, "3_MOVOBRA_REV1.TXT");
@@ -1461,7 +1573,7 @@ mod tests {
             "01",
         );
 
-        let res = export_sua_files(&temp_dir, "REV1", &[row], &[]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV1", &[row], &[], "64000").expect("export should succeed");
         // No debe generar movimiento 08 para un trabajador vigente sin incidencias
         assert_eq!(res.movt_count, 0, "No debe haber movimientos para un trabajador vigente sin incidencias");
 
@@ -1496,7 +1608,7 @@ mod tests {
         row3.fecha = Some(NaiveDate::from_ymd_opt(2024, 9, 15).unwrap());
         row3.clave = "BAJA".into(); // Movimiento de baja
 
-        let res = export_sua_files(&temp_dir, "REV2", &[row1, row2, row3], &[]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV2", &[row1, row2, row3], &[], "64000").expect("export should succeed");
         assert_eq!(res.movt_count, 2, "Debe registrar modificación de salario (07) y baja (02)");
 
         let movt_file = temp_dir.join(&res.movt_filename);
@@ -1527,7 +1639,7 @@ mod tests {
         row2.sdi = 261.20; // Mismo salario que el anterior
         row2.clave = "07".into(); // Clave 07 o M/S en la cédula, pero salario idéntico
 
-        let res = export_sua_files(&temp_dir, "REV3", &[row1, row2], &[]).expect("export should succeed");
+        let res = export_sua_files(&temp_dir, "REV3", &[row1, row2], &[], "64000").expect("export should succeed");
         // No debe generar movimiento 07 porque el salario no cambió (evita error SUA: "El Salario Diario Integrado no puede ser igual al anterior")
         assert_eq!(res.movt_count, 0, "No debe haber movimiento 07 si el salario es igual");
 
@@ -1593,6 +1705,7 @@ mod tests {
             "REV_PENS",
             &[row_pensionado_activo, row_pensionado_alta, row_pensionado_baja, row_normal],
             &[],
+            "64000",
         )
         .expect("export should succeed");
 
@@ -1708,6 +1821,7 @@ mod tests {
             "REV_VIG",
             &[row_adriana_dias, row_adriana_baja, row_ruiz_baja, row_ruiz_sept],
             &[mock_obra],
+            "64000",
         )
         .expect("export should succeed");
 

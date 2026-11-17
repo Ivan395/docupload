@@ -113,12 +113,12 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
     )?;
 
     let employee_data = Regex::new(
-        r"(?m)((?P<clave>[\w/]+)[ \t]+(?P<fecha>\d{2}/\d{2}/\d{4})?[\t ])[\t ]?(?P<data_with_date>[\d\t \.]+.*)|(?P<data_without_date>^\d+[ \t][ \t\d\.]+.*)",
+        r"(?im)((?P<clave>\b(?:alta|baja|reing|rein|reingreso|ms|m/s|ism|inc|aus|b|r|a)\b)[ \t]+(?P<fecha>\d{2}/\d{2}/\d{4})?[\t ])[\t ]?(?P<data_with_date>[\d\t \.]+.*)|(?P<data_without_date>^[ \t]*\d+[ \t][ \t\d\.]+.*)",
     )?;
     let employee_fechas =
-        Regex::new(r"(?m)(?P<clave>^\w+)[ \t]+(?P<fecha>\d{2}/\d{2}/\d{4})[\n]?$")?;
+        Regex::new(r"(?im)^[ \t]*(?P<clave>\b(?:alta|baja|reing|rein|reingreso|ms|m/s|ism|inc|aus|b|r|a)\b)[ \t]+(?P<fecha>\d{2}/\d{2}/\d{4})[ \t]*$")?;
     let employee_registro_obras = Regex::new(
-        r"(?im)(?:folio[\.\t ]*de[\.\t ]*)?registro[\.\t ]*de[\.\t ]*obra[s]?[:]?[\.\t ]*(?P<registro_obra>[a-z0-9_-]+)[\t ]+(?:d\S*as|dias|d[ií]as|d[ií]?)[:\.\t ]*(?P<dias_registro_obra>\d+)",
+        r"(?im)(?:(?:folio|n[uú]mero|no\.?|num\.?)[\.\t ]*de[\.\t ]*)?registro[\.\t ]*de[\.\t ]*obra[s]?[:]?[\.\t ]*(?P<registro_obra>[a-z0-9_-]+)[\t ]+(?:d\S*as|dias|d[ií]as|d[ií]?)[:\.\t ]*(?P<dias_registro_obra>\d+)",
     )?;
 
     let clean_replace_dias = Regex::new(r"(?i)\bd[\w\u{0080}-\u{024F}\-]*as\b")?;

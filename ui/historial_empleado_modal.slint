@@ -1,0 +1,260 @@
+import { ScrollView, Button } from "std-widgets.slint";
+import { AppData, AppLogic } from "models.slint";
+
+// Celda de texto de tabla (cabecera o fila) con ancho fijo o elástico según el uso.
+component CeldaHist inherits Rectangle {
+    in property <string> texto;
+    in property <bool> cab: false;
+    in property <bool> centrado: false;
+
+    min-height: 30px;
+
+    Text {
+        x: 8px;
+        y: 0px;
+        width: parent.width - 16px;
+        height: parent.height;
+        text: root.texto;
+        font-size: root.cab ? 10.5px : 11.5px;
+        font-weight: root.cab ? 800 : 600;
+        color: root.cab ? #475569 : #1e293b;
+        horizontal-alignment: root.centrado ? center : left;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+export component HistorialEmpleadoModal inherits Rectangle {
+    background: #00000077;
+    width: 100%;
+    height: 100%;
+
+    // Bloqueador de clics hacia la vista principal
+    TouchArea { }
+
+    Rectangle {
+        width: Math.min(parent.width - 40px, 880px);
+        height: Math.min(parent.height - 40px, 600px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 12px;
+        background: #ffffff;
+        clip: true;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 10px;
+
+            // Encabezado
+            HorizontalLayout {
+                alignment: space-between;
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: "Histórico de obras — " + AppData.historial_empleado_nombre;
+                        font-size: 17px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "Tramos empleado × obra según cédula y reportes ACTIVO.";
+                        font-size: 11px;
+                        color: #64748b;
+                    }
+                }
+
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 14px;
+                    background: hist_cerrar_x.has-hover ? #fee2e2 : #f1f5f9;
+                    Text {
+                        text: "✕";
+                        font-size: 12px;
+                        font-weight: 800;
+                        color: hist_cerrar_x.has-hover ? #b91c1c : #64748b;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    hist_cerrar_x := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.historial_empleado_cerrar(); }
+                    }
+                }
+            }
+
+            // Conmutador de alcance
+            HorizontalLayout {
+                spacing: 0px;
+                alignment: start;
+
+                Rectangle {
+                    width: 180px;
+                    height: 30px;
+                    border-radius: 6px;
+                    background: !AppData.historial_solo_revision ? #1e3a8a : #f8fafc;
+                    border-width: 1px;
+                    border-color: #cbd5e1;
+                    Text {
+                        text: "Todas las revisiones";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: !AppData.historial_solo_revision ? #ffffff : #475569;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if AppData.historial_solo_revision { AppLogic.historial_empleado_alternar_alcance(); }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 180px;
+                    height: 30px;
+                    border-radius: 6px;
+                    background: AppData.historial_solo_revision ? #1e3a8a : #f8fafc;
+                    border-width: 1px;
+                    border-color: #cbd5e1;
+                    Text {
+                        text: "Solo revisión activa";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: AppData.historial_solo_revision ? #ffffff : #475569;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if !AppData.historial_solo_revision { AppLogic.historial_empleado_alternar_alcance(); }
+                        }
+                    }
+                }
+            }
+
+            // Estados: cargando / sin asignaciones
+            if AppData.historial_cargando : Text {
+                text: "Cargando…";
+                font-size: 12px;
+                font-weight: 700;
+                color: #64748b;
+                horizontal-alignment: center;
+            }
+            if !AppData.historial_cargando && AppData.historial_periodos.length == 0 && AppData.historial_meses.length == 0 : Text {
+                text: "Sin asignaciones a obra";
+                font-size: 12px;
+                font-weight: 700;
+                color: #64748b;
+                horizontal-alignment: center;
+            }
+
+            // Sección 1: periodos por obra
+            VerticalLayout {
+                spacing: 4px;
+                vertical-stretch: 1;
+
+                Text {
+                    text: "Periodos por obra";
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #1e293b;
+                }
+
+                Rectangle {
+                    height: 28px;
+                    background: #f8fafc;
+                    border-radius: 4px;
+                    HorizontalLayout {
+                        CeldaHist { cab: true; texto: "Revisión"; horizontal-stretch: 1; min-width: 120px; }
+                        CeldaHist { cab: true; texto: "Obra"; width: 110px; }
+                        CeldaHist { cab: true; texto: "Inicio"; width: 100px; centrado: true; }
+                        CeldaHist { cab: true; texto: "Fin"; width: 100px; centrado: true; }
+                        CeldaHist { cab: true; texto: "Días calendario"; width: 120px; centrado: true; }
+                        CeldaHist { cab: true; texto: "Días obra"; width: 90px; centrado: true; }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.width;
+
+                    VerticalLayout {
+                        for p[idx] in AppData.historial_periodos : Rectangle {
+                            height: 30px;
+                            background: Math.mod(idx, 2) == 0 ? #ffffff : #fafbfc;
+                            HorizontalLayout {
+                                CeldaHist { texto: p.revision; horizontal-stretch: 1; min-width: 120px; }
+                                CeldaHist { texto: p.obra; width: 110px; }
+                                CeldaHist { texto: p.inicio; width: 100px; centrado: true; }
+                                CeldaHist { texto: p.fin; width: 100px; centrado: true; }
+                                CeldaHist { texto: p.dias_calendario; width: 120px; centrado: true; }
+                                CeldaHist { texto: p.dias_obra; width: 90px; centrado: true; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sección 2: detalle mensual
+            VerticalLayout {
+                spacing: 4px;
+                vertical-stretch: 1;
+
+                Text {
+                    text: "Detalle mensual";
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #1e293b;
+                }
+
+                Rectangle {
+                    height: 28px;
+                    background: #f8fafc;
+                    border-radius: 4px;
+                    HorizontalLayout {
+                        CeldaHist { cab: true; texto: "Revisión"; horizontal-stretch: 1; min-width: 120px; }
+                        CeldaHist { cab: true; texto: "Mes"; width: 80px; centrado: true; }
+                        CeldaHist { cab: true; texto: "Obra"; width: 110px; }
+                        CeldaHist { cab: true; texto: "Días"; width: 70px; centrado: true; }
+                        CeldaHist { cab: true; texto: "Rango"; width: 130px; centrado: true; }
+                        CeldaHist { cab: true; texto: "Estado"; width: 110px; }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.width;
+
+                    VerticalLayout {
+                        for m[idx] in AppData.historial_meses : Rectangle {
+                            height: 30px;
+                            background: Math.mod(idx, 2) == 0 ? #ffffff : #fafbfc;
+                            HorizontalLayout {
+                                CeldaHist { texto: m.revision; horizontal-stretch: 1; min-width: 120px; }
+                                CeldaHist { texto: m.mes; width: 80px; centrado: true; }
+                                CeldaHist { texto: m.obra; width: 110px; }
+                                CeldaHist { texto: m.dias_obra; width: 70px; centrado: true; }
+                                CeldaHist { texto: m.rango; width: 130px; centrado: true; }
+                                CeldaHist { texto: m.estado; width: 110px; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pie
+            HorizontalLayout {
+                alignment: end;
+                Button {
+                    text: "Cerrar";
+                    clicked => { AppLogic.historial_empleado_cerrar(); }
+                }
+            }
+        }
+    }
+}

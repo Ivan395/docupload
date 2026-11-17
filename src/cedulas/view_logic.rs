@@ -13,7 +13,9 @@ use crate::cedulas::employees::{DataEmployee, Employee, RegistroObra};
 use crate::cedulas::excel::Excel;
 use crate::cedulas::pdf_extractor::{clean_text, extract_with_layout};
 use crate::cedulas::processor::{canonical_razon, canonical_reg, get_employee_data};
-use crate::db::cedulas::{resolve_business_context_for_revision, save_single_cedula_employee_tx, CedulasDbStats};
+use crate::db::cedulas::{
+    describe_trabajador_sin_detalles, resolve_business_context_for_revision, save_single_cedula_employee_tx, CedulasDbStats,
+};
 use crate::db::client::DbPool;
 
 #[derive(Debug, Clone)]
@@ -226,12 +228,14 @@ pub fn inspect_cedula_file(path: &Path) -> CedulaFileCardInfo {
             Ok(raw_text) => {
                 let trimmed = raw_text.trim();
                 let lower = raw_text.to_lowercase();
+                let is_bimestral = crate::cedulas::ema::is_bimestral_document(&raw_text);
                 let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
-                let is_sua = lower.contains("cédula de determinación de cuotas")
-                    || lower.contains("cedula de determinacion de cuotas")
-                    || lower.contains("sistema único de autodeterminación")
-                    || lower.contains("sistema unico de autodeterminacion")
-                    || (lower.contains("registro patronal") && lower.contains("delegación imss"));
+                let is_sua = !is_bimestral
+                    && (lower.contains("cédula de determinación de cuotas")
+                        || lower.contains("cedula de determinacion de cuotas")
+                        || lower.contains("sistema único de autodeterminación")
+                        || lower.contains("sistema unico de autodeterminacion")
+                        || (lower.contains("registro patronal") && lower.contains("delegación imss")));
 
                 let pages_count = raw_text.split('\x0c').filter(|p| !p.trim().is_empty()).count();
                 let pages_label = if pages_count > 1 {
@@ -513,7 +517,7 @@ pub fn inspect_cedula_upload_naming(
     let mut cliente_found = None;
     let mut has_workers = false;
 
-    if raw_text.trim().len() >= 50 {
+    if raw_text.trim().len() >= 50 && !crate::cedulas::ema::is_bimestral_document(&raw_text) {
         let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
         if is_ema {
             if let Some(r) = crate::cedulas::ema::extract_ema_rp(&raw_text) {
@@ -643,6 +647,15 @@ pub fn detect_overlapping_workers(assignments: &[AuditAssignment]) -> usize {
     overlap_count
 }
 
+/// Longitud mínima (en caracteres, sin espacios laterales) de la capa de texto de un PDF.
+/// Por debajo de este umbral el archivo se considera escaneo raster sin OCR vectorial.
+pub const MIN_CARACTERES_TEXTO_VECTORIAL: usize = 50;
+
+/// Indica si el texto extraído es insuficiente (vacío o escaneo sin capa de texto).
+pub fn es_texto_insuficiente(raw_text: &str) -> bool {
+    raw_text.trim().len() < MIN_CARACTERES_TEXTO_VECTORIAL
+}
+
 pub fn process_and_audit_cedulas(
     input_paths: &[PathBuf],
     target_client_rfc: Option<&str>,
@@ -714,21 +727,21 @@ pub fn process_and_audit_cedulas(
             }
         };
 
+        let is_bimestral = crate::cedulas::ema::is_bimestral_document(&raw_text);
         let is_ema = crate::cedulas::ema::is_ema_document(&raw_text);
         let lower = raw_text.to_lowercase();
-        let is_sua = lower.contains("cédula de determinación de cuotas")
-            || lower.contains("cedula de determinacion de cuotas")
-            || lower.contains("sistema único de autodeterminación")
-            || lower.contains("sistema unico de autodeterminacion")
-            || lower.contains("resumen de liquidación")
-            || lower.contains("resumen de liquidacion")
-            || lower.contains("emisión bimestral")
-            || lower.contains("emision bimestral")
-            || lower.contains("emisión mensual")
-            || lower.contains("emision mensual")
-            || (lower.contains("registro patronal") && (lower.contains("delegación imss") || lower.contains("delegacion imss")));
+        let is_sua = !is_bimestral
+            && (lower.contains("cédula de determinación de cuotas")
+                || lower.contains("cedula de determinacion de cuotas")
+                || lower.contains("sistema único de autodeterminación")
+                || lower.contains("sistema unico de autodeterminacion")
+                || lower.contains("resumen de liquidación")
+                || lower.contains("resumen de liquidacion")
+                || lower.contains("emisión mensual")
+                || lower.contains("emision mensual")
+                || (lower.contains("registro patronal") && (lower.contains("delegación imss") || lower.contains("delegacion imss"))));
 
-        if (!is_sua && !is_ema) || raw_text.trim().len() < 50 {
+        if (!is_sua && !is_ema) || es_texto_insuficiente(&raw_text) {
             no_procesados += 1;
             mismatch_report.items.push(CedulaMismatchItem {
                 filename: file_display_name,
@@ -947,6 +960,22 @@ pub fn process_and_audit_cedulas(
                 }
             }
 
+            // 4. Validar que cada trabajador tenga mes y año de periodo legibles (sin valores por defecto)
+            let sin_periodo = emps
+                .iter()
+                .filter(|e| crate::db::cedulas::resolve_periodo_cedula(e).is_none())
+                .count();
+            if sin_periodo > 0 {
+                mismatch = true;
+                file_mismatches.push(CedulaMismatchItem {
+                    filename: file_display_name.clone(),
+                    error_type: "Periodo no detectado".to_string(),
+                    expected_val: "Mes y año del periodo".to_string(),
+                    found_val: format!("{} trabajador(es) sin periodo legible", sin_periodo),
+                    details: "No se pudo leer el mes y/o año del periodo de esta cédula. Se rechaza el archivo para no asignar los datos a un periodo incorrecto.".to_string(),
+                });
+            }
+
             if mismatch {
                 continue;
             }
@@ -982,6 +1011,9 @@ pub fn process_and_audit_cedulas(
             if mismatch_report.items.iter().any(|i| i.error_type == "Formato no válido") {
                 summary_parts.push("Archivos con formato no oficial SUA");
             }
+            if mismatch_report.items.iter().any(|i| i.error_type == "Periodo no detectado") {
+                summary_parts.push("Cédulas sin periodo (mes/año) legible");
+            }
             let desc = if !summary_parts.is_empty() {
                 format!("CLIENT_MISMATCH: Se encontraron {}", summary_parts.join(", "))
             } else {
@@ -991,6 +1023,51 @@ pub fn process_and_audit_cedulas(
         } else {
             return Err(("No se encontraron cédulas SUA válidas con datos de trabajadores para procesar.".to_string(), mismatch_report));
         }
+    }
+
+    // Consolidar trabajadores duplicados en el mismo lote (por ejemplo cuando se sube EMA y SUA del mismo mes),
+    // priorizando siempre el registro SUA que contiene vinculaciones de obra y RFC/CURP.
+    {
+        let mut best_by_key: HashMap<(String, String, u32, String), (usize, usize, bool, bool)> = HashMap::new();
+        for (b_idx, biz) in valid_businesses.iter().enumerate() {
+            let rp_k = biz.registro_patronal.as_deref().map(canonical_reg).unwrap_or_default();
+            for (e_idx, emp) in biz.employees.iter().enumerate() {
+                let wid = emp
+                    .no_seguro_social
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .or(emp.curp.as_deref())
+                    .or(emp.nombre.as_deref())
+                    .unwrap_or("UNKNOWN")
+                    .trim()
+                    .to_uppercase();
+                let m_num = month_to_num(emp.mes_periodo.as_deref().unwrap_or("ENERO"));
+                let anio_s = emp.anio_periodo.as_deref().unwrap_or("2024").trim().to_string();
+                let k = (rp_k.clone(), wid, m_num, anio_s);
+                let has_obras = !emp.registro_obras.is_empty();
+                let has_rfc_curp = emp.rfc.is_some() || emp.curp.is_some();
+                match best_by_key.get(&k) {
+                    None => {
+                        best_by_key.insert(k, (b_idx, e_idx, has_obras, has_rfc_curp));
+                    }
+                    Some(&(_, _, prev_obras, prev_rfc)) => {
+                        if (has_obras && !prev_obras) || (!prev_obras && !prev_rfc && has_rfc_curp) {
+                            best_by_key.insert(k, (b_idx, e_idx, has_obras, has_rfc_curp));
+                        }
+                    }
+                }
+            }
+        }
+        let winners: HashSet<(usize, usize)> = best_by_key.into_values().map(|(b, e, _, _)| (b, e)).collect();
+        for (b_idx, biz) in valid_businesses.iter_mut().enumerate() {
+            let mut e_idx = 0;
+            biz.employees.retain(|_| {
+                let keep = winners.contains(&(b_idx, e_idx));
+                e_idx += 1;
+                keep
+            });
+        }
+        valid_businesses.retain(|b| !b.employees.is_empty());
     }
 
     let mut audit_res = build_cedulas_audit_from_businesses(
@@ -1434,7 +1511,7 @@ pub fn load_cedulas_from_db(
         return Ok(None);
     }
 
-    // 1. Obras registradas por el usuario en el registro patronal / revisión con sus periodos de vigencia (fecha_inicio - fecha_fin)
+    // 1. Obras registradas por el usuario en la revisión con sus periodos de vigencia (fecha_inicio - fecha_fin)
     let obra_rows = client
         .query(
             r#"
@@ -1443,16 +1520,15 @@ pub fn load_cedulas_from_db(
                 fecha_inicio,
                 fecha_fin,
                 COALESCE(creado_usuario, false) AS creado_usuario
-            FROM public.registros_obras 
-            WHERE (id_revision = $1 OR id_registro_patronal = $2)
+            FROM public.registros_obras
+            WHERE id_revision = $1 AND activa
             ORDER BY fecha_inicio ASC;
             "#,
-            &[&target_uuid, &rp_uuid],
+            &[&target_uuid],
         )
         .map_err(|e| format!("Error consultando obras de la revisión: {}", crate::db::schema::format_pg_error(&e)))?;
 
     let mut revision_obras = HashSet::new();
-    let mut active_obra_ranges: Vec<(String, NaiveDate, NaiveDate)> = Vec::new();
     let mut required_periods: std::collections::BTreeSet<(i32, i16)> = std::collections::BTreeSet::new();
     for r in &obra_rows {
         let num: String = r.get(0);
@@ -1466,9 +1542,6 @@ pub fn load_cedulas_from_db(
         if creado_usuario {
             if let Some(ini) = f_ini {
                 let fin = f_fin.unwrap_or(ini).max(ini);
-                if !t.is_empty() {
-                    active_obra_ranges.push((t, ini, fin));
-                }
                 let mut curr_y = ini.year();
                 let mut curr_m = ini.month() as i16;
                 let end_y = fin.year();
@@ -1662,33 +1735,6 @@ pub fn load_cedulas_from_db(
             emp.anio_periodo = anio_per.map(|a| a.to_string());
             if let Some(obras) = vinc_map.remove(&id_liq) {
                 emp.registro_obras = obras;
-            } else if !active_obra_ranges.is_empty() {
-                let anio_val: i32 = anio_per.unwrap_or(2024) as i32;
-                let valid_m = if (1..=12).contains(&resolved_mes_int) {
-                    resolved_mes_int as u32
-                } else {
-                    1
-                };
-                let p_start = NaiveDate::from_ymd_opt(anio_val, valid_m, 1).unwrap_or_default();
-                let p_end = if valid_m == 12 {
-                    NaiveDate::from_ymd_opt(anio_val, 12, 31).unwrap_or_default()
-                } else {
-                    NaiveDate::from_ymd_opt(anio_val, valid_m + 1, 1).and_then(|d| d.pred_opt()).unwrap_or_default()
-                };
-
-                let matching_nums: Vec<String> = active_obra_ranges
-                    .iter()
-                    .filter(|(_, ini, fin)| p_start <= *fin && p_end >= *ini)
-                    .map(|(num, _, _)| num.clone())
-                    .collect();
-
-                if !matching_nums.is_empty() {
-                    let d_str = "30".to_string();
-                    emp.registro_obras = matching_nums
-                        .iter()
-                        .map(|num| RegistroObra::new(num, &d_str))
-                        .collect();
-                }
             }
 
             current_liq_id = Some(id_liq);
@@ -1767,16 +1813,41 @@ pub fn load_cedulas_from_db(
     Ok(Some((audit, valid_businesses, has_missing_cedulas)))
 }
 
-pub fn save_cedulas_audit_to_db(
+/// Guarda un lote de cédulas registrando sus archivos y promoviéndolos en RustFS después del COMMIT.
+///
+/// Orden de fases:
+/// 1. Transacción PostgreSQL: borra los meses a reemplazar, registra los archivos como STAGED,
+///    marca reemplazados por periodo (si aplica), guarda liquidaciones con su `id_archivo` y sincroniza reportes.
+/// 2. COMMIT de PostgreSQL. Si falla se hace rollback y se devuelve error (el llamador descarta el staging).
+/// 3. Promoción en RustFS (`promover_en_almacen`). Si falla, PostgreSQL ya es la fuente de verdad:
+///    los archivos quedan STAGED para reintento y el resultado es `Ok` con el aviso en `errores`.
+/// 4. Solo tras una promoción exitosa se marcan ACTIVO los archivos registrados.
+pub fn guardar_cedulas_lote(
     pool: &DbPool,
     id_revision: &str,
     businesses: &[Business],
-    overwrite_months: &[(String, String)],
-    rustfs_commit_hook: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
+    archivos: &[crate::db::ingesta::ArchivoParaRegistrar],
+    reemplazar_meses: &[(String, String)],
+    promover_en_almacen: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
     progress_cb: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
 ) -> Result<CedulasDbStats, String> {
-    if businesses.is_empty() {
+    if archivos.is_empty() {
+        log::info!("guardar_cedulas_lote: sin archivos nuevos que guardar");
         return Ok(CedulasDbStats::default());
+    }
+    if businesses.is_empty() {
+        return Err(format!(
+            "No se puede registrar el lote: {} archivo(s) sin registros patronales asociados",
+            archivos.len()
+        ));
+    }
+
+    // El nombre del archivo es la clave de asociación con `Employee.file_name`: debe ser único en el lote.
+    let mut nombres: HashSet<&str> = HashSet::new();
+    for a in archivos {
+        if !nombres.insert(a.nombre_archivo.as_str()) {
+            return Err(format!("Nombre de archivo duplicado en el lote: '{}'", a.nombre_archivo));
+        }
     }
 
     let mut client = pool
@@ -1790,8 +1861,6 @@ pub fn save_cedulas_audit_to_db(
         None
     };
 
-    // Fase 1 (Transacción Atómica Única): todo el lote de cédulas, sincronización de
-    // reportes_liquidaciones y promoción desde staging en rustfs ocurren como una sola unidad atómica.
     let mut tx = client
         .transaction()
         .map_err(|e| format!("Error iniciando transacción en PostgreSQL: {}", crate::db::schema::format_pg_error(&e)))?;
@@ -1799,17 +1868,23 @@ pub fn save_cedulas_audit_to_db(
     let total_emps: usize = businesses.iter().map(|b| b.employees.len()).sum();
     let mut current_emp_idx = 0;
     let total_biz = businesses.len();
+    let mut ids_registrados: Vec<Uuid> = Vec::new();
 
     let tx_result: Result<(), String> = (|| {
         if !id_revision.trim().is_empty() {
-            for (anio_str, mes_str) in overwrite_months {
-                let anio_num: i32 = anio_str.parse().unwrap_or(2026);
+            for (anio_str, mes_str) in reemplazar_meses {
+                // Año ilegible = error (nunca se asume un año por defecto al borrar un mes)
+                let anio_num: i32 = anio_str.trim().parse().map_err(|_| {
+                    format!("Año inválido '{}' al reemplazar el mes {}: no se borró nada", anio_str, mes_str)
+                })?;
                 delete_cedula_for_month_tx(&mut tx, id_revision.trim(), mes_str, anio_num)?;
             }
         }
 
         let mut resolved_rev_id: Option<Uuid> = rev_uuid_opt;
         let mut resolved_rp_id: Option<Uuid> = None;
+        // nombre_archivo -> id_archivo, para asociar cada liquidación con su PDF.
+        let mut mapa_archivos: HashMap<String, Uuid> = HashMap::new();
 
         for (biz_idx, biz) in businesses.iter().enumerate() {
             let current_file_label = biz
@@ -1836,8 +1911,68 @@ pub fn save_cedulas_audit_to_db(
                 resolved_rp_id = Some(ctx.id_registro_patronal);
             }
 
+            // Registro de archivos: una sola vez, con el registro patronal ya resuelto.
+            if biz_idx == 0 {
+                for a in archivos {
+                    let id = crate::db::ingesta::registrar_archivo_staged(
+                        &mut tx,
+                        ctx.id_registro_patronal,
+                        Some(ctx.id_revision),
+                        &a.lote,
+                        &a.clave_final,
+                        &a.clave_staging,
+                    )?;
+                    mapa_archivos.insert(a.nombre_archivo.clone(), id);
+                    ids_registrados.push(id);
+                }
+
+                // Reemplazo por periodo: el nuevo archivo pasa a ACTIVO y los anteriores del mismo periodo a REEMPLAZADO.
+                for a in archivos {
+                    let se_reemplaza = reemplazar_meses.iter().any(|(anio_str, mes_str)| {
+                        anio_str.trim() == a.lote.anio.to_string() && i64::from(month_to_num(mes_str)) == i64::from(a.lote.mes)
+                    });
+                    if !se_reemplaza {
+                        continue;
+                    }
+                    if let Some(&id_nuevo) = mapa_archivos.get(&a.nombre_archivo) {
+                        let reemplazados = crate::db::ingesta::marcar_reemplazados_por_periodo(
+                            &mut tx,
+                            ctx.id_registro_patronal,
+                            a.lote.anio,
+                            a.lote.mes,
+                            id_nuevo,
+                        )?;
+                        if reemplazados > 0 {
+                            log::info!(
+                                "Reemplazados {} archivo(s) previos del periodo {}-{:02} (RP {})",
+                                reemplazados,
+                                a.lote.anio,
+                                a.lote.mes,
+                                ctx.id_registro_patronal
+                            );
+                        }
+                    }
+                }
+            }
+
             for emp in &biz.employees {
-                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx).map_err(|e| {
+                if let Some(msg) = describe_trabajador_sin_detalles(emp, current_file_label) {
+                    stats.errores.push(msg);
+                    current_emp_idx += 1;
+                    if let Some(cb) = progress_cb {
+                        if current_emp_idx % 15 == 0 || current_emp_idx == total_emps {
+                            cb(biz_idx + 1, total_biz, current_file_label);
+                        }
+                    }
+                    continue;
+                }
+
+                let id_archivo = emp
+                    .file_name
+                    .as_deref()
+                    .and_then(|nombre| mapa_archivos.get(nombre).copied());
+
+                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx, id_archivo).map_err(|e| {
                     format!(
                         "Error insertando liquidación de trabajador '{}' (NSS: {}, archivo: '{}'): {}",
                         emp.nombre.as_deref().unwrap_or("SIN NOMBRE"),
@@ -1867,12 +2002,6 @@ pub fn save_cedulas_audit_to_db(
                 .map_err(|e| format!("Error sincronizando reportes_liquidaciones de la revisión: {}", e))?;
         }
 
-        // Fase 4A (Coordinación con rustfs antes del COMMIT de PostgreSQL):
-        // Si la promoción de staging en rustfs falla, se aborta y revierte también la transacción de PostgreSQL.
-        if let Some(commit_hook) = rustfs_commit_hook {
-            commit_hook()?;
-        }
-
         stats.id_revision = resolved_rev_id;
         stats.id_registro_patronal = resolved_rp_id;
 
@@ -1882,8 +2011,9 @@ pub fn save_cedulas_audit_to_db(
     if let Err(err_msg) = tx_result {
         let _ = tx.rollback();
         crate::app_logger::log_db_error(
-            "ROLLBACK save_cedulas_audit_to_db",
+            "ROLLBACK guardar_cedulas_lote",
             &[
+                "public.archivos_cedulas",
                 "public.liquidaciones",
                 "public.detalles_liquidaciones",
                 "public.vinculaciones_obras_liquidaciones",
@@ -1899,8 +2029,9 @@ pub fn save_cedulas_audit_to_db(
         let detailed = crate::db::schema::format_pg_error(&e);
         let msg = format!("Error confirmando transacción (COMMIT) en PostgreSQL: {}", detailed);
         crate::app_logger::log_db_error(
-            "COMMIT_FAILED save_cedulas_audit_to_db",
+            "COMMIT_FAILED guardar_cedulas_lote",
             &[
+                "public.archivos_cedulas",
                 "public.liquidaciones",
                 "public.detalles_liquidaciones",
                 "public.vinculaciones_obras_liquidaciones",
@@ -1910,6 +2041,40 @@ pub fn save_cedulas_audit_to_db(
             &msg,
         );
         return Err(msg);
+    }
+
+    // Fases posteriores al COMMIT: PostgreSQL ya es válido; un fallo aquí no revierte los datos.
+    if let Some(promover) = promover_en_almacen {
+        let pendientes = ids_registrados.len();
+        if let Err(e) = promover() {
+            log::error!(
+                "Datos de cédulas guardados en PostgreSQL, pero falló la promoción en RustFS ({} archivo(s)): {}",
+                pendientes,
+                e
+            );
+            stats.errores.push(format!(
+                "Los datos se guardaron, pero {} archivo(s) PDF quedaron pendientes de mover en RustFS; se reintentará automáticamente: {}",
+                pendientes, e
+            ));
+            return Ok(stats);
+        }
+
+        match pool.get() {
+            Ok(mut conn) => {
+                for id in &ids_registrados {
+                    if let Err(e) = crate::db::ingesta::marcar_archivo_activo(&mut *conn, *id) {
+                        log::warn!("Archivo {id} promovido en RustFS pero no activado en BD: {e}");
+                        stats.errores.push(format!("Archivo {id} promovido pero no activado en BD: {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Sin conexión para activar {pendientes} archivo(s) promovidos: {e}");
+                stats.errores.push(format!(
+                    "Archivos promovidos en RustFS pero sin activar en BD (se reintentará): {e}"
+                ));
+            }
+        }
     }
 
     Ok(stats)

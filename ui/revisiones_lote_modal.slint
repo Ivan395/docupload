@@ -1,0 +1,296 @@
+// Alta masiva de revisiones (ADD-03): modal con generador por prefijo y tabla pegada o importada.
+import { ScrollView, LineEdit, TextEdit } from "std-widgets.slint";
+import { AppData, AppLogic } from "models.slint";
+
+component BotonLote inherits Rectangle {
+    in property <string> texto;
+    in property <bool> primario: false;
+    in property <bool> habilitado: true;
+    callback clicked();
+
+    height: 32px;
+    border-radius: 6px;
+    background: !habilitado ? #94a3b8 : (primario ? (ta.has-hover ? #1d4ed8 : #1e3a8a) : (ta.has-hover ? #e2e8f0 : #f8fafc));
+    border-width: primario ? 0px : 1px;
+    border-color: #cbd5e1;
+
+    Text {
+        text: root.texto;
+        font-size: 12px;
+        font-weight: 700;
+        color: primario ? #ffffff : #334155;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: habilitado ? pointer : not-allowed;
+        clicked => {
+            if (habilitado) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+export component RevisionesLoteModal inherits Rectangle {
+    background: #00000077;
+    width: 100%;
+    height: 100%;
+
+    // Bloqueador de clics hacia el fondo
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+
+    Rectangle {
+        width: Math.min(parent.width - 40px, 900px);
+        height: Math.min(parent.height - 40px, 640px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 12px;
+        background: #ffffff;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+
+            // Encabezado
+            HorizontalLayout {
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: "Alta masiva de revisiones";
+                        font-size: 15px;
+                        font-weight: 800;
+                        color: #0f172a;
+                    }
+                    Text {
+                        text: "Crea varias revisiones del registro patronal seleccionado de una vez.";
+                        font-size: 11px;
+                        color: #64748b;
+                    }
+                }
+            }
+
+            // Sección (a): generador por prefijo
+            Rectangle {
+                background: #f8fafc;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 6px;
+                    Text {
+                        text: "Generar por prefijo";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #0f172a;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "Prefijo de nombre"; font-size: 10px; color: #64748b; }
+                            gen_prefijo_nombre := LineEdit { placeholder-text: "REV-"; }
+                        }
+                        VerticalLayout {
+                            spacing: 2px;
+                            Text { text: "Prefijo de folio (opcional)"; font-size: 10px; color: #64748b; }
+                            gen_prefijo_folio := LineEdit { placeholder-text: "F-"; }
+                        }
+                        VerticalLayout {
+                            spacing: 2px;
+                            width: 90px;
+                            Text { text: "Desde"; font-size: 10px; color: #64748b; }
+                            gen_desde := LineEdit { text: "1"; }
+                        }
+                        VerticalLayout {
+                            spacing: 2px;
+                            width: 90px;
+                            Text { text: "Cantidad"; font-size: 10px; color: #64748b; }
+                            gen_cantidad := LineEdit { placeholder-text: "1 a 200"; }
+                        }
+                        VerticalLayout {
+                            alignment: end;
+                            BotonLote {
+                                width: 110px;
+                                texto: "Generar";
+                                habilitado: !AppData.revisiones_lote_procesando;
+                                clicked => {
+                                    AppLogic.revisiones_lote_generar(gen_prefijo_nombre.text, gen_prefijo_folio.text, gen_desde.text, gen_cantidad.text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sección (b): pegar o importar
+            Rectangle {
+                background: #f8fafc;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 6px;
+                    Text {
+                        text: "Pegar o importar";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #0f172a;
+                    }
+                    Text {
+                        text: "Columnas: NOMBRE, FOLIO, CONCEPTO, ESTATUS, PERIODO INICIO, PERIODO FIN, F. APROBACIÓN IMSS, F. ENTREGA REVISIÓN";
+                        font-size: 10px;
+                        color: #64748b;
+                        wrap: word-wrap;
+                    }
+                    rev_lote_texto := TextEdit {
+                        height: 80px;
+                        text <=> AppData.revisiones_lote_texto;
+                        placeholder-text: "Pega aquí desde Excel (con o sin encabezado)";
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        BotonLote {
+                            width: 130px;
+                            texto: "Importar archivo…";
+                            habilitado: !AppData.revisiones_lote_procesando;
+                            clicked => { AppLogic.revisiones_lote_elegir_archivo(); }
+                        }
+                        BotonLote {
+                            width: 130px;
+                            texto: "Vista previa";
+                            primario: true;
+                            habilitado: !AppData.revisiones_lote_procesando;
+                            clicked => { AppLogic.revisiones_lote_vista_previa(AppData.revisiones_lote_texto); }
+                        }
+                    }
+                }
+            }
+
+            // Lista de la vista previa
+            Rectangle {
+                vertical-stretch: 1;
+                border-width: 1px;
+                border-color: #e2e8f0;
+                border-radius: 8px;
+                background: #ffffff;
+
+                if AppData.revisiones_lote_filas.length == 0 : Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: AppData.revisiones_lote_procesando ? "Validando…" : "Sin vista previa. Genera o pega revisiones y pulsa Vista previa.";
+                    font-size: 12px;
+                    color: #94a3b8;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                if AppData.revisiones_lote_filas.length > 0 : ScrollView {
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 4px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { width: 30px; text: "✓"; font-size: 10px; font-weight: 700; color: #64748b; }
+                            Text { width: 40px; text: "Ren."; font-size: 10px; font-weight: 700; color: #64748b; }
+                            Text { width: 150px; text: "Nombre"; font-size: 10px; font-weight: 700; color: #64748b; }
+                            Text { width: 110px; text: "Folio"; font-size: 10px; font-weight: 700; color: #64748b; }
+                            Text { width: 200px; text: "Periodo"; font-size: 10px; font-weight: 700; color: #64748b; }
+                            Text { width: 100px; text: "F. aprobación"; font-size: 10px; font-weight: 700; color: #64748b; }
+                            Text { horizontal-stretch: 1; text: "Estado"; font-size: 10px; font-weight: 700; color: #64748b; }
+                        }
+
+                        for fila[i] in AppData.revisiones_lote_filas : Rectangle {
+                            height: fila.errores == "" ? 26px : 40px;
+                            background: Math.mod(i, 2) == 0 ? #ffffff : #f8fafc;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                padding-left: 4px;
+                                padding-right: 4px;
+
+                                Rectangle {
+                                    width: 30px;
+                                    Text {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        text: fila.incluir ? "☑" : "☐";
+                                        font-size: 14px;
+                                        color: fila.puede_incluir ? #1e3a8a : #cbd5e1;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        mouse-cursor: fila.puede_incluir ? pointer : not-allowed;
+                                        clicked => {
+                                            if (fila.puede_incluir) {
+                                                AppLogic.revisiones_lote_alternar(i);
+                                            }
+                                        }
+                                    }
+                                }
+                                Text { width: 40px; text: fila.renglon; font-size: 11px; color: #334155; vertical-alignment: center; }
+                                Text { width: 150px; text: fila.nombre; font-size: 11px; font-weight: 600; color: #0f172a; overflow: elide; vertical-alignment: center; }
+                                Text { width: 110px; text: fila.folio; font-size: 11px; color: #334155; overflow: elide; vertical-alignment: center; }
+                                Text { width: 200px; text: fila.periodo; font-size: 11px; color: #334155; overflow: elide; vertical-alignment: center; }
+                                Text { width: 100px; text: fila.aprobacion; font-size: 11px; color: #334155; vertical-alignment: center; }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    Text {
+                                        text: fila.estado;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        color: fila.es_error ? #b91c1c : #334155;
+                                    }
+                                    if fila.errores != "" : Text {
+                                        text: fila.errores;
+                                        font-size: 10px;
+                                        color: #b91c1c;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Resumen y pie
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: AppData.revisiones_lote_resumen;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: #334155;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+                BotonLote {
+                    width: 110px;
+                    texto: "Cancelar";
+                    clicked => { AppLogic.revisiones_lote_cerrar(); }
+                }
+                BotonLote {
+                    width: 150px;
+                    texto: AppData.revisiones_lote_procesando ? "Procesando…" : "Crear revisiones";
+                    primario: true;
+                    habilitado: !AppData.revisiones_lote_procesando;
+                    clicked => { AppLogic.revisiones_lote_aplicar(); }
+                }
+            }
+        }
+    }
+}

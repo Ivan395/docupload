@@ -1,0 +1,146 @@
+import { ScrollView, LineEdit } from "std-widgets.slint";
+import { AppData, AppLogic } from "models.slint";
+
+// Botón compacto del selector de analista (primario o neutro).
+component AnalistaBoton inherits Rectangle {
+    in property <string> texto;
+    in property <bool> primario: false;
+    callback clicked();
+
+    height: 36px;
+    min-width: 110px;
+    border-radius: 6px;
+    background: root.primario
+        ? (toque.has-hover ? #1d4ed8 : #1e3a8a)
+        : (toque.has-hover ? #e2e8f0 : #ffffff);
+    border-width: 1px;
+    border-color: root.primario ? #1e3a8a : #cbd5e1;
+
+    Text {
+        text: root.texto;
+        font-size: 13px;
+        font-weight: 700;
+        color: root.primario ? #ffffff : #334155;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    toque := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component AnalistaModal inherits Rectangle {
+    background: #00000077;
+    width: 100%;
+    height: 100%;
+
+    // Bloqueador de clics hacia la vista principal
+    TouchArea { }
+
+    Rectangle {
+        width: Math.min(parent.width - 40px, 460px);
+        height: Math.min(parent.height - 40px, 420px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 12px;
+        background: #ffffff;
+        clip: true;
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+
+            Text {
+                text: "¿Quién está trabajando?";
+                font-size: 18px;
+                font-weight: 800;
+                color: #0f172a;
+            }
+
+            Text {
+                text: "Tus cambios quedarán registrados con tu nombre y solo podrás deshacer los tuyos.";
+                font-size: 12px;
+                color: #475569;
+                wrap: word-wrap;
+            }
+
+            // Lista de analistas existentes
+            ScrollView {
+                vertical-stretch: 1;
+                content-width: self.width;
+
+                VerticalLayout {
+                    spacing: 6px;
+
+                    if AppData.analistas_lista.length == 0 : Text {
+                        text: "Aún no hay analistas registrados.";
+                        font-size: 12px;
+                        color: #64748b;
+                    }
+
+                    for nombre in AppData.analistas_lista : Rectangle {
+                        height: 38px;
+                        border-radius: 6px;
+                        background: fila.has-hover ? #eff6ff : #f8fafc;
+                        border-width: 1px;
+                        border-color: fila.has-hover ? #3b82f6 : #e2e8f0;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+
+                            Text {
+                                text: nombre;
+                                font-size: 13px;
+                                font-weight: 700;
+                                color: #1e293b;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        fila := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { AppLogic.analista_elegir(nombre); }
+                        }
+                    }
+                }
+            }
+
+            // Alta de un analista nuevo
+            Text {
+                text: "Nuevo analista";
+                font-size: 12px;
+                font-weight: 700;
+                color: #334155;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: "Nuevo analista";
+                    text <=> AppData.analista_nuevo_nombre;
+                    accepted => { AppLogic.analista_elegir(AppData.analista_nuevo_nombre); }
+                }
+
+                AnalistaBoton {
+                    texto: "Agregar y continuar";
+                    primario: true;
+                    clicked => { AppLogic.analista_elegir(AppData.analista_nuevo_nombre); }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+
+                AnalistaBoton {
+                    texto: "Cerrar";
+                    clicked => { AppLogic.analista_cerrar_selector(); }
+                }
+            }
+        }
+    }
+}

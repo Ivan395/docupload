@@ -1,5 +1,6 @@
 import { ScrollView, LineEdit, Button, Switch } from "std-widgets.slint";
 import { AppData, AppLogic, EmpleadoData } from "models.slint";
+import { HistorialEmpleadoModal } from "historial_empleado_modal.slint";
 
 export component EmpleadosView inherits Rectangle {
     background: #f8fafc;
@@ -165,6 +166,38 @@ export component EmpleadosView inherits Rectangle {
                         }
                     }
 
+                    // D-8: filtros por estado laboral y obras actuales
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: center;
+
+                        for etiqueta[idx] in ["Todos", "Dados de baja", "Sin obra actual", "Con 2+ obras"] : Rectangle {
+                            height: 32px;
+                            border-radius: 6px;
+                            background: AppData.empleados_filtro == idx ? #1e3a8a : #f8fafc;
+                            border-width: 1px;
+                            border-color: AppData.empleados_filtro == idx ? #1e3a8a : #cbd5e1;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                alignment: center;
+                                Text {
+                                    text: etiqueta;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: AppData.empleados_filtro == idx ? #ffffff : #475569;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { AppLogic.empleados_cambiar_filtro(idx); }
+                            }
+                        }
+                    }
+
                     Text {
                         text: AppData.empleados_list.length + " Registros mostrados";
                         font-size: 11px;
@@ -209,8 +242,10 @@ export component EmpleadosView inherits Rectangle {
                             Rectangle { width: 170px; Text { text: "CURP & NSS"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
                             Rectangle { width: 130px; Text { text: "REG. PATRONAL"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
                             Rectangle { width: 110px; Text { text: "SBC DIARIO"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 100px; Text { text: "ESTADO"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
-                            Rectangle { width: 90px; Text { text: "ACCIÓN"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                            Rectangle { width: 130px; Text { text: "ESTADO"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                            Rectangle { width: 80px; Text { text: "OBRAS ACT."; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                            Rectangle { width: 120px; Text { text: "ÚLTIMA OBRA"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                            Rectangle { width: 170px; Text { text: "ACCIÓN"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
                         }
                     }
 
@@ -378,48 +413,120 @@ export component EmpleadosView inherits Rectangle {
                                         }
                                     }
 
-                                    // Columna 5: Estado (Activo / Baja)
+                                    // Columna 5: Estado laboral derivado de la cédula (D-8)
                                     Rectangle {
-                                        width: 100px;
-                                        HorizontalLayout {
+                                        width: 130px;
+                                        VerticalLayout {
                                             alignment: center;
+                                            spacing: 2px;
 
-                                            Rectangle {
-                                                height: 24px;
-                                                width: 76px;
-                                                border-radius: 12px;
-                                                background: emp.esta_activo ? #ecfdf5 : #f1f5f9;
-                                                border-width: 1px;
-                                                border-color: emp.esta_activo ? #a7f3d0 : #cbd5e1;
-                                                y: (parent.height - self.height) / 2;
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    height: 24px;
+                                                    width: 124px;
+                                                    border-radius: 12px;
+                                                    background: emp.estado_es_baja ? #fef2f2 : #ecfdf5;
+                                                    border-width: 1px;
+                                                    border-color: emp.estado_es_baja ? #fecaca : #a7f3d0;
 
-                                                HorizontalLayout {
-                                                    alignment: center;
-                                                    spacing: 5px;
-                                                    Rectangle {
-                                                        width: 6px;
-                                                        height: 6px;
-                                                        border-radius: 3px;
-                                                        background: emp.esta_activo ? #059669 : #94a3b8;
-                                                        y: (parent.height - self.height) / 2;
-                                                    }
-                                                    Text {
-                                                        text: emp.esta_activo ? "Activo" : "Baja";
-                                                        font-size: 11px;
-                                                        font-weight: 700;
-                                                        color: emp.esta_activo ? #065f46 : #64748b;
-                                                        vertical-alignment: center;
+                                                    HorizontalLayout {
+                                                        alignment: center;
+                                                        spacing: 5px;
+                                                        padding-left: 8px;
+                                                        padding-right: 8px;
+                                                        Rectangle {
+                                                            width: 6px;
+                                                            height: 6px;
+                                                            border-radius: 3px;
+                                                            background: emp.estado_es_baja ? #dc2626 : #059669;
+                                                            y: (parent.height - self.height) / 2;
+                                                        }
+                                                        Text {
+                                                            text: emp.estado_texto;
+                                                            font-size: 10.5px;
+                                                            font-weight: 700;
+                                                            color: emp.estado_es_baja ? #991b1b : #065f46;
+                                                            overflow: elide;
+                                                            vertical-alignment: center;
+                                                        }
                                                     }
                                                 }
+                                            }
+
+                                            // Marcador: estado fijado a mano por el analista
+                                            if emp.estado_manual : Text {
+                                                text: "✎ manual";
+                                                font-size: 9px;
+                                                font-weight: 700;
+                                                color: #64748b;
+                                                horizontal-alignment: center;
                                             }
                                         }
                                     }
 
-                                    // Columna 6: Botón Editar
+                                    // Columna 6: Obras actuales (obras con días en el último mes)
                                     Rectangle {
-                                        width: 90px;
+                                        width: 80px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: emp.obras_actuales;
+                                                font-size: 12.5px;
+                                                font-weight: 700;
+                                                color: emp.obras_actuales == 0 ? #94a3b8 : #0f172a;
+                                                horizontal-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Columna 7: Última obra
+                                    Rectangle {
+                                        width: 120px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: emp.ultima_obra != "" ? emp.ultima_obra : "—";
+                                                font-size: 11.5px;
+                                                font-weight: 700;
+                                                color: #1e293b;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+
+                                    // Columna 8: Acciones (Historial / Editar)
+                                    Rectangle {
+                                        width: 170px;
                                         HorizontalLayout {
                                             alignment: center;
+                                            spacing: 6px;
+
+                                            Rectangle {
+                                                width: 80px;
+                                                height: 28px;
+                                                border-radius: 6px;
+                                                background: hist_emp_btn.has-hover ? #f0fdf4 : #ffffff;
+                                                border-width: 1px;
+                                                border-color: #a7f3d0;
+                                                y: (parent.height - self.height) / 2;
+
+                                                HorizontalLayout {
+                                                    alignment: center;
+                                                    Text {
+                                                        text: "Historial";
+                                                        font-size: 11px;
+                                                        font-weight: 700;
+                                                        color: #047857;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                hist_emp_btn := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { AppLogic.historial_empleado_abrir(emp.id, emp.nombre); }
+                                                }
+                                            }
 
                                             Rectangle {
                                                 width: 80px;
@@ -680,4 +787,7 @@ export component EmpleadosView inherits Rectangle {
             }
         }
     }
+
+    // Histórico empleado × obra (D-10 b)
+    if AppData.show_historial_empleado : HistorialEmpleadoModal { }
 }

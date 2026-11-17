@@ -1,14 +1,10 @@
 use chrono::{Datelike, NaiveDate, Utc};
 use postgres::{Client, Transaction};
-use rayon::prelude::*;
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 use uuid::Uuid;
 
-use crate::cedulas::business::{mes_to_periodo_int, month_num_to_name, month_to_num, Business};
+use crate::cedulas::business::{month_num_to_name, month_to_num, Business};
 use crate::cedulas::employees::Employee as CedulaEmployee;
-use crate::db::client::DbPool;
 
 #[derive(Debug, Default, Clone)]
 pub struct CedulasDbStats {
@@ -22,6 +18,20 @@ pub struct CedulasDbStats {
     pub id_revision: Option<Uuid>,
 }
 
+/// Días de obra válidos según la cédula: 1..=31. Fuera de rango → None (dato ilegible, no se inventa).
+pub fn dias_obra_validos(dias: i32) -> Option<i16> {
+    if (1..=31).contains(&dias) {
+        Some(dias as i16)
+    } else {
+        None
+    }
+}
+
+/// Suma días de obra consolidados por obra, limitando el total a 31 sin imponer mínimo artificial.
+pub fn sumar_dias_obra(acumulado: i16, dias: i16) -> i16 {
+    acumulado.saturating_add(dias).min(31)
+}
+
 fn truncate_str(s: Option<&str>, max_len: usize) -> Option<String> {
     s.map(|val| {
         let trimmed = val.trim();
@@ -33,14 +43,14 @@ fn truncate_str(s: Option<&str>, max_len: usize) -> Option<String> {
     })
 }
 
-fn normalize_mes_periodo(mes_opt: Option<&str>) -> String {
+pub fn normalize_mes_periodo(mes_opt: Option<&str>) -> String {
     let raw = mes_opt.unwrap_or("ENERO").trim();
     let num = month_to_num(raw);
     let valid_num = if (1..=12).contains(&num) { num } else { 1 };
     month_num_to_name(valid_num).to_string()
 }
 
-fn normalize_anio_periodo(anio_opt: Option<&str>) -> i16 {
+pub fn normalize_anio_periodo(anio_opt: Option<&str>) -> i16 {
     let curr_year = Utc::now().year() as i16;
     if let Some(s) = anio_opt {
         if let Ok(y) = s.trim().parse::<i16>() {
@@ -50,6 +60,40 @@ fn normalize_anio_periodo(anio_opt: Option<&str>) -> i16 {
         }
     }
     curr_year
+}
+
+/// Resuelve (mes 1..=12, año 1990..=2099) de una cédula SIN valores por defecto.
+/// Devuelve None si el mes o el año no se pueden leer; el llamador debe rechazar la cédula.
+pub fn resolve_periodo_cedula(emp: &CedulaEmployee) -> Option<(i16, i16)> {
+    let first = emp.data_employee.first();
+    let en_rango_mes = |v: i16| (1..=12).contains(&v);
+
+    // Mes: entero ya detectado en el empleado, luego texto, luego entero del primer detalle
+    let mes = if en_rango_mes(emp.mes_periodo_int) {
+        Some(emp.mes_periodo_int)
+    } else {
+        emp.mes_periodo
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| first.and_then(|de| de.mes_periodo.as_deref()))
+            .map(|s| month_to_num(s.trim()))
+            .filter(|n| (1..=12).contains(n))
+            .map(|n| n as i16)
+            .or_else(|| first.map(|de| de.mes_periodo_int).filter(|v| en_rango_mes(*v)))
+    }?;
+
+    // Año: texto del empleado o del primer detalle, solo 1990..=2099
+    let anio = emp
+        .anio_periodo
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| first.and_then(|de| de.anio_periodo.as_deref()))?
+        .trim()
+        .parse::<i16>()
+        .ok()
+        .filter(|y| (1990..=2099).contains(y))?;
+
+    Some((mes, anio))
 }
 
 #[derive(Clone)]
@@ -130,7 +174,16 @@ fn update_cliente_and_rp_from_biz(
     })?;
 
     // 2. Actualizar Cliente
-    let rz_upper = biz.razon_social.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty());
+    let rz_upper = biz
+        .razon_social
+        .as_deref()
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| {
+            !s.is_empty()
+                && !s.contains("BIMESTRE DE PROCESO")
+                && !s.contains("FECHA DE PROCESO")
+                && !s.contains("PERIODO DE PROCESO")
+        });
 
     // RFC: si se extrajo de la cédula, validar si no entra en conflicto con otro cliente
     let rfc_c = biz.rfc.as_deref().map(|s| {
@@ -282,6 +335,7 @@ fn get_obra_filter_dates(
         WHERE (ro.id_revision = $1
            OR ro.id_registro_patronal = (SELECT r.id_registro_patronal FROM public.revisiones r WHERE r.id = $1))
           AND COALESCE(ro.creado_usuario, false) = true
+          AND ro.activa
         "#,
         &[&id_revision],
     ).unwrap_or_default();
@@ -869,11 +923,98 @@ fn are_details_exact_match(db_rows: &[postgres::Row], incoming: &[crate::cedulas
     true
 }
 
+/// Describe el motivo por el que un trabajador de cédula se omite por no traer renglones de cuotas.
+/// Devuelve `None` si el trabajador sí tiene renglones de cuotas.
+pub fn describe_trabajador_sin_detalles(emp: &CedulaEmployee, archivo: &str) -> Option<String> {
+    if !emp.data_employee.is_empty() {
+        return None;
+    }
+    let nombre = emp.nombre.as_deref().unwrap_or("SIN NOMBRE");
+    let nss = emp.no_seguro_social.as_deref().unwrap_or("N/D");
+    Some(format!(
+        "Trabajador '{}' (NSS {}) sin renglones de cuotas en el archivo '{}': omitido",
+        nombre, nss, archivo
+    ))
+}
+
+/// Busca al empleado existente de un cliente para emparejarlo con la cédula.
+/// Parámetros: $1 id_cliente, $2 NSS, $3 CURP, $4 RFC real (sin genéricos SAT), $5 nombre.
+/// El emparejamiento por nombre solo se acepta si ningún identificador del empleado
+/// existente contradice al de la cédula (evita fusionar homónimos distintos).
+const SQL_BUSCAR_EMPLEADO_CEDULA: &str = r#"
+    SELECT id FROM public.empleados
+    WHERE id_cliente = $1 AND (
+        ($2::text IS NOT NULL AND BTRIM(nss) = $2)
+        OR ($3::text IS NOT NULL AND BTRIM(curp) = $3)
+        OR ($4::text IS NOT NULL AND BTRIM(rfc) = $4)
+        OR ($5::text IS NOT NULL AND nombre = $5
+            -- Nombre solo si ningún identificador del existente contradice al de la cédula
+            AND ($2::text IS NULL OR nss IS NULL OR BTRIM(nss) = '' OR BTRIM(nss) = $2)
+            AND ($3::text IS NULL OR curp IS NULL OR BTRIM(curp) = '' OR BTRIM(curp) = $3)
+            AND ($4::text IS NULL OR rfc IS NULL OR BTRIM(rfc) = '' OR BTRIM(rfc) IN ('XAXX010101000', 'XEXX010101000') OR BTRIM(rfc) = $4))
+    )
+    ORDER BY
+        CASE
+            WHEN $2::text IS NOT NULL AND BTRIM(nss) = $2 THEN 1
+            WHEN $3::text IS NOT NULL AND BTRIM(curp) = $3 THEN 2
+            WHEN $4::text IS NOT NULL AND BTRIM(rfc) = $4 THEN 3
+            ELSE 4
+        END
+    LIMIT 1
+    "#;
+
+/// Inserta liquidación de forma idempotente frente a la restricción única
+/// (registro patronal, empleado, año, mes). Ante carrera con otra carga devuelve la fila existente.
+/// Parámetros: $1 id, $2 id_registro_patronal, $3 id_empleado, $4 mes_periodo, $5 mes_periodo_int,
+/// $6 anio_periodo, $7 nombre_archivo, $8 id_archivo, $9 origen.
+/// Salida: id de la liquidación y `insertada` (true solo si se creó una fila nueva).
+const SQL_INSERT_LIQUIDACION_UPSERT: &str = r#"
+    INSERT INTO public.liquidaciones (
+        id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo,
+        nombre_archivo, id_archivo, origen
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT ON CONSTRAINT uq_liquidaciones_rp_emp_periodo DO UPDATE SET
+        nombre_archivo = EXCLUDED.nombre_archivo,
+        id_archivo = COALESCE(EXCLUDED.id_archivo, public.liquidaciones.id_archivo),
+        origen = EXCLUDED.origen
+    RETURNING id, (xmax = 0) AS insertada
+    "#;
+
+/// Inserta empleado con NSS de forma idempotente frente al índice único parcial (id_cliente, nss).
+/// Parámetros: $1 id, $2 id_cliente, $3 nombre, $4 rfc, $5 curp, $6 nss, $7 clave_ubicacion, $8 pensionado.
+/// Salida: id del empleado y `insertado` (true solo si se creó una fila nueva).
+const SQL_INSERT_EMPLEADO_UPSERT: &str = r#"
+    INSERT INTO public.empleados (id, id_cliente, nombre, rfc, curp, nss, clave_ubicacion, pensionado)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (id_cliente, nss) WHERE nss IS NOT NULL AND BTRIM(nss) <> '' DO UPDATE SET
+        nombre = COALESCE(NULLIF(BTRIM(public.empleados.nombre), ''), EXCLUDED.nombre)
+    RETURNING id, (xmax = 0) AS insertado
+    "#;
+
+/// Marca para revisión los reportes ya editados por el analista cuya liquidación cambió de detalles.
+const SQL_MARCAR_CEDULA_ACTUALIZADA: &str = "UPDATE public.reportes_liquidaciones SET cedula_actualizada = true WHERE id_liquidacion = $1 AND editado_usuario = true AND cedula_actualizada = false";
+
+/// Guarda un trabajador de cédula con sus liquidaciones, detalles y vinculaciones a obras.
+/// Regla de conflicto: ante una liquidación existente del mismo RP/empleado/periodo gana la carga
+/// más reciente (sin distinguir SUA de EMA). Las vinculaciones de obra solo se reemplazan cuando la
+/// carga nueva trae obras. `id_archivo` registra el archivo de origen de la liquidación.
 pub fn save_single_cedula_employee_tx(
     tx: &mut Transaction,
     emp: &CedulaEmployee,
     ctx: &BusinessContext,
+    id_archivo: Option<Uuid>,
 ) -> Result<(usize, usize, usize, usize, usize), Box<dyn std::error::Error + Send + Sync>> {
+    // Guarda: sin renglones de cuotas no se crea empleado, liquidación ni vinculación
+    if emp.data_employee.is_empty() {
+        log::warn!(
+            "Trabajador sin renglones de cuotas omitido: NSS {} ({}), archivo '{}'",
+            emp.no_seguro_social.as_deref().unwrap_or("N/D"),
+            emp.nombre.as_deref().unwrap_or("SIN NOMBRE"),
+            emp.file_name.as_deref().unwrap_or("N/D")
+        );
+        return Ok((0, 0, 0, 0, 0));
+    }
+
     let mut empleados_count = 0;
     let mut liquidaciones_count = 0;
     let mut detalles_count = 0;
@@ -962,23 +1103,7 @@ pub fn save_single_cedula_employee_tx(
     let mut empleado_id: Option<Uuid> = None;
     if nss_param.is_some() || curp_param.is_some() || rfc_param.is_some() || nom_param.is_some() {
         let row = tx.query_opt(
-            r#"
-            SELECT id FROM public.empleados
-            WHERE id_cliente = $1 AND (
-                ($2::text IS NOT NULL AND nss = $2)
-                OR ($3::text IS NOT NULL AND curp = $3)
-                OR ($4::text IS NOT NULL AND rfc = $4)
-                OR ($5::text IS NOT NULL AND nombre = $5)
-            )
-            ORDER BY
-                CASE
-                    WHEN $2::text IS NOT NULL AND nss = $2 THEN 1
-                    WHEN $3::text IS NOT NULL AND curp = $3 THEN 2
-                    WHEN $4::text IS NOT NULL AND rfc = $4 THEN 3
-                    ELSE 4
-                END
-            LIMIT 1
-            "#,
+            SQL_BUSCAR_EMPLEADO_CEDULA,
             &[&ctx.id_cliente, &nss_param, &curp_param, &rfc_param, &nom_param],
         )?;
         if let Some(r) = row {
@@ -1031,57 +1156,153 @@ pub fn save_single_cedula_employee_tx(
         }
         None => {
             let new_id = Uuid::now_v7();
-            let row = tx.query_one(
-                r#"
-                INSERT INTO public.empleados (id, id_cliente, nombre, rfc, curp, nss, clave_ubicacion, pensionado)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING id
-                "#,
-                &[
-                    &new_id,
-                    &ctx.id_cliente,
-                    &truncate_str(emp_nombre.as_deref(), 100),
-                    &truncate_str(emp_rfc.as_deref(), 13),
-                    &truncate_str(emp_curp.as_deref(), 18),
-                    &truncate_str(emp_nss.as_deref(), 11),
-                    &emp_clave_ubicacion,
-                    &truncate_str(emp_pensionado.as_deref(), 10),
-                ],
-            )?;
-            empleados_count += 1;
-            row.get(0)
+            let p_nombre = truncate_str(emp_nombre.as_deref(), 100);
+            let p_rfc = truncate_str(emp_rfc.as_deref(), 13);
+            let p_curp = truncate_str(emp_curp.as_deref(), 18);
+            let p_nss = truncate_str(emp_nss.as_deref(), 11);
+            let p_pensionado = truncate_str(emp_pensionado.as_deref(), 10);
+
+            let nss_upsert = p_nss.clone().filter(|s| !s.trim().is_empty());
+            if let Some(nss_val) = nss_upsert {
+                // Con NSS: upsert contra el índice único (id_cliente, nss) para evitar duplicados en carreras
+                let row = tx.query_one(
+                    SQL_INSERT_EMPLEADO_UPSERT,
+                    &[
+                        &new_id,
+                        &ctx.id_cliente,
+                        &p_nombre,
+                        &p_rfc,
+                        &p_curp,
+                        &nss_val,
+                        &emp_clave_ubicacion,
+                        &p_pensionado,
+                    ],
+                )?;
+                let insertado: bool = row.get(1);
+                if insertado {
+                    empleados_count += 1;
+                }
+                row.get(0)
+            } else {
+                // Sin NSS no existe restricción de unicidad aplicable: INSERT simple
+                let row = tx.query_one(
+                    r#"
+                    INSERT INTO public.empleados (id, id_cliente, nombre, rfc, curp, nss, clave_ubicacion, pensionado)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    RETURNING id
+                    "#,
+                    &[
+                        &new_id,
+                        &ctx.id_cliente,
+                        &p_nombre,
+                        &p_rfc,
+                        &p_curp,
+                        &p_nss,
+                        &emp_clave_ubicacion,
+                        &p_pensionado,
+                    ],
+                )?;
+                empleados_count += 1;
+                row.get(0)
+            }
         }
     };
 
     // Liquidación
-    let emp_mes = emp.mes_periodo.as_deref().or_else(|| {
-        emp.data_employee.first().and_then(|de| de.mes_periodo.as_deref())
-    });
-    let emp_anio = emp.anio_periodo.as_deref().or_else(|| {
-        emp.data_employee.first().and_then(|de| de.anio_periodo.as_deref())
-    });
-    let mes_norm = normalize_mes_periodo(emp_mes);
-    let mes_int: i16 = {
-        let parsed = if emp.mes_periodo_int >= 1 && emp.mes_periodo_int <= 12 {
-            emp.mes_periodo_int
-        } else {
-            mes_to_periodo_int(&mes_norm)
-        };
-        if (1..=12).contains(&parsed) { parsed } else { 1 }
+    // Periodo obligatorio: sin mes/año legibles no se asigna a ningún periodo por defecto
+    let (mes_val, anio_val) = match resolve_periodo_cedula(emp) {
+        Some(p) => p,
+        None => {
+            let nss = emp.no_seguro_social.as_deref().unwrap_or("N/D");
+            let archivo = emp.file_name.as_deref().unwrap_or("N/D");
+            return Err(format!(
+                "Periodo (mes/año) no detectado para el trabajador NSS {} en el archivo '{}'",
+                nss, archivo
+            )
+            .into());
+        }
     };
-    let anio_norm = normalize_anio_periodo(emp_anio);
+    let mes_int: i16 = mes_val;
+    let anio_norm: i16 = anio_val;
+    let mes_norm: String = month_num_to_name(mes_val as u32).to_string();
 
     let default_nombre_arch = format!("Cédula SUA {} - {}.pdf", ctx.reg_11, mes_norm);
     let nombre_arch = emp.file_name.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&default_nombre_arch);
 
+    // Pre-calcular Registros de Obra de la cédula antes de deduplicar liquidación (SUA vs EMA)
+    let mut obras_to_process: Vec<(String, i16)> = Vec::new();
+    for ro in &emp.registro_obras {
+        let num_obra = truncate_str(Some(&ro.registro_obra), 15).unwrap_or_default();
+        let clean_num = num_obra.trim();
+        if !clean_num.is_empty() {
+            match crate::validation::validate_registro_obra(clean_num) {
+                Ok(info) => match dias_obra_validos(ro.dias_registro_obra) {
+                    Some(dias) => obras_to_process.push((info.clean, dias)),
+                    None => log::warn!(
+                        "Días de obra fuera de rango ({}) para obra {} del trabajador NSS {}: vinculación descartada",
+                        ro.dias_registro_obra,
+                        clean_num,
+                        emp.no_seguro_social.as_deref().unwrap_or("N/D")
+                    ),
+                },
+                Err(err) => {
+                    let existing_db_ro = tx.query_opt(
+                        "SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND TRIM(numero) = TRIM($3) LIMIT 1",
+                        &[&ctx.id_revision, &ctx.id_registro_patronal, &clean_num],
+                    ).inspect_err(|e| {
+                        let err_str = crate::db::schema::format_pg_error(e);
+                        crate::app_logger::log_db_error(
+                            "SELECT public.registros_obras fallback check",
+                            &["public.registros_obras"],
+                            "SELECT numero FROM public.registros_obras WHERE ...",
+                            &err_str,
+                        );
+                    })?;
+                    if let Some(row) = existing_db_ro {
+                        let existing_num: String = row.get(0);
+                        match dias_obra_validos(ro.dias_registro_obra) {
+                            Some(dias) => obras_to_process.push((existing_num, dias)),
+                            None => log::warn!(
+                                "Días de obra fuera de rango ({}) para obra {} del trabajador NSS {}: vinculación descartada",
+                                ro.dias_registro_obra,
+                                clean_num,
+                                emp.no_seguro_social.as_deref().unwrap_or("N/D")
+                            ),
+                        }
+                    } else {
+                        log::debug!("Ignorando registro de obra no válido desde cédula '{}': {}", clean_num, err);
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicar obras por número consolidando días
+    let mut dedup_map: std::collections::BTreeMap<String, i16> = std::collections::BTreeMap::new();
+    for (num, dias) in obras_to_process {
+        let entry = dedup_map.entry(num).or_insert(0);
+        *entry = sumar_dias_obra(*entry, dias);
+    }
+    let obras_to_process: Vec<(String, i16)> = dedup_map.into_iter().collect();
+
+    let is_authoritative_sua = !obras_to_process.is_empty() || emp.rfc.is_some() || emp.curp.is_some();
+    // Origen de la carga que se registra en la liquidación
+    let origen: &str = if is_authoritative_sua { "SUA" } else { "EMA" };
+
     // Evitar duplicados: consultar todas las liquidaciones existentes para este empleado, registro patronal y período
     let existing_liqs = tx.query(
         r#"
-        SELECT id FROM public.liquidaciones
-        WHERE id_registro_patronal = $1
-          AND id_empleado = $2
-          AND (UPPER(TRIM(mes_periodo)) = $3 OR mes_periodo_int = $5)
-          AND anio_periodo = $4
+        SELECT l.id,
+               EXISTS(
+                   SELECT 1 FROM public.vinculaciones_obras_liquidaciones vol
+                   WHERE vol.id_liquidacion = l.id
+               ) AS has_vinc
+        FROM public.liquidaciones l
+        WHERE l.id_registro_patronal = $1
+          AND l.id_empleado = $2
+          AND (UPPER(TRIM(l.mes_periodo)) = $3 OR l.mes_periodo_int = $5)
+          AND l.anio_periodo = $4
+        ORDER BY has_vinc DESC, l.id ASC
         "#,
         &[&ctx.id_registro_patronal, &id_empleado, &mes_norm, &anio_norm, &mes_int],
     ).inspect_err(|e| {
@@ -1089,13 +1310,14 @@ pub fn save_single_cedula_employee_tx(
         crate::app_logger::log_db_error(
             "SELECT existing_liquidaciones",
             &["public.liquidaciones"],
-            "SELECT id FROM public.liquidaciones WHERE id_registro_patronal = $1 AND id_empleado = $2 AND (UPPER(TRIM(mes_periodo)) = $3 OR mes_periodo_int = $5) AND anio_periodo = $4",
+            "SELECT l.id, EXISTS(...) FROM public.liquidaciones l WHERE ...",
             &err_str,
         );
     })?;
 
     // Verificar si alguna liquidación existente coincide 100% de manera idéntica en todos sus renglones de detalle
     let mut matched_liq_id: Option<Uuid> = None;
+    let mut replace_liq_id: Option<Uuid> = None;
     for row in &existing_liqs {
         let ex_id: Uuid = row.get(0);
         let det_rows = tx.query(
@@ -1123,43 +1345,100 @@ pub fn save_single_cedula_employee_tx(
         }
     }
 
-    // Si ya existe la liquidación con detalles idénticos, reutilizar su ID para asegurar vinculaciones maestras
+    // Regla "gana la carga más reciente": si no hubo coincidencia exacta, los detalles existentes
+    // se reemplazan por los de esta carga, sin distinguir SUA de EMA.
+    if matched_liq_id.is_none() && !existing_liqs.is_empty() {
+        replace_liq_id = Some(existing_liqs[0].get(0));
+    }
+
+    // Si ya existe la liquidación con detalles idénticos, reutilizar su ID y registrar la carga actual;
+    // si los detalles difieren, reemplazarlos en el mismo ID;
+    // de lo contrario, insertar nueva liquidación (idempotente frente a carreras).
     let id_liquidacion = if let Some(ex_id) = matched_liq_id {
+        tx.execute(
+            "UPDATE public.liquidaciones SET nombre_archivo = COALESCE($2, nombre_archivo), id_archivo = COALESCE($3, id_archivo), origen = $4 WHERE id = $1",
+            &[&ex_id, &truncate_str(Some(nombre_arch), 350), &id_archivo, &origen],
+        )?;
         ex_id
     } else {
-        // Si no existe o algo cambió, guardarlo (100% histórico crudo en tablas maestras)
-        let new_id = Uuid::now_v7();
-        tx.execute(
-            r#"
-            INSERT INTO public.liquidaciones (
-                id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7
-            )
-            "#,
-            &[
-                &new_id,
-                &ctx.id_registro_patronal,
-                &id_empleado,
-                &mes_norm,
-                &mes_int,
-                &anio_norm,
-                &truncate_str(Some(nombre_arch), 350),
-            ],
-        ).inspect_err(|e| {
-            let err_str = crate::db::schema::format_pg_error(e);
-            crate::app_logger::log_db_error(
-                "INSERT public.liquidaciones",
-                &["public.liquidaciones"],
-                "INSERT INTO public.liquidaciones (id, id_registro_patronal, id_empleado, mes_periodo, mes_periodo_int, anio_periodo, nombre_archivo) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                &err_str,
-            );
-        })?;
-        liquidaciones_count += 1;
+        let target_liq_id = if let Some(rep_id) = replace_liq_id {
+            tx.execute(
+                r#"
+                UPDATE public.liquidaciones
+                SET mes_periodo = $2, mes_periodo_int = $3,
+                    nombre_archivo = COALESCE($4, nombre_archivo),
+                    id_archivo = COALESCE($5, id_archivo),
+                    origen = $6
+                WHERE id = $1
+                "#,
+                &[
+                    &rep_id,
+                    &mes_norm,
+                    &mes_int,
+                    &truncate_str(Some(nombre_arch), 350),
+                    &id_archivo,
+                    &origen,
+                ],
+            )?;
+            tx.execute(
+                "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion = $1",
+                &[&rep_id],
+            )?;
+            // Los reportes ya editados por el analista deben revisar el cambio de detalles
+            tx.execute(SQL_MARCAR_CEDULA_ACTUALIZADA, &[&rep_id])?;
+            // Las vinculaciones de obra solo se reemplazan si la carga nueva trae obras; si no, se conservan
+            if !obras_to_process.is_empty() {
+                tx.execute(
+                    "DELETE FROM public.vinculaciones_obras_liquidaciones WHERE id_liquidacion = $1",
+                    &[&rep_id],
+                )?;
+            }
+            rep_id
+        } else {
+            let new_id = Uuid::now_v7();
+            let up_row = tx.query_one(
+                SQL_INSERT_LIQUIDACION_UPSERT,
+                &[
+                    &new_id,
+                    &ctx.id_registro_patronal,
+                    &id_empleado,
+                    &mes_norm,
+                    &mes_int,
+                    &anio_norm,
+                    &truncate_str(Some(nombre_arch), 350),
+                    &id_archivo,
+                    &origen,
+                ],
+            ).inspect_err(|e| {
+                let err_str = crate::db::schema::format_pg_error(e);
+                crate::app_logger::log_db_error(
+                    "UPSERT public.liquidaciones",
+                    &["public.liquidaciones"],
+                    "INSERT INTO public.liquidaciones (...) VALUES (...) ON CONFLICT ON CONSTRAINT uq_liquidaciones_rp_emp_periodo DO UPDATE ...",
+                    &err_str,
+                );
+            })?;
+            let target: Uuid = up_row.get(0);
+            let insertada: bool = up_row.get(1);
+            if insertada {
+                liquidaciones_count += 1;
+            } else {
+                // Otra carga concurrente ya creó la liquidación: limpiar sus detalles para no duplicar renglones
+                tx.execute(
+                    "DELETE FROM public.detalles_liquidaciones WHERE id_liquidacion = $1",
+                    &[&target],
+                )?;
+                // Los reportes ya editados por el analista deben revisar el cambio de detalles
+                tx.execute(SQL_MARCAR_CEDULA_ACTUALIZADA, &[&target])?;
+            }
+            target
+        };
 
         // Detalles Liquidación (100% información cruda sin filtrar en tablas maestras)
-        if emp.data_employee.is_empty() {
+        for de in &emp.data_employee {
             let id_det = Uuid::now_v7();
+            let dias_det = de.dias.map(|d| d as i16);
+
             tx.execute(
                 r#"
                 INSERT INTO public.detalles_liquidaciones (
@@ -1172,161 +1451,57 @@ pub fn save_single_cedula_employee_tx(
                 "#,
                 &[
                     &id_det,
-                    &new_id,
-                    &Option::<String>::None,
-                    &Option::<NaiveDate>::None,
-                    &Some(30i16),
-                    &Option::<f64>::None,
-                    &Option::<f64>::None,
-                    &Option::<f64>::None,
-                    &Option::<f64>::None,
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
-                    &Some(0.0f64),
+                    &target_liq_id,
+                    &truncate_str(de.clave.as_deref(), 17),
+                    &de.fecha,
+                    &dias_det,
+                    &de.sdi,
+                    &de.lic,
+                    &de.inc,
+                    &de.aus,
+                    &de.cf,
+                    &de.exc_pat,
+                    &de.exc_obr,
+                    &de.pd_pat,
+                    &de.pd_obr,
+                    &de.gmp_pat,
+                    &de.gmp_obr,
+                    &de.rt,
+                    &de.iv_pat,
+                    &de.iv_obr,
+                    &de.gps,
+                    &de.patronal,
+                    &de.obrera,
+                    &de.subtotal,
                 ],
             ).inspect_err(|e| {
                 let err_str = crate::db::schema::format_pg_error(e);
                 crate::app_logger::log_db_error(
-                    "INSERT public.detalles_liquidaciones (fallback)",
+                    "INSERT public.detalles_liquidaciones",
                     &["public.detalles_liquidaciones"],
                     "INSERT INTO public.detalles_liquidaciones (id, id_liquidacion, ...) VALUES (...)",
                     &err_str,
                 );
             })?;
+
             detalles_count += 1;
-        } else {
-            for de in &emp.data_employee {
-                let id_det = Uuid::now_v7();
-                let dias_det = de.dias.map(|d| d as i16);
-
-                tx.execute(
-                    r#"
-                    INSERT INTO public.detalles_liquidaciones (
-                        id, id_liquidacion, clave, fecha, dias, sdi, lic, inc, aus, cf,
-                        exc_pat, exc_obr, pd_pat, pd_obr, gmp_pat, gmp_obr, rt, iv_pat, iv_obr,
-                        gps, patronal, obrera, subtotal
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
-                    )
-                    "#,
-                    &[
-                        &id_det,
-                        &new_id,
-                        &truncate_str(de.clave.as_deref(), 17),
-                        &de.fecha,
-                        &dias_det,
-                        &de.sdi,
-                        &de.lic,
-                        &de.inc,
-                        &de.aus,
-                        &de.cf,
-                        &de.exc_pat,
-                        &de.exc_obr,
-                        &de.pd_pat,
-                        &de.pd_obr,
-                        &de.gmp_pat,
-                        &de.gmp_obr,
-                        &de.rt,
-                        &de.iv_pat,
-                        &de.iv_obr,
-                        &de.gps,
-                        &de.patronal,
-                        &de.obrera,
-                        &de.subtotal,
-                    ],
-                ).inspect_err(|e| {
-                    let err_str = crate::db::schema::format_pg_error(e);
-                    crate::app_logger::log_db_error(
-                        "INSERT public.detalles_liquidaciones",
-                        &["public.detalles_liquidaciones"],
-                        "INSERT INTO public.detalles_liquidaciones (id, id_liquidacion, ...) VALUES (...)",
-                        &err_str,
-                    );
-                })?;
-
-                detalles_count += 1;
-            }
         }
 
-        new_id
+        target_liq_id
     };
 
-    // Registros de Obra y Vinculaciones Maestras (100% información cruda sin filtrar)
-    let mut obras_to_process: Vec<(String, i16)> = Vec::new();
-    for ro in &emp.registro_obras {
-        let num_obra = truncate_str(Some(&ro.registro_obra), 15).unwrap_or_default();
-        let clean_num = num_obra.trim();
-        if !clean_num.is_empty() {
-            match crate::validation::validate_registro_obra(clean_num) {
-                Ok(info) => {
-                    obras_to_process.push((info.clean, (ro.dias_registro_obra as i16).clamp(1, 31)));
-                }
-                Err(err) => {
-                    let existing_db_ro = tx.query_opt(
-                        "SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND TRIM(numero) = TRIM($3) LIMIT 1",
-                        &[&ctx.id_revision, &ctx.id_registro_patronal, &clean_num],
-                    ).inspect_err(|e| {
-                        let err_str = crate::db::schema::format_pg_error(e);
-                        crate::app_logger::log_db_error(
-                            "SELECT public.registros_obras fallback check",
-                            &["public.registros_obras"],
-                            "SELECT numero FROM public.registros_obras WHERE ...",
-                            &err_str,
-                        );
-                    })?;
-                    if let Some(row) = existing_db_ro {
-                        let existing_num: String = row.get(0);
-                        obras_to_process.push((existing_num, (ro.dias_registro_obra as i16).clamp(1, 31)));
-                    } else {
-                        log::debug!("Ignorando registro de obra no válido desde cédula '{}': {}", clean_num, err);
-                    }
-                }
-            }
-        }
-    }
-    if obras_to_process.is_empty() {
-        if let Some(ref ub) = emp.clave_ubicacion {
-            let num_obra = truncate_str(Some(ub), 15).unwrap_or_default();
-            let clean_num = num_obra.trim();
-            if !clean_num.is_empty() && clean_num != "—" && clean_num != "-" {
-                match crate::validation::validate_registro_obra(clean_num) {
-                    Ok(info) => {
-                        obras_to_process.push((info.clean, 30));
-                    }
-                    Err(err) => {
-                        let existing_db_ro = tx.query_opt(
-                            "SELECT numero FROM public.registros_obras WHERE (id_revision = $1 OR id_registro_patronal = $2) AND TRIM(numero) = TRIM($3) LIMIT 1",
-                            &[&ctx.id_revision, &ctx.id_registro_patronal, &clean_num],
-                        ).inspect_err(|e| {
-                            let err_str = crate::db::schema::format_pg_error(e);
-                            crate::app_logger::log_db_error(
-                                "SELECT public.registros_obras fallback check ub",
-                                &["public.registros_obras"],
-                                "SELECT numero FROM public.registros_obras WHERE ...",
-                                &err_str,
-                            );
-                        })?;
-                        if let Some(row) = existing_db_ro {
-                            let existing_num: String = row.get(0);
-                            obras_to_process.push((existing_num, 30));
-                        } else {
-                            log::debug!("Ignorando clave_ubicacion como registro de obra porque no cumple verificación '{}': {}", clean_num, err);
-                        }
-                    }
-                }
-            }
-        }
+    if !obras_to_process.is_empty() {
+        let valid_ro_numbers: Vec<String> = obras_to_process.iter().map(|(num, _)| num.clone()).collect();
+        let _ = tx.execute(
+            r#"
+            DELETE FROM public.vinculaciones_obras_liquidaciones vol
+            USING public.registros_obras ro
+            WHERE vol.id_registro_obra = ro.id
+              AND vol.id_liquidacion = $1
+              AND TRIM(UPPER(ro.numero)) != ALL($2)
+            "#,
+            &[&id_liquidacion, &valid_ro_numbers],
+        );
     }
 
     for (num_obra, dias_vinc) in obras_to_process {
@@ -1352,8 +1527,14 @@ pub fn save_single_cedula_employee_tx(
                 uuidv7(), $1, $2, $3, 'REGISTRO DE OBRA CÉDULA', $4, $5, false
             )
             ON CONFLICT (id_revision, numero) DO UPDATE SET
-                fecha_inicio = LEAST(public.registros_obras.fecha_inicio, EXCLUDED.fecha_inicio),
-                fecha_fin = GREATEST(public.registros_obras.fecha_fin, EXCLUDED.fecha_fin)
+                fecha_inicio = CASE
+                    WHEN COALESCE(public.registros_obras.creado_usuario, false) THEN public.registros_obras.fecha_inicio
+                    ELSE LEAST(public.registros_obras.fecha_inicio, EXCLUDED.fecha_inicio)
+                END,
+                fecha_fin = CASE
+                    WHEN COALESCE(public.registros_obras.creado_usuario, false) THEN public.registros_obras.fecha_fin
+                    ELSE GREATEST(public.registros_obras.fecha_fin, EXCLUDED.fecha_fin)
+                END
             RETURNING id, (xmax = 0) AS is_inserted
             "#,
             &[&ctx.id_revision, &ctx.id_registro_patronal, &num_obra, &fecha_inicio, &fecha_fin],
@@ -1373,21 +1554,33 @@ pub fn save_single_cedula_employee_tx(
             registros_obras_count += 1;
         }
 
-        // Evitar duplicar vinculación maestra obra - liquidación
+        // Evitar duplicar vinculación maestra obra - liquidación; actualizar días exactos si ya existía
         let existing_vinc = tx.query_opt(
-            "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE id_registro_obra = $1 AND id_liquidacion = $2 LIMIT 1",
-            &[&id_registro_obra, &id_liquidacion],
+            r#"
+            SELECT vol.id 
+            FROM public.vinculaciones_obras_liquidaciones vol
+            JOIN public.registros_obras ro ON ro.id = vol.id_registro_obra
+            WHERE vol.id_liquidacion = $1 AND TRIM(UPPER(ro.numero)) = TRIM(UPPER($2))
+            LIMIT 1
+            "#,
+            &[&id_liquidacion, &num_obra],
         ).inspect_err(|e| {
             let err_str = crate::db::schema::format_pg_error(e);
             crate::app_logger::log_db_error(
                 "SELECT public.vinculaciones_obras_liquidaciones",
                 &["public.vinculaciones_obras_liquidaciones"],
-                "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE id_registro_obra = $1 AND id_liquidacion = $2",
+                "SELECT id FROM public.vinculaciones_obras_liquidaciones WHERE vol.id_liquidacion = $1 AND ro.numero = $2",
                 &err_str,
             );
         })?;
 
-        if existing_vinc.is_none() {
+        if let Some(v_row) = existing_vinc {
+            let id_vinc_existing: Uuid = v_row.get(0);
+            tx.execute(
+                "UPDATE public.vinculaciones_obras_liquidaciones SET id_registro_obra = $2, dias_registro_obra = $3 WHERE id = $1",
+                &[&id_vinc_existing, &id_registro_obra, &dias_vinc],
+            )?;
+        } else {
             let id_vinc = Uuid::now_v7();
             tx.execute(
                 r#"
@@ -1412,134 +1605,6 @@ pub fn save_single_cedula_employee_tx(
     Ok((empleados_count, liquidaciones_count, detalles_count, registros_obras_count, vinculaciones_count))
 }
 
-pub fn save_cedulas_concurrent(
-    pool: &DbPool,
-    businesses: &[Business],
-    progress_cb: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
-) -> Result<CedulasDbStats, String> {
-    if businesses.is_empty() {
-        return Ok(CedulasDbStats::default());
-    }
-
-    let mut init_client = pool.get().map_err(|e| format!("Error de conexión al pool: {}", e))?;
-
-    // Pre-resolve business contexts
-    let mut biz_contexts: Vec<(BusinessContext, Vec<CedulaEmployee>)> = Vec::new();
-    {
-        let mut tx = init_client
-            .transaction()
-            .map_err(|e| format!("Error iniciando transacción de contexto de cédulas: {}", crate::db::schema::format_pg_error(&e)))?;
-
-        for biz in businesses {
-            let ctx = resolve_business_context(&mut tx, biz)
-                .map_err(|e| format!("Error resolviendo patrón de cédula: {}", crate::db::schema::format_boxed_pg_error(e.as_ref())))?;
-            biz_contexts.push((ctx, biz.employees.clone()));
-        }
-
-        tx.commit()
-            .map_err(|e| format!("Error confirmando contextos de patrones: {}", crate::db::schema::format_pg_error(&e)))?;
-    }
-
-    // Flatten all employees with their business context
-    let mut tasks: Vec<(BusinessContext, CedulaEmployee)> = Vec::new();
-    for (ctx, emps) in biz_contexts {
-        for emp in emps {
-            tasks.push((ctx.clone(), emp));
-        }
-    }
-
-    let total = tasks.len();
-    let done_counter = AtomicUsize::new(0);
-    let liquidaciones_count = AtomicUsize::new(0);
-    let detalles_count = AtomicUsize::new(0);
-    let vinculaciones_count = AtomicUsize::new(0);
-    let empleados_count = AtomicUsize::new(0);
-    let registros_obras_count = AtomicUsize::new(0);
-    let errores = Mutex::new(Vec::new());
-
-    tasks.par_iter().for_each(|(ctx, emp)| {
-        let mut client = match pool.get() {
-            Ok(c) => c,
-            Err(e) => {
-                errores.lock().unwrap().push(format!("Error obteniendo conexión del pool para cédula: {}", e));
-                return;
-            }
-        };
-
-        let mut tx = match client.transaction() {
-            Ok(t) => t,
-            Err(e) => {
-                errores.lock().unwrap().push(format!("Error iniciando transacción para trabajador de cédula: {}", crate::db::schema::format_pg_error(&e)));
-                return;
-            }
-        };
-
-        match save_single_cedula_employee_tx(&mut tx, emp, ctx) {
-            Ok((e_c, l_c, d_c, ro_c, v_c)) => {
-                if let Err(e) = tx.commit() {
-                    errores.lock().unwrap().push(format!(
-                        "Error haciendo commit para trabajador {}: {}",
-                        emp.nombre.as_deref().unwrap_or("N/D"),
-                        crate::db::schema::format_pg_error(&e)
-                    ));
-                } else {
-                    empleados_count.fetch_add(e_c, Ordering::Relaxed);
-                    liquidaciones_count.fetch_add(l_c, Ordering::Relaxed);
-                    detalles_count.fetch_add(d_c, Ordering::Relaxed);
-                    registros_obras_count.fetch_add(ro_c, Ordering::Relaxed);
-                    vinculaciones_count.fetch_add(v_c, Ordering::Relaxed);
-                }
-            }
-            Err(e) => {
-                let _ = tx.rollback();
-                errores.lock().unwrap().push(format!(
-                    "Error guardando trabajador de cédula ({}): {}",
-                    emp.nombre.as_deref().unwrap_or("N/D"),
-                    crate::db::schema::format_boxed_pg_error(e.as_ref())
-                ));
-            }
-        }
-
-        let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(cb) = progress_cb {
-            if done % 10 == 0 || done == total {
-                cb(done, total);
-            }
-        }
-    });
-
-    let stats = CedulasDbStats {
-        liquidaciones_guardadas: liquidaciones_count.load(Ordering::Relaxed),
-        detalles_guardados: detalles_count.load(Ordering::Relaxed),
-        vinculaciones_guardadas: vinculaciones_count.load(Ordering::Relaxed),
-        empleados_guardados: empleados_count.load(Ordering::Relaxed),
-        registros_obras_guardados: registros_obras_count.load(Ordering::Relaxed),
-        errores: errores.into_inner().unwrap(),
-        id_registro_patronal: None,
-        id_revision: None,
-    };
-
-    crate::app_logger::log_db_op(
-        "INSERT/UPDATE_CONCURRENT",
-        &[
-            "public.empleados",
-            "public.liquidaciones",
-            "public.detalles_liquidaciones",
-            "public.registros_obras",
-            "public.vinculaciones_obras_liquidaciones",
-        ],
-        "save_cedulas_concurrent",
-        &format!(
-            "empleados={}, liquidaciones={}, detalles={}, obras={}, vinculaciones={}, errores={}",
-            stats.empleados_guardados, stats.liquidaciones_guardadas, stats.detalles_guardados,
-            stats.registros_obras_guardados, stats.vinculaciones_guardadas, stats.errores.len()
-        ),
-        Some(stats.detalles_guardados),
-    );
-
-    Ok(stats)
-}
-
 pub fn save_cedulas_to_db(
     client: &mut Client,
     businesses: &[Business],
@@ -1558,7 +1623,11 @@ pub fn save_cedulas_to_db(
         let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = (|| {
             let ctx = resolve_business_context(&mut tx, biz)?;
             for emp in &biz.employees {
-                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx)?;
+                if let Some(msg) = describe_trabajador_sin_detalles(emp, emp.file_name.as_deref().unwrap_or("N/D")) {
+                    stats.errores.push(msg);
+                    continue;
+                }
+                let (e_c, l_c, d_c, ro_c, v_c) = save_single_cedula_employee_tx(&mut tx, emp, &ctx, None)?;
                 stats.empleados_guardados += e_c;
                 stats.liquidaciones_guardadas += l_c;
                 stats.detalles_guardados += d_c;
@@ -1683,3 +1752,272 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod tests_periodo {
+    use super::*;
+    use crate::cedulas::employees::DataEmployee;
+
+    #[test]
+    fn mes_int_y_anio_directos() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 5,
+            anio_periodo: Some("2026".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), Some((5, 2026)));
+    }
+
+    #[test]
+    fn mes_texto_y_anio_con_espacios() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 0,
+            mes_periodo: Some("marzo".to_string()),
+            anio_periodo: Some(" 2025 ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), Some((3, 2025)));
+    }
+
+    #[test]
+    fn mes_no_reconocido_es_none() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 0,
+            mes_periodo: Some("XYZ".to_string()),
+            anio_periodo: Some("2026".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), None);
+    }
+
+    #[test]
+    fn anio_ausente_es_none() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 4,
+            data_employee: vec![DataEmployee {
+                mes_periodo_int: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), None);
+    }
+
+    #[test]
+    fn anio_fuera_de_rango_es_none() {
+        let emp = CedulaEmployee {
+            mes_periodo_int: 2,
+            anio_periodo: Some("1985".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), None);
+    }
+
+    #[test]
+    fn periodo_desde_primer_detalle() {
+        let emp = CedulaEmployee {
+            data_employee: vec![DataEmployee {
+                mes_periodo: Some("JUNIO".to_string()),
+                anio_periodo: Some("2024".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(resolve_periodo_cedula(&emp), Some((6, 2024)));
+    }
+}
+
+#[cfg(test)]
+mod tests_sin_detalles {
+    use super::*;
+    use crate::cedulas::employees::{DataEmployee, Employee};
+
+    #[test]
+    fn describe_trabajador_sin_renglones_incluye_nombre_nss_y_omitido() {
+        let emp = Employee {
+            nombre: Some("JUAN PEREZ".to_string()),
+            no_seguro_social: Some("12345678901".to_string()),
+            ..Default::default()
+        };
+        let msg = describe_trabajador_sin_detalles(&emp, "cedula.pdf").expect("debe describirse");
+        assert!(msg.contains("JUAN PEREZ"));
+        assert!(msg.contains("12345678901"));
+        assert!(msg.contains("omitido"));
+    }
+
+    #[test]
+    fn describe_trabajador_con_renglones_devuelve_none() {
+        let emp = Employee {
+            data_employee: vec![DataEmployee::default()],
+            ..Default::default()
+        };
+        assert!(describe_trabajador_sin_detalles(&emp, "cedula.pdf").is_none());
+    }
+
+    #[test]
+    fn describe_trabajador_sin_datos_usa_placeholders() {
+        let emp = Employee::default();
+        let msg = describe_trabajador_sin_detalles(&emp, "cedula.pdf").expect("debe describirse");
+        assert!(msg.contains("SIN NOMBRE"));
+        assert!(msg.contains("N/D"));
+    }
+}
+
+#[cfg(test)]
+mod tests_dias_obra {
+    use super::{dias_obra_validos, sumar_dias_obra};
+
+    #[test]
+    fn dias_fuera_de_rango_se_descartan() {
+        assert_eq!(dias_obra_validos(0), None);
+        assert_eq!(dias_obra_validos(-3), None);
+        assert_eq!(dias_obra_validos(32), None);
+    }
+
+    #[test]
+    fn dias_validos_se_conservan() {
+        assert_eq!(dias_obra_validos(1), Some(1));
+        assert_eq!(dias_obra_validos(31), Some(31));
+        assert_eq!(dias_obra_validos(15), Some(15));
+    }
+
+    #[test]
+    fn suma_limitada_a_31() {
+        assert_eq!(sumar_dias_obra(20, 15), 31);
+        assert_eq!(sumar_dias_obra(10, 5), 15);
+        assert_eq!(sumar_dias_obra(i16::MAX, 5), 31);
+    }
+}
+
+#[cfg(test)]
+mod tests_emparejamiento {
+    use super::*;
+
+    /// Colapsa espacios en blanco para que las comparaciones de texto SQL no dependan del formato.
+    fn normalizar(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn sql_no_acepta_nombre_suelto_con_identificador_distinto() {
+        let sql = normalizar(SQL_BUSCAR_EMPLEADO_CEDULA);
+        // Guardas de no-contradicción dentro de la rama de nombre
+        assert!(sql.contains("OR BTRIM(nss) = $2)"), "falta guarda de NSS");
+        assert!(sql.contains("OR BTRIM(curp) = $3)"), "falta guarda de CURP");
+        assert!(sql.contains("OR BTRIM(rfc) = $4)"), "falta guarda de RFC");
+        // La rama de nombre suelta ya no debe existir
+        assert!(
+            !sql.contains("OR ($5::text IS NOT NULL AND nombre = $5)"),
+            "la rama de nombre suelta sigue presente"
+        );
+    }
+
+    #[test]
+    fn homonimo_con_nss_distinto_no_se_fusiona() {
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("PostgreSQL no disponible en test (skipping): {}", e);
+                return;
+            }
+        };
+        let mut tx = match client.transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("No se pudo abrir transacción (skipping): {}", e);
+                return;
+            }
+        };
+
+        // Cliente de prueba (RFC omitido para no chocar con el UNIQUE de genéricos ya existentes)
+        let id_cliente = Uuid::now_v7();
+        let nombre_cliente = format!("CLIENTE PRUEBA HOMONIMOS {}", Uuid::now_v7());
+        tx.execute(
+            "INSERT INTO public.clientes (id, nombre) VALUES ($1, $2)",
+            &[&id_cliente, &nombre_cliente],
+        )
+        .expect("insert de cliente de prueba");
+
+        let nombre_empleado = "JUAN PEREZ LOPEZ";
+        tx.execute(
+            "INSERT INTO public.empleados (id, id_cliente, nombre, nss) VALUES ($1, $2, $3, $4)",
+            &[&Uuid::now_v7(), &id_cliente, &nombre_empleado, &"12345678901"],
+        )
+        .expect("insert de empleado de prueba");
+
+        let nombre_param: Option<String> = Some(nombre_empleado.to_string());
+
+        // NSS distinto: el homónimo no debe emparejarse
+        let nss_distinto: Option<String> = Some("10987654321".to_string());
+        let filas_distinto = tx
+            .query(
+                SQL_BUSCAR_EMPLEADO_CEDULA,
+                &[&id_cliente, &nss_distinto, &None::<String>, &None::<String>, &nombre_param],
+            )
+            .expect("consulta con NSS distinto");
+        assert_eq!(filas_distinto.len(), 0, "un homónimo con NSS distinto se fusionó");
+
+        // Sin NSS en la cédula: el nombre sigue sirviendo
+        let filas_sin_nss = tx
+            .query(
+                SQL_BUSCAR_EMPLEADO_CEDULA,
+                &[&id_cliente, &None::<String>, &None::<String>, &None::<String>, &nombre_param],
+            )
+            .expect("consulta sin NSS");
+        assert_eq!(filas_sin_nss.len(), 1, "el nombre sin contradicción debe emparejar");
+
+        // Siempre revertir: no se deja ningún dato de prueba
+        let _ = tx.rollback();
+    }
+}
+
+#[cfg(test)]
+mod tests_upsert_sql {
+    use super::*;
+
+    /// Colapsa espacios en blanco para que las comparaciones de texto SQL no dependan del formato.
+    fn normalizar(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn insert_liquidacion_es_idempotente_y_registra_origen() {
+        let sql = normalizar(SQL_INSERT_LIQUIDACION_UPSERT);
+        assert!(
+            sql.contains("ON CONFLICT ON CONSTRAINT uq_liquidaciones_rp_emp_periodo"),
+            "falta ON CONFLICT sobre la restricción única de liquidaciones"
+        );
+        assert!(sql.contains("RETURNING id, (xmax = 0)"), "falta RETURNING id, (xmax = 0)");
+        assert!(sql.contains("id_archivo"), "falta registro de id_archivo");
+        assert!(sql.contains("origen"), "falta registro de origen");
+    }
+
+    #[test]
+    fn insert_empleado_es_idempotente_por_nss() {
+        let sql = normalizar(SQL_INSERT_EMPLEADO_UPSERT);
+        assert!(
+            sql.contains("ON CONFLICT (id_cliente, nss) WHERE nss IS NOT NULL"),
+            "falta ON CONFLICT sobre el índice único parcial de NSS"
+        );
+        assert!(sql.contains("RETURNING id, (xmax = 0)"), "falta RETURNING id, (xmax = 0)");
+    }
+}
+
+#[cfg(test)]
+mod tests_cedula_actualizada {
+    use super::*;
+
+    /// Colapsa espacios en blanco para que las comparaciones de texto SQL no dependan del formato.
+    fn normalizar(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn marca_solo_reportes_editados_de_la_liquidacion() {
+        let sql = normalizar(SQL_MARCAR_CEDULA_ACTUALIZADA);
+        assert!(sql.contains("editado_usuario = true"), "falta filtro de reportes editados");
+        assert!(sql.contains("cedula_actualizada = true"), "falta marca cedula_actualizada");
+        assert!(sql.contains("id_liquidacion = $1"), "falta filtro por id_liquidacion");
+        assert!(!sql.contains("DELETE"), "la marca no debe borrar datos");
+    }
+}
