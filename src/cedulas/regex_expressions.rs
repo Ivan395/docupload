@@ -117,8 +117,11 @@ pub fn initialize_patterns() -> Result<OCRPatterns, fancy_regex::Error> {
     )?;
     let employee_fechas =
         Regex::new(r"(?im)^[ \t]*(?P<clave>\b(?:alta|baja|reing|rein|reingreso|ms|m/s|ism|inc|aus|b|r|a)\b)[ \t]+(?P<fecha>\d{2}/\d{2}/\d{4})[ \t]*$")?;
+    // Entre el folio y "días" se toleran dos puntos sueltos: el extractor nativo agrupa
+    // caracteres por coordenada Y y a veces pega el ":" de la fila de arriba
+    // ("C0640943 :dias 9" / "C0640943:dias 9"); antes esa obra se descartaba.
     let employee_registro_obras = Regex::new(
-        r"(?im)(?:(?:folio|n[uú]mero|no\.?|num\.?)[\.\t ]*de[\.\t ]*)?registro[\.\t ]*de[\.\t ]*obra[s]?[:]?[\.\t ]*(?P<registro_obra>[a-z0-9_-]+)[\t ]+(?:d\S*as|dias|d[ií]as|d[ií]?)[:\.\t ]*(?P<dias_registro_obra>\d+)",
+        r"(?im)(?:(?:folio|n[uú]mero|no\.?|num\.?)[\.\t ]*de[\.\t ]*)?registro[\.\t ]*de[\.\t ]*obra[s]?[:\.\t ]*(?P<registro_obra>[a-z0-9_-]+)(?:[\t ]+|[\t ]*:[:\t ]*)(?:d\S*as|dias|d[ií]as|d[ií]?)[:\.\t ]*(?P<dias_registro_obra>\d+)",
     )?;
 
     let clean_replace_dias = Regex::new(r"(?i)\bd[\w\u{0080}-\u{024F}\-]*as\b")?;
