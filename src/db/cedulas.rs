@@ -941,10 +941,15 @@ pub fn describe_trabajador_sin_detalles(emp: &CedulaEmployee, archivo: &str) -> 
 /// Parámetros: $1 id_cliente, $2 NSS, $3 CURP, $4 RFC real (sin genéricos SAT), $5 nombre.
 /// El emparejamiento por nombre solo se acepta si ningún identificador del empleado
 /// existente contradice al de la cédula (evita fusionar homónimos distintos).
+/// Un NSS registrado en `empleados_nss_equivalencias` gana sobre todo lo demás: es una
+/// decisión explícita del analista de que ese NSS pertenece al empleado indicado.
 const SQL_BUSCAR_EMPLEADO_CEDULA: &str = r#"
     SELECT id FROM public.empleados
     WHERE id_cliente = $1 AND (
-        ($2::text IS NOT NULL AND BTRIM(nss) = $2)
+        ($2::text IS NOT NULL AND id IN (
+            SELECT eq.id_empleado FROM public.empleados_nss_equivalencias eq
+            WHERE eq.id_cliente = $1 AND eq.nss_alterno = $2))
+        OR ($2::text IS NOT NULL AND BTRIM(nss) = $2)
         OR ($3::text IS NOT NULL AND BTRIM(curp) = $3)
         OR ($4::text IS NOT NULL AND BTRIM(rfc) = $4)
         OR ($5::text IS NOT NULL AND nombre = $5
@@ -955,6 +960,9 @@ const SQL_BUSCAR_EMPLEADO_CEDULA: &str = r#"
     )
     ORDER BY
         CASE
+            WHEN $2::text IS NOT NULL AND id IN (
+                SELECT eq.id_empleado FROM public.empleados_nss_equivalencias eq
+                WHERE eq.id_cliente = $1 AND eq.nss_alterno = $2) THEN 0
             WHEN $2::text IS NOT NULL AND BTRIM(nss) = $2 THEN 1
             WHEN $3::text IS NOT NULL AND BTRIM(curp) = $3 THEN 2
             WHEN $4::text IS NOT NULL AND BTRIM(rfc) = $4 THEN 3
@@ -1967,6 +1975,78 @@ mod tests_emparejamiento {
         assert_eq!(filas_sin_nss.len(), 1, "el nombre sin contradicción debe emparejar");
 
         // Siempre revertir: no se deja ningún dato de prueba
+        let _ = tx.rollback();
+    }
+
+    #[test]
+    fn sql_resuelve_equivalencia_de_nss_con_prioridad() {
+        let sql = normalizar(SQL_BUSCAR_EMPLEADO_CEDULA);
+        assert!(
+            sql.contains("FROM public.empleados_nss_equivalencias eq WHERE eq.id_cliente = $1 AND eq.nss_alterno = $2"),
+            "falta la búsqueda en empleados_nss_equivalencias"
+        );
+        assert!(sql.contains("eq.nss_alterno = $2) THEN 0"), "la equivalencia debe tener prioridad 0");
+    }
+
+    #[test]
+    fn nss_alterno_registrado_empareja_con_el_empleado_destino() {
+        let mut client = match crate::db::client::create_client() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("PostgreSQL no disponible en test (skipping): {}", e);
+                return;
+            }
+        };
+        // DDL fuera de la transacción: CREATE INDEX IF NOT EXISTS toma un bloqueo compartido de la
+        // tabla aunque el índice exista y, dentro de transacciones concurrentes, provoca interbloqueos.
+        if let Err(e) = client.batch_execute(crate::db::schema::SQL_EQUIVALENCIAS_NSS) {
+            eprintln!("No se pudo asegurar la tabla de equivalencias (skipping): {}", e);
+            return;
+        }
+        let mut tx = match client.transaction() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("No se pudo abrir transacción (skipping): {}", e);
+                return;
+            }
+        };
+
+        let id_cliente = Uuid::now_v7();
+        tx.execute(
+            "INSERT INTO public.clientes (id, nombre) VALUES ($1, $2)",
+            &[&id_cliente, &format!("CLIENTE PRUEBA EQUIV NSS {}", Uuid::now_v7())],
+        )
+        .expect("insert de cliente de prueba");
+        let id_destino = Uuid::now_v7();
+        tx.execute(
+            "INSERT INTO public.empleados (id, id_cliente, nombre, nss) VALUES ($1, $2, $3, $4)",
+            &[&id_destino, &id_cliente, &"DE LEON ORTEGA SERGIO", &"43816538771"],
+        )
+        .expect("insert de empleado destino");
+
+        let nss_alterno: Option<String> = Some("02176471171".to_string());
+        let nombre: Option<String> = Some("DE LEON ORTEGA SERGIO".to_string());
+        let buscar = |tx: &mut postgres::Transaction| -> Vec<Uuid> {
+            tx.query(
+                SQL_BUSCAR_EMPLEADO_CEDULA,
+                &[&id_cliente, &nss_alterno, &None::<String>, &None::<String>, &nombre],
+            )
+            .expect("búsqueda de empleado")
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
+        };
+
+        // Sin equivalencia: el NSS alterno contradice al existente y no empareja
+        assert!(buscar(&mut tx).is_empty(), "sin equivalencia no debe emparejar");
+
+        tx.execute(
+            "INSERT INTO public.empleados_nss_equivalencias (id_cliente, nss_alterno, id_empleado) VALUES ($1, $2, $3)",
+            &[&id_cliente, &"02176471171", &id_destino],
+        )
+        .expect("insert de equivalencia");
+        assert_eq!(buscar(&mut tx), vec![id_destino], "la equivalencia debe resolver al destino");
+
         let _ = tx.rollback();
     }
 }

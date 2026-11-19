@@ -664,6 +664,98 @@ export component EmpleadosView inherits Rectangle {
                             }
                         }
 
+                        // 3b. NSS alternos: cédulas/nóminas con estos NSS se cargan a este empleado
+                        if !AppData.emp_edit_is_new : VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "NSS alternos (equivalencias)"; font-size: 11px; font-weight: 700; color: #475569; }
+                            Text {
+                                text: "Las cédulas y nóminas que traigan estos NSS se asignan a este empleado en lugar de crear uno nuevo.";
+                                font-size: 10px;
+                                color: #64748b;
+                                wrap: word-wrap;
+                            }
+
+                            if AppData.emp_equivalencias.length == 0 : Text {
+                                text: "Sin NSS alternos";
+                                font-size: 10.5px;
+                                font-weight: 600;
+                                color: #94a3b8;
+                            }
+
+                            for eq in AppData.emp_equivalencias : Rectangle {
+                                border-radius: 6px;
+                                background: #f8fafc;
+                                border-width: 1px;
+                                border-color: #e2e8f0;
+                                HorizontalLayout {
+                                    padding: 6px;
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 1px;
+                                        Text { text: eq.nss; font-size: 12px; font-weight: 800; color: #0f172a; }
+                                        Text {
+                                            text: (eq.motivo != "" ? eq.motivo + " · " : "") + eq.creada;
+                                            font-size: 10px;
+                                            color: #64748b;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 56px;
+                                        height: 24px;
+                                        border-radius: 6px;
+                                        background: quitar_eq.has-hover ? #fee2e2 : #ffffff;
+                                        border-width: 1px;
+                                        border-color: #fecaca;
+                                        y: (parent.height - self.height) / 2;
+                                        Text {
+                                            text: "Quitar";
+                                            font-size: 10.5px;
+                                            font-weight: 700;
+                                            color: #b91c1c;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        quitar_eq := TouchArea {
+                                            mouse-cursor: pointer;
+                                            enabled: !AppData.emp_equiv_ocupado;
+                                            clicked => { AppLogic.equivalencia_nss_eliminar(eq.id); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                LineEdit {
+                                    horizontal-stretch: 1;
+                                    text <=> AppData.emp_equiv_nuevo_nss;
+                                    placeholder-text: "NSS alterno (11 dígitos)";
+                                    enabled: !AppData.emp_equiv_ocupado;
+                                    accepted => { AppLogic.equivalencia_nss_agregar(); }
+                                }
+                                Button {
+                                    text: "Agregar";
+                                    enabled: !AppData.emp_equiv_ocupado && AppData.emp_equiv_nuevo_nss != "";
+                                    clicked => { AppLogic.equivalencia_nss_agregar(); }
+                                }
+                            }
+                            LineEdit {
+                                text <=> AppData.emp_equiv_nuevo_motivo;
+                                placeholder-text: "Motivo (opcional)";
+                                enabled: !AppData.emp_equiv_ocupado;
+                                accepted => { AppLogic.equivalencia_nss_agregar(); }
+                            }
+                            if AppData.emp_equiv_msg != "" : Text {
+                                text: AppData.emp_equiv_msg;
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: AppData.emp_equiv_msg_error ? #dc2626 : #16a34a;
+                                wrap: word-wrap;
+                            }
+                        }
+
                         // 4. CURP
                         VerticalLayout {
                             spacing: 3px;

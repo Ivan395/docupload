@@ -9,6 +9,7 @@ pub mod config;
 pub mod depuracion_fase1;
 pub mod entregables;
 pub mod diagnostico_integridad;
+pub mod equivalencias_nss;
 pub mod historial_empleados;
 pub mod ingesta;
 pub mod nominas;

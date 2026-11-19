@@ -6816,6 +6816,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let app_data = ui.global::<AppData>();
                 app_data.set_emp_edit_is_new(true);
                 app_data.set_emp_edit_id("".into());
+                crate::empleados_view_logic::limpiar_equivalencias(&app_data);
                 app_data.set_emp_edit_nombre("".into());
                 app_data.set_emp_edit_rfc("".into());
                 app_data.set_emp_edit_curp("".into());
@@ -6880,6 +6881,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_emp_edit_cross_warning("".into());
                                 app_data.set_show_edit_empleado_panel(true);
                                 run_validate_empleado(&ui);
+                                crate::empleados_view_logic::cargar_equivalencias(&ui, pool);
                             }
                         }
                     }

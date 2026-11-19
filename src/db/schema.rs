@@ -354,6 +354,22 @@ ALTER TABLE IF EXISTS revision_history.reportes_cambios ADD COLUMN IF NOT EXISTS
 ALTER TABLE IF EXISTS revision_history.reportes_liquidaciones ADD COLUMN IF NOT EXISTS version integer;
 "#;
 
+pub(crate) const SQL_EQUIVALENCIAS_NSS: &str = r#"
+-- NSS alternos de un empleado: un NSS que aparece en cédulas/nóminas pero que el analista
+-- decidió tratar como el mismo trabajador (p. ej. un trabajador con dos NSS asignados por el IMSS).
+-- La carga consulta esta tabla antes de crear un empleado nuevo. Solo aditivo.
+CREATE TABLE IF NOT EXISTS public.empleados_nss_equivalencias (
+    id uuid PRIMARY KEY DEFAULT uuidv7(),
+    id_cliente uuid NOT NULL REFERENCES public.clientes(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    nss_alterno varchar(11) NOT NULL CHECK (nss_alterno ~ '^[0-9]{11}$'),
+    id_empleado uuid NOT NULL REFERENCES public.empleados(id) ON UPDATE CASCADE ON DELETE CASCADE,
+    motivo text,
+    created_at timestamptz DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_empleados_nss_equivalencias_cliente_nss UNIQUE (id_cliente, nss_alterno)
+);
+CREATE INDEX IF NOT EXISTS idx_empleados_nss_equivalencias_empleado ON public.empleados_nss_equivalencias(id_empleado);
+"#;
+
 pub(crate) const SQL_FASE1_RESTRICCIONES: &str = r#"
 -- a) Empleados: NSS único por cliente (solo NSS no vacíos)
 DO $$
@@ -2376,6 +2392,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     // 18. Correcciones F7: analistas, autoría (created_by/updated_by/id_analista) y versión de reportes (D-6 a)
     exec_schema_step(client, "10_correcciones_f7_analistas", SQL_CORRECCIONES_F7_ANALISTAS)?;
 
+    // 19. Equivalencias de NSS: NSS alternos que la carga resuelve al empleado indicado
+    exec_schema_step(client, "11_equivalencias_nss", SQL_EQUIVALENCIAS_NSS)?;
+
     match restricciones_fase1_pendientes(client) {
         Ok(lista) if !lista.is_empty() => log::warn!(
             "Restricciones de integridad pendientes (hay duplicados por depurar): {}",
@@ -2640,6 +2659,20 @@ mod tests_fase1_ddl {
                 "SQL_CORRECCIONES_F6_EMPLEADOS no debe contener {}",
                 prohibido
             );
+        }
+    }
+
+    #[test]
+    fn equivalencias_nss_es_aditiva() {
+        for fragmento in [
+            "CREATE TABLE IF NOT EXISTS public.empleados_nss_equivalencias",
+            "UNIQUE (id_cliente, nss_alterno)",
+            "REFERENCES public.empleados(id)",
+        ] {
+            assert!(SQL_EQUIVALENCIAS_NSS.contains(fragmento), "falta {} en SQL_EQUIVALENCIAS_NSS", fragmento);
+        }
+        for prohibido in ["DELETE FROM", "UPDATE public.", "DROP ", "TRUNCATE"] {
+            assert!(!SQL_EQUIVALENCIAS_NSS.contains(prohibido), "SQL_EQUIVALENCIAS_NSS no debe contener {}", prohibido);
         }
     }
 
