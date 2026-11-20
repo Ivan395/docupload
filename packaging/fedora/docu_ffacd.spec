@@ -1,18 +1,27 @@
+%{!?pkgversion: %global pkgversion 0.0.0}
+
 Name:           docu_ffacd
-Version:        0.5.0
+Version:        %{pkgversion}
 Release:        1%{?dist}
 Summary:        DocuUpload - Procesamiento concurrente de nóminas SAT y cédulas SUA IMSS
 License:        MIT OR Apache-2.0
 URL:            https://github.com/Ivan395/docupload
 
 Requires:       fontconfig
-Requires:       freetype
 Requires:       libX11
-Requires:       libXext
+Requires:       libX11-xcb
+Requires:       libxcb
+Requires:       libXcursor
+Requires:       libXi
 Requires:       libXrender
-Requires:       libxml2
-Requires:       libpng
-Requires:       zlib
+Requires:       libxkbcommon
+Requires:       libxkbcommon-x11
+Requires:       libwayland-client
+Requires:       libwayland-egl
+Requires:       libglvnd-egl
+Requires:       libglvnd-glx
+Requires:       xdg-utils
+Recommends:     xdg-desktop-portal
 
 %description
 DocuUpload Fiscal & Nóminas ACD

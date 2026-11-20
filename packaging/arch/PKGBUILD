@@ -1,4 +1,5 @@
 # Maintainer: Firma Fiscal ACD <soporte@firmafiscalacd.com>
+# pkgver debe coincidir con la versión de Cargo.toml (package.version)
 pkgname=docu_ffacd
 pkgver=0.5.0
 pkgrel=1
@@ -6,8 +7,10 @@ pkgdesc="DocuUpload - Procesamiento concurrente de nóminas SAT y cédulas SUA I
 arch=('x86_64')
 url="https://github.com/Ivan395/docupload"
 license=('MIT' 'Apache-2.0')
-depends=('fontconfig' 'freetype2' 'libx11' 'libxext' 'libxrender' 'libxml2' 'libpng' 'zlib')
-makedepends=('cargo' 'rust' 'pkgconf')
+# ttf-font: Arch mínimo no trae fuentes y fontique entra en pánico sin ninguna (NoMatch)
+depends=('glibc' 'gcc-libs' 'fontconfig' 'ttf-font' 'libx11' 'libxcb' 'libxcursor' 'libxi' 'libxrender' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'libglvnd' 'xdg-utils')
+optdepends=('xdg-desktop-portal: dialogos de archivos nativos')
+makedepends=('cargo' 'rust' 'pkgconf' 'clang')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Ivan395/docupload/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 

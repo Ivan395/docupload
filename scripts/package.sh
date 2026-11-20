@@ -4,6 +4,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+VERSION="${VERSION:-$(grep -m1 '^version' "$PROJECT_ROOT/Cargo.toml" | cut -d'"' -f2)}"
+
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
@@ -12,7 +14,7 @@ NC='\033[0m'
 
 print_header() {
     echo -e "${BLUE}======================================================${NC}"
-    echo -e "${BLUE}   DocuUpload v0.5.0 - Sistema de Empaquetado Multiplataforma${NC}"
+    echo -e "${BLUE}   DocuUpload v${VERSION} - Sistema de Empaquetado Multiplataforma${NC}"
     echo -e "${BLUE}======================================================${NC}"
 }
 
@@ -55,7 +57,7 @@ install_system_deps() {
 
     if command -v apt-get >/dev/null 2>&1; then
         echo "Detectado gestor de paquetes APT (Debian / Ubuntu / Mint)..."
-        DEPS="build-essential pkg-config libfontconfig1-dev libfreetype6-dev zlib1g-dev libx11-dev libxext-dev libxrender-dev zstd rpm curl zip"
+        DEPS="build-essential pkg-config libfontconfig1-dev libfreetype6-dev zlib1g-dev libx11-dev libxext-dev libxrender-dev zstd rpm curl zip clang libclang-dev g++ libarchive-tools"
         if [ -n "$SUDO_CMD" ]; then
             $SUDO_CMD apt-get update && $SUDO_CMD apt-get install -y $DEPS || echo -e "${YELLOW}Aviso: Falló la instalación automática de algunos paquetes con apt-get.${NC}"
         else
@@ -63,7 +65,7 @@ install_system_deps() {
         fi
     elif command -v dnf >/dev/null 2>&1; then
         echo "Detectado gestor de paquetes DNF (Fedora / RHEL / CentOS)..."
-        DEPS="gcc gcc-c++ make pkgconf-pkg-config fontconfig-devel freetype-devel zlib-devel libX11-devel libXext-devel libXrender-devel rpm-build zstd curl zip"
+        DEPS="gcc gcc-c++ make pkgconf-pkg-config fontconfig-devel freetype-devel zlib-devel libX11-devel libXext-devel libXrender-devel rpm-build zstd curl zip clang-devel gcc-c++ bsdtar"
         if [ -n "$SUDO_CMD" ]; then
             $SUDO_CMD dnf install -y $DEPS || echo -e "${YELLOW}Aviso: Falló la instalación automática de algunos paquetes con dnf.${NC}"
         else
@@ -71,7 +73,7 @@ install_system_deps() {
         fi
     elif command -v pacman >/dev/null 2>&1; then
         echo "Detectado gestor de paquetes Pacman (Arch Linux / Manjaro)..."
-        DEPS="base-devel pkgconf fontconfig freetype2 zlib libx11 libxext libxrender zstd curl zip"
+        DEPS="base-devel pkgconf fontconfig freetype2 zlib libx11 libxext libxrender zstd curl zip clang libarchive"
         if [ -n "$SUDO_CMD" ]; then
             $SUDO_CMD pacman -Sy --noconfirm --needed $DEPS || echo -e "${YELLOW}Aviso: Falló la instalación automática de algunos paquetes con pacman.${NC}"
         else
@@ -79,7 +81,7 @@ install_system_deps() {
         fi
     elif command -v zypper >/dev/null 2>&1; then
         echo "Detectado gestor de paquetes Zypper (openSUSE)..."
-        DEPS="gcc gcc-c++ make pkg-config fontconfig-devel freetype2-devel zlib-devel libX11-devel rpm-build zstd curl zip"
+        DEPS="gcc gcc-c++ make pkg-config fontconfig-devel freetype2-devel zlib-devel libX11-devel rpm-build zstd curl zip clang-devel gcc-c++ bsdtar"
         if [ -n "$SUDO_CMD" ]; then
             $SUDO_CMD zypper install -y $DEPS || echo -e "${YELLOW}Aviso: Falló la instalación automática de algunos paquetes con zypper.${NC}"
         else
@@ -156,7 +158,7 @@ if exist "vc_redist.x64.exe" (
 EOF
         (
             cd "$TEMP_WIN_ZIP"
-            zip -j "$PROJECT_ROOT/target/packages/DocuUpload-v0.5.0-windows-x64.zip" *
+            zip -j "$PROJECT_ROOT/target/packages/DocuUpload-v${VERSION}-windows-x64.zip" *
         )
         rm -rf "$TEMP_WIN_ZIP"
         echo -e "${GREEN}¡Archivo ZIP portable para Windows generado en target/packages!${NC}"

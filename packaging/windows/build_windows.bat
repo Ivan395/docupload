@@ -1,11 +1,20 @@
 @echo off
 setlocal enabledelayedexpansion
 
-echo ==================================================
-echo   DocUpload v0.5.0 - Compilacion y Empaquetado Windows
-echo ==================================================
-
 cd /d "%~dp0\..\.."
+
+:: 0. Leer la version desde Cargo.toml (fuente unica de verdad)
+set "VERSION="
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "(Select-String -Path 'Cargo.toml' -Pattern '^version\s*=\s*\"(.+)\"' | Select-Object -First 1).Matches.Groups[1].Value"`) do set "VERSION=%%V"
+
+if not defined VERSION (
+    echo [ERROR] No se pudo leer la version desde Cargo.toml.
+    exit /b 1
+)
+
+echo ==================================================
+echo   DocUpload v%VERSION% - Compilacion y Empaquetado Windows
+echo ==================================================
 
 :: 1. Comprobar entorno Rust/Cargo
 where cargo >nul 2>nul
@@ -14,43 +23,60 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-:: 2. Descargar librerias de soporte de Windows Visual C++ Redistributable
-echo [1/5] Verificando librerias de soporte Visual C++ Runtime...
-if not exist "packaging\windows\vc_redist.x64.exe" (
-    echo Descargando Microsoft Visual C++ Redistributable x64...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile 'packaging\windows\vc_redist.x64.exe'"
-)
-
-if exist "packaging\windows\vc_redist.x64.exe" (
-    echo [OK] Librerias VC++ Redistributable listas.
-) else (
-    echo [AVISO] No se encontro vc_redist.x64.exe, continuando sin incluir runtime offline.
-)
-
-:: 3. Compilacion de lanzamiento si no existe el binario
-echo [2/5] Verificando binario de lanzamiento para Windows...
-if not exist "target\release\docu_ffacd.exe" (
+:: 2. Compilacion de lanzamiento (siempre, salvo SKIP_BUILD=1)
+echo [1/5] Compilacion de lanzamiento para Windows...
+if not "%SKIP_BUILD%"=="1" (
+    set "RUSTFLAGS=-C target-feature=+crt-static"
+    REM Fuerza CRT estatico tambien en MuPDF compilado con MSBuild
+    set "_CL_=/MT"
     echo Compilando docu_ffacd.exe en modo release...
     cargo build --release
-    if %ERRORLEVEL% NEQ 0 (
+    if !ERRORLEVEL! NEQ 0 (
         echo [ERROR] Error durante la compilacion de Rust.
-        exit /b %ERRORLEVEL%
+        exit /b !ERRORLEVEL!
     )
 ) else (
-    echo [OK] Binario target\release\docu_ffacd.exe ya compilado.
+    echo [OMITIDO] SKIP_BUILD=1: no se ejecuta cargo build.
+)
+
+:: Si se indica BIN_PATH, se usa ese binario como entrada del empaquetado
+if defined BIN_PATH (
+    echo Usando binario externo: "%BIN_PATH%"
+    if not exist "target\release" mkdir "target\release"
+    copy /y "%BIN_PATH%" "target\release\docu_ffacd.exe" >nul
+    if !ERRORLEVEL! NEQ 0 (
+        echo [ERROR] No se pudo copiar BIN_PATH a target\release\docu_ffacd.exe.
+        exit /b 1
+    )
+)
+
+if not exist "target\release\docu_ffacd.exe" (
+    echo [ERROR] No existe target\release\docu_ffacd.exe.
+    exit /b 1
+)
+
+:: 3. Verificar que el ejecutable no dependa del VC runtime dinamico
+echo [2/5] Verificando dependencias del ejecutable...
+where dumpbin >nul 2>nul
+if !ERRORLEVEL! EQU 0 (
+    dumpbin /dependents "target\release\docu_ffacd.exe" | findstr /I "VCRUNTIME MSVCP" >nul
+    if !ERRORLEVEL! EQU 0 (
+        echo [ERROR] El ejecutable depende de VCRUNTIME; el CRT estatico no se aplico.
+        exit /b 1
+    )
+    echo [OK] El ejecutable no depende del VC runtime dinamico.
+) else (
+    echo [AVISO] dumpbin no esta en PATH; no se pudo verificar la dependencia del VC runtime.
 )
 
 if not exist "target\packages" mkdir "target\packages"
 
-:: 4. Generacion de archivo ZIP portable con librerias incluidas
-echo [3/5] Generando archivo ZIP portable con librerias incluidas...
-powershell -NoProfile -Command "Set-Content -Path 'target\release\instalar_librerias_vc.bat' -Value '@echo off', 'echo Instalando Microsoft Visual C++ Runtime...', 'if exist vc_redist.x64.exe start /wait \"\" vc_redist.x64.exe /install /quiet /norestart'"
-
-if exist "packaging\windows\vc_redist.x64.exe" (
-    copy /y "packaging\windows\vc_redist.x64.exe" "target\release\vc_redist.x64.exe" >nul
-    powershell -NoProfile -Command "Compress-Archive -Path 'target\release\docu_ffacd.exe', 'ui\assets\app_icon.ico', 'target\release\vc_redist.x64.exe', 'target\release\instalar_librerias_vc.bat' -DestinationPath 'target\packages\DocuUpload-v0.5.0-windows-x64.zip' -Force"
-) else (
-    powershell -NoProfile -Command "Compress-Archive -Path 'target\release\docu_ffacd.exe', 'ui\assets\app_icon.ico' -DestinationPath 'target\packages\DocuUpload-v0.5.0-windows-x64.zip' -Force"
+:: 4. Generacion de archivo ZIP portable
+echo [3/5] Generando archivo ZIP portable...
+powershell -NoProfile -Command "Compress-Archive -Path 'target\release\docu_ffacd.exe', 'ui\assets\app_icon.ico' -DestinationPath 'target\packages\DocuUpload-%VERSION%-windows-x86_64-portable.zip' -Force"
+if !ERRORLEVEL! NEQ 0 (
+    echo [ERROR] No se pudo generar el ZIP portable.
+    exit /b 1
 )
 
 :: 5. Comprobar Inno Setup Compiler para generar instalador .exe
@@ -74,7 +100,7 @@ if not defined ISCC_PATH (
 if not defined ISCC_PATH (
     echo Inno Setup no detectado en rutas estandar. Intentando instalar via winget o instalador oficial...
     where winget >nul 2>nul
-    if %ERRORLEVEL% EQU 0 (
+    if !ERRORLEVEL! EQU 0 (
         winget install JRSoftware.InnoSetup -e --silent --accept-source-agreements --accept-package-agreements
     ) else (
         powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/6/innosetup-6.3.3.exe' -OutFile '%TEMP%\innosetup-setup.exe'"
@@ -96,10 +122,10 @@ if not defined ISCC_PATH (
 echo [5/5] Compilando instalador Inno Setup...
 if defined ISCC_PATH (
     echo Compilando instalador usando: "!ISCC_PATH!"
-    "!ISCC_PATH!" packaging\windows\installer.iss
-    if %ERRORLEVEL% NEQ 0 (
+    "!ISCC_PATH!" /DMyAppVersion=%VERSION% packaging\windows\installer.iss
+    if !ERRORLEVEL! NEQ 0 (
         echo [ERROR] Error compilando el instalador con Inno Setup.
-        exit /b %ERRORLEVEL%
+        exit /b !ERRORLEVEL!
     )
     echo [OK] Instalador generado exitosamente en target\packages.
 ) else (

@@ -4,41 +4,52 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-VERSION="0.5.0"
+VERSION="${VERSION:-$(grep -m1 '^version' "$PROJECT_ROOT/Cargo.toml" | cut -d'"' -f2)}"
 ARCH="amd64"
 PKG_NAME="docu-ffacd_${VERSION}_${ARCH}"
+# Binario a empaquetar. CI puede compilarlo en otro job y pasar su ruta aquí.
+BIN_PATH="${BIN_PATH:-$PROJECT_ROOT/target/release/docu_ffacd}"
 
-echo "==> [Debian/Ubuntu] Verificando dependencias del sistema para la compilación..."
-SUDO_CMD=""
-if [ "$EUID" -ne 0 ]; then
-    if sudo -n true 2>/dev/null; then
-        SUDO_CMD="sudo -n"
-    elif [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
-        SUDO_CMD="sudo"
-    fi
-fi
-
-if command -v apt-get >/dev/null 2>&1; then
-    DEB_BUILD_DEPS="libfontconfig1-dev libfreetype6-dev zlib1g-dev libx11-dev pkg-config build-essential"
-    MISSING_DEPS=""
-    for dep in $DEB_BUILD_DEPS; do
-        if ! dpkg -s "$dep" >/dev/null 2>&1; then
-            MISSING_DEPS="$MISSING_DEPS $dep"
-        fi
-    done
-    if [ -n "$MISSING_DEPS" ]; then
-        echo "==> [Debian/Ubuntu] Descargando e instalando librerías necesarias para compilar:$MISSING_DEPS"
-        if [ -n "$SUDO_CMD" ]; then
-            $SUDO_CMD apt-get update && $SUDO_CMD apt-get install -y $MISSING_DEPS || echo "Aviso: No se pudo completar la instalación con apt-get."
-        else
-            echo "Aviso: Ejecuta con sudo o instala manualmente:$MISSING_DEPS"
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+    echo "==> [Debian/Ubuntu] SKIP_BUILD=1: se omiten dependencias de compilación y cargo build"
+else
+    echo "==> [Debian/Ubuntu] Verificando dependencias del sistema para la compilación..."
+    SUDO_CMD=""
+    if [ "$EUID" -ne 0 ]; then
+        if sudo -n true 2>/dev/null; then
+            SUDO_CMD="sudo -n"
+        elif [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO_CMD="sudo"
         fi
     fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        DEB_BUILD_DEPS="libfontconfig1-dev libfreetype6-dev zlib1g-dev libx11-dev pkg-config build-essential clang libclang-dev g++"
+        MISSING_DEPS=""
+        for dep in $DEB_BUILD_DEPS; do
+            if ! dpkg -s "$dep" >/dev/null 2>&1; then
+                MISSING_DEPS="$MISSING_DEPS $dep"
+            fi
+        done
+        if [ -n "$MISSING_DEPS" ]; then
+            echo "==> [Debian/Ubuntu] Descargando e instalando librerías necesarias para compilar:$MISSING_DEPS"
+            if [ -n "$SUDO_CMD" ]; then
+                $SUDO_CMD apt-get update && $SUDO_CMD apt-get install -y $MISSING_DEPS || echo "Aviso: No se pudo completar la instalación con apt-get."
+            else
+                echo "Aviso: Ejecuta con sudo o instala manualmente:$MISSING_DEPS"
+            fi
+        fi
+    fi
+
+    echo "==> [Debian/Ubuntu] Compilando binario de lanzamiento..."
+    cd "$PROJECT_ROOT"
+    cargo build --release
 fi
 
-echo "==> [Debian/Ubuntu] Compilando binario de lanzamiento..."
-cd "$PROJECT_ROOT"
-cargo build --release
+if [ ! -f "$BIN_PATH" ]; then
+    echo "Error: no se encontró el binario a empaquetar en: $BIN_PATH" >&2
+    exit 1
+fi
 
 BUILD_DIR="$PROJECT_ROOT/target/deb_build/$PKG_NAME"
 OUT_DIR="$PROJECT_ROOT/target/packages"
@@ -54,7 +65,7 @@ mkdir -p "$BUILD_DIR/usr/share/icons/hicolor/scalable/apps"
 mkdir -p "$OUT_DIR"
 
 echo "==> [Debian/Ubuntu] Copiando archivos a la estructura del paquete..."
-install -m 755 "$PROJECT_ROOT/target/release/docu_ffacd" "$BUILD_DIR/usr/bin/docu_ffacd"
+install -m 755 "$BIN_PATH" "$BUILD_DIR/usr/bin/docu_ffacd"
 install -m 644 "$PROJECT_ROOT/packaging/linux/docu_ffacd.desktop" "$BUILD_DIR/usr/share/applications/docu_ffacd.desktop"
 install -m 644 "$PROJECT_ROOT/ui/assets/app_icon_256.png" "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps/docu_ffacd.png"
 install -m 644 "$PROJECT_ROOT/ui/assets/app_icon_64.png" "$BUILD_DIR/usr/share/icons/hicolor/64x64/apps/docu_ffacd.png"
@@ -70,7 +81,8 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $ARCH
-Depends: libfontconfig1, libfreetype6, libx11-6, libxext6, libxrender1, libxml2, libpng16-16, zlib1g
+Depends: libc6 (>= 2.28), libgcc-s1, libstdc++6, libfontconfig1, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrender1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1, libegl1, libgl1, xdg-utils
+Recommends: xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-kde | xdg-desktop-portal-gnome
 Maintainer: Firma Fiscal ACD <soporte@firmafiscalacd.com>
 Installed-Size: $INSTALLED_SIZE
 Description: DocuUpload Fiscal y Nominas
