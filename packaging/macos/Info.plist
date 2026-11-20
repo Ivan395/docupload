@@ -9,9 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.docuffacd.docupload</string>
     <key>CFBundleVersion</key>
-    <string>0.5.0</string>
+    <string>__VERSION__</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.5.0</string>
+    <string>__VERSION__</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>
@@ -21,7 +21,7 @@
     <key>CFBundleIconFile</key>
     <string>app_icon.icns</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.15</string>
+    <string>11.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>

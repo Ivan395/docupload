@@ -218,8 +218,14 @@ fn save_single_nomina_tx(
     let mut empleado_id: Option<Uuid> = None;
     if let Some(ref nss) = emp_nss {
         if !nss.is_empty() {
+            // Un NSS alterno registrado en empleados_nss_equivalencias gana sobre el NSS propio
             let row = tx.query_opt(
-                "SELECT id FROM public.empleados WHERE id_cliente = $1 AND nss = $2 LIMIT 1",
+                "SELECT id FROM ( \
+                     SELECT eq.id_empleado AS id, 0 AS prioridad FROM public.empleados_nss_equivalencias eq \
+                     WHERE eq.id_cliente = $1 AND eq.nss_alterno = $2 \
+                     UNION ALL \
+                     SELECT id, 1 FROM public.empleados WHERE id_cliente = $1 AND nss = $2 \
+                 ) t ORDER BY prioridad LIMIT 1",
                 &[&id_cliente, &truncate_str(Some(nss), 11)],
             )?;
             if let Some(r) = row {

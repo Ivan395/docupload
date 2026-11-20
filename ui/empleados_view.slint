@@ -5,6 +5,21 @@ import { HistorialEmpleadoModal } from "historial_empleado_modal.slint";
 export component EmpleadosView inherits Rectangle {
     background: #f8fafc;
 
+    // Columnas opcionales de la tabla según el ancho disponible. Sin esto, con el panel lateral
+    // abierto la tabla no cabe en 1366px y empuja el panel fuera de la ventana. Umbrales = ancho
+    // mínimo de la tabla con esas columnas (columnas + separaciones de 16px + 32px de padding de la
+    // tabla + 32px de padding de la fila, reservando 220px al nombre); se ocultan en este orden y
+    // la de CURP & NSS al final. Por debajo del último umbral el nombre cede hasta 150px (su
+    // min-width), lo que deja ver el panel completo hasta 1024px de ventana.
+    // La vista tiene min-width: 0 en main_view y los encabezados van en un Flickable, así que
+    // root.width no depende de estas columnas (sin ciclo de enlaces).
+    property <length> ancho-tabla: root.width - 48px - (AppData.show_edit_empleado_panel ? 400px : 0px);
+    property <bool> col-ultima-obra: ancho-tabla >= 1306px;
+    property <bool> col-sbc: ancho-tabla >= 1170px;
+    property <bool> col-reg-patronal: ancho-tabla >= 1044px;
+    property <bool> col-obras: ancho-tabla >= 898px;
+    property <bool> col-curp: ancho-tabla >= 802px;
+
     VerticalLayout {
         padding: 24px;
         spacing: 18px;
@@ -227,25 +242,35 @@ export component EmpleadosView inherits Rectangle {
                     padding: 16px;
                     spacing: 10px;
 
-                    // Encabezados de Columna
-                    Rectangle {
+                    // Encabezados de Columna. Van dentro de un Flickable fijo (igual que las filas
+                    // dentro del ScrollView) para que su ancho mínimo no se propague a la vista: las
+                    // columnas visibles dependen de root.width y propagarlo formaría un ciclo.
+                    Flickable {
                         height: 38px;
-                        background: #f8fafc;
-                        border-radius: 6px;
+                        interactive: false;
+                        content-width: self.width;
+                        content-height: self.height;
 
-                        HorizontalLayout {
-                            padding-left: 16px;
-                            padding-right: 16px;
-                            spacing: 16px;
+                        Rectangle {
+                            width: parent.width;
+                            height: 38px;
+                            background: #f8fafc;
+                            border-radius: 6px;
 
-                            Rectangle { horizontal-stretch: 1; min-width: 220px; Text { text: "EMPLEADO / RFC"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 170px; Text { text: "CURP & NSS"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 130px; Text { text: "REG. PATRONAL"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 110px; Text { text: "SBC DIARIO"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 130px; Text { text: "ESTADO"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
-                            Rectangle { width: 80px; Text { text: "OBRAS ACT."; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
-                            Rectangle { width: 120px; Text { text: "ÚLTIMA OBRA"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 170px; Text { text: "ACCIÓN"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 16px;
+
+                                Rectangle { horizontal-stretch: 1; min-width: 150px; Text { text: "EMPLEADO / RFC"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                if root.col-curp : Rectangle { width: 170px; Text { text: "CURP & NSS"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                if root.col-reg-patronal : Rectangle { width: 130px; Text { text: "REG. PATRONAL"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                if root.col-sbc : Rectangle { width: 110px; Text { text: "SBC DIARIO"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                Rectangle { width: 130px; Text { text: "ESTADO"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                                if root.col-obras : Rectangle { width: 80px; Text { text: "OBRAS ACT."; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                                if root.col-ultima-obra : Rectangle { width: 120px; Text { text: "ÚLTIMA OBRA"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                Rectangle { width: 170px; Text { text: "ACCIÓN"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
                         }
                     }
 
@@ -295,7 +320,7 @@ export component EmpleadosView inherits Rectangle {
                                     // Columna 1: Nombre & RFC con Avatar de Iniciales
                                     Rectangle {
                                         horizontal-stretch: 1;
-                                        min-width: 220px;
+                                        min-width: 150px;
 
                                         HorizontalLayout {
                                             spacing: 12px;
@@ -361,7 +386,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 2: CURP & NSS
-                                    Rectangle {
+                                    if root.col-curp : Rectangle {
                                         width: 170px;
                                         VerticalLayout {
                                             alignment: center;
@@ -384,7 +409,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 3: Registro Patronal
-                                    Rectangle {
+                                    if root.col-reg-patronal : Rectangle {
                                         width: 130px;
                                         VerticalLayout {
                                             alignment: center;
@@ -399,7 +424,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 4: SBC Diario
-                                    Rectangle {
+                                    if root.col-sbc : Rectangle {
                                         width: 110px;
                                         VerticalLayout {
                                             alignment: center;
@@ -466,7 +491,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 6: Obras actuales (obras con días en el último mes)
-                                    Rectangle {
+                                    if root.col-obras : Rectangle {
                                         width: 80px;
                                         VerticalLayout {
                                             alignment: center;
@@ -481,7 +506,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 7: Última obra
-                                    Rectangle {
+                                    if root.col-ultima-obra : Rectangle {
                                         width: 120px;
                                         VerticalLayout {
                                             alignment: center;
@@ -660,6 +685,98 @@ export component EmpleadosView inherits Rectangle {
                                 font-size: 10px;
                                 font-weight: 600;
                                 color: AppData.emp_edit_nss_status == "valid" ? #16a34a : #dc2626;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // 3b. NSS alternos: cédulas/nóminas con estos NSS se cargan a este empleado
+                        if !AppData.emp_edit_is_new : VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "NSS alternos (equivalencias)"; font-size: 11px; font-weight: 700; color: #475569; }
+                            Text {
+                                text: "Las cédulas y nóminas que traigan estos NSS se asignan a este empleado en lugar de crear uno nuevo.";
+                                font-size: 10px;
+                                color: #64748b;
+                                wrap: word-wrap;
+                            }
+
+                            if AppData.emp_equivalencias.length == 0 : Text {
+                                text: "Sin NSS alternos";
+                                font-size: 10.5px;
+                                font-weight: 600;
+                                color: #94a3b8;
+                            }
+
+                            for eq in AppData.emp_equivalencias : Rectangle {
+                                border-radius: 6px;
+                                background: #f8fafc;
+                                border-width: 1px;
+                                border-color: #e2e8f0;
+                                HorizontalLayout {
+                                    padding: 6px;
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 1px;
+                                        Text { text: eq.nss; font-size: 12px; font-weight: 800; color: #0f172a; }
+                                        Text {
+                                            text: (eq.motivo != "" ? eq.motivo + " · " : "") + eq.creada;
+                                            font-size: 10px;
+                                            color: #64748b;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 56px;
+                                        height: 24px;
+                                        border-radius: 6px;
+                                        background: quitar_eq.has-hover ? #fee2e2 : #ffffff;
+                                        border-width: 1px;
+                                        border-color: #fecaca;
+                                        y: (parent.height - self.height) / 2;
+                                        Text {
+                                            text: "Quitar";
+                                            font-size: 10.5px;
+                                            font-weight: 700;
+                                            color: #b91c1c;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        quitar_eq := TouchArea {
+                                            mouse-cursor: pointer;
+                                            enabled: !AppData.emp_equiv_ocupado;
+                                            clicked => { AppLogic.equivalencia_nss_eliminar(eq.id); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                LineEdit {
+                                    horizontal-stretch: 1;
+                                    text <=> AppData.emp_equiv_nuevo_nss;
+                                    placeholder-text: "NSS alterno (11 dígitos)";
+                                    enabled: !AppData.emp_equiv_ocupado;
+                                    accepted => { AppLogic.equivalencia_nss_agregar(); }
+                                }
+                                Button {
+                                    text: "Agregar";
+                                    enabled: !AppData.emp_equiv_ocupado && AppData.emp_equiv_nuevo_nss != "";
+                                    clicked => { AppLogic.equivalencia_nss_agregar(); }
+                                }
+                            }
+                            LineEdit {
+                                text <=> AppData.emp_equiv_nuevo_motivo;
+                                placeholder-text: "Motivo (opcional)";
+                                enabled: !AppData.emp_equiv_ocupado;
+                                accepted => { AppLogic.equivalencia_nss_agregar(); }
+                            }
+                            if AppData.emp_equiv_msg != "" : Text {
+                                text: AppData.emp_equiv_msg;
+                                font-size: 10px;
+                                font-weight: 600;
+                                color: AppData.emp_equiv_msg_error ? #dc2626 : #16a34a;
                                 wrap: word-wrap;
                             }
                         }

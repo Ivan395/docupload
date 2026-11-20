@@ -12,8 +12,11 @@ use uuid::Uuid;
 use crate::db::historial_empleados::{
     compactar_periodos, fetch_tramos_historial, meses_obra, MesObra, PeriodoObra,
 };
+use crate::db::equivalencias_nss::{
+    agregar_equivalencia, eliminar_equivalencia, listar_equivalencias, EquivalenciaNss,
+};
 use crate::db::DbPool;
-use crate::{AppData, AppLogic, HistMesUi, HistPeriodoUi, MainWindow};
+use crate::{AppData, AppLogic, EquivalenciaNssUi, HistMesUi, HistPeriodoUi, MainWindow};
 
 // ---------------------------------------------------------------------------
 // Funciones puras de presentación
@@ -120,8 +123,150 @@ fn limpiar_historial(app: &AppData) {
     app.set_historial_meses(ModelRc::new(VecModel::<HistMesUi>::default()));
 }
 
+// ---------------------------------------------------------------------------
+// NSS alternos (equivalencias) del empleado en edición
+// ---------------------------------------------------------------------------
+
+/// Fila de la lista de NSS alternos.
+pub fn equivalencia_ui(e: &EquivalenciaNss) -> EquivalenciaNssUi {
+    EquivalenciaNssUi {
+        id: e.id.to_string().into(),
+        nss: e.nss_alterno.as_str().into(),
+        motivo: e.motivo.as_str().into(),
+        creada: e.creada.as_str().into(),
+    }
+}
+
+/// Vacía la sección de NSS alternos (lista, campos y mensaje).
+pub fn limpiar_equivalencias(app: &AppData) {
+    app.set_emp_equivalencias(ModelRc::new(VecModel::<EquivalenciaNssUi>::default()));
+    app.set_emp_equiv_nuevo_nss("".into());
+    app.set_emp_equiv_nuevo_motivo("".into());
+    app.set_emp_equiv_msg("".into());
+    app.set_emp_equiv_msg_error(false);
+    app.set_emp_equiv_ocupado(false);
+}
+
+/// Ejecuta `op` sobre la BD en un hilo y, de vuelta en la interfaz, recarga la lista del empleado
+/// `id_empleado`. Si mientras tanto se abrió otro empleado, el resultado se descarta.
+/// `op` devuelve el mensaje de éxito (vacío = sin mensaje) o el error a mostrar.
+fn ejecutar_equivalencias<F>(ui: &MainWindow, pool: &Arc<DbPool>, id_empleado: Uuid, op: F)
+where
+    F: FnOnce(&mut crate::db::PooledClient) -> Result<String, String> + Send + 'static,
+{
+    let app = ui.global::<AppData>();
+    app.set_emp_equiv_ocupado(true);
+    let ui_weak = ui.as_weak();
+    let pool_bg = pool.clone();
+    thread::spawn(move || {
+        let res: Result<(Result<String, String>, Vec<EquivalenciaNss>), String> = pool_bg
+            .get()
+            .map_err(|e| format!("Error de conexión: {e}"))
+            .and_then(|mut client| {
+                let resultado = op(&mut client);
+                // La lista se recarga aunque la operación falle, para mostrar el estado real.
+                let lista = listar_equivalencias(&mut *client, id_empleado)?;
+                Ok((resultado, lista))
+            });
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let app = ui.global::<AppData>();
+            if app.get_emp_edit_id().as_str() != id_empleado.to_string() {
+                return;
+            }
+            app.set_emp_equiv_ocupado(false);
+            match res {
+                Ok((resultado, lista)) => {
+                    let filas: Vec<EquivalenciaNssUi> = lista.iter().map(equivalencia_ui).collect();
+                    app.set_emp_equivalencias(ModelRc::new(VecModel::from(filas)));
+                    match resultado {
+                        Ok(msg) => {
+                            if !msg.is_empty() {
+                                app.set_emp_equiv_nuevo_nss("".into());
+                                app.set_emp_equiv_nuevo_motivo("".into());
+                            }
+                            app.set_emp_equiv_msg(msg.into());
+                            app.set_emp_equiv_msg_error(false);
+                        }
+                        Err(e) => {
+                            app.set_emp_equiv_msg(e.into());
+                            app.set_emp_equiv_msg_error(true);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Equivalencias de NSS: {}", e);
+                    app.set_emp_equiv_msg(e.into());
+                    app.set_emp_equiv_msg_error(true);
+                }
+            }
+        });
+    });
+}
+
+/// Carga los NSS alternos del empleado abierto en el panel de edición.
+pub fn cargar_equivalencias(ui: &MainWindow, pool: &Arc<DbPool>) {
+    let app = ui.global::<AppData>();
+    limpiar_equivalencias(&app);
+    if app.get_emp_edit_is_new() {
+        return;
+    }
+    let Ok(id_empleado) = Uuid::parse_str(app.get_emp_edit_id().trim()) else { return };
+    ejecutar_equivalencias(ui, pool, id_empleado, |_| Ok(String::new()));
+}
+
 pub fn wire_empleados_callbacks(main_window: &MainWindow, db_pool: Option<Arc<DbPool>>) {
     let app_logic = main_window.global::<AppLogic>();
+
+    // Agregar NSS alterno al empleado en edición.
+    {
+        let ui_weak = main_window.as_weak();
+        let pool = db_pool.clone();
+        app_logic.on_equivalencia_nss_agregar(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let app = ui.global::<AppData>();
+            if app.get_emp_equiv_ocupado() || app.get_emp_equiv_nuevo_nss().trim().is_empty() {
+                return;
+            }
+            let (Some(pool), Ok(id_empleado)) = (pool.as_ref(), Uuid::parse_str(app.get_emp_edit_id().trim())) else {
+                app.set_emp_equiv_msg("Sin conexión a la base de datos.".into());
+                app.set_emp_equiv_msg_error(true);
+                return;
+            };
+            let nss = app.get_emp_equiv_nuevo_nss().to_string();
+            let motivo = app.get_emp_equiv_nuevo_motivo().to_string();
+            ejecutar_equivalencias(&ui, pool, id_empleado, move |client| {
+                let nss = agregar_equivalencia(&mut **client, id_empleado, &nss, &motivo)?;
+                log::info!("Equivalencia de NSS registrada: {} -> empleado {}", nss, id_empleado);
+                Ok(format!("NSS {} registrado como alterno.", nss))
+            });
+        });
+    }
+
+    // Quitar un NSS alterno.
+    {
+        let ui_weak = main_window.as_weak();
+        let pool = db_pool.clone();
+        app_logic.on_equivalencia_nss_eliminar(move |id| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let app = ui.global::<AppData>();
+            if app.get_emp_equiv_ocupado() {
+                return;
+            }
+            let (Some(pool), Ok(id_empleado), Ok(id_eq)) = (
+                pool.as_ref(),
+                Uuid::parse_str(app.get_emp_edit_id().trim()),
+                Uuid::parse_str(id.trim()),
+            ) else {
+                return;
+            };
+            ejecutar_equivalencias(&ui, pool, id_empleado, move |client| {
+                eliminar_equivalencia(&mut **client, id_eq)?;
+                log::info!("Equivalencia de NSS {} quitada del empleado {}", id_eq, id_empleado);
+                Ok("NSS alterno quitado.".to_string())
+            });
+        });
+    }
 
     // Abrir histórico de un empleado.
     {

@@ -10,8 +10,10 @@ fn main() {
         res.set_icon("ui/assets/app_icon.ico");
         res.set("FileDescription", "DocUpload - Procesamiento de Nóminas SAT y Cédulas SUA");
         res.set("ProductName", "DocUpload");
-        res.set("ProductVersion", "0.5.0.0");
-        res.set("FileVersion", "0.5.0.0");
+        // La versión sale de Cargo.toml (única fuente de verdad), con un cuarto componente .0
+        let ver = format!("{}.0", env!("CARGO_PKG_VERSION"));
+        res.set("ProductVersion", &ver);
+        res.set("FileVersion", &ver);
         res.set("LegalCopyright", "Copyright © 2026 Firma Fiscal ACD");
         let _ = res.compile().unwrap();
     }

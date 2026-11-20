@@ -1,10 +1,12 @@
-use native_tls::TlsConnector;
-use postgres_native_tls::MakeTlsConnector;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 pub const DEFAULT_CONFIG_FILENAME: &str = "db_config.json";
 
@@ -21,6 +23,10 @@ pub struct DbConfig {
     pub ssl_mode: String,
     #[serde(default)]
     pub connection_url: String,
+    /// Si es `true`, el certificado del servidor se valida contra las CAs públicas (webpki roots).
+    /// Si es `false` (predeterminado), la conexión se cifra pero el certificado no se valida.
+    #[serde(default)]
+    pub ssl_verify: bool,
 }
 
 fn default_ssl_mode() -> String {
@@ -46,16 +52,75 @@ impl Default for DbConfig {
             password,
             ssl_mode: "disable".to_string(),
             connection_url: String::new(),
+            ssl_verify: false,
         }
     }
 }
 
-/// Crea un conector TLS compatible con PostgreSQL, aceptando certificados válidos o autofirmados de nube.
-pub fn create_tls_connector() -> MakeTlsConnector {
-    let mut builder = TlsConnector::builder();
-    builder.danger_accept_invalid_certs(true);
-    let tls = builder.build().unwrap_or_else(|_| TlsConnector::new().unwrap());
-    MakeTlsConnector::new(tls)
+/// Verificador que acepta cualquier certificado (equivale a sslmode=require de libpq: cifra pero no valida la CA).
+#[derive(Debug)]
+struct AceptarCualquierCertificado(Arc<rustls::crypto::CryptoProvider>);
+
+impl ServerCertVerifier for AceptarCualquierCertificado {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Crea un conector TLS para PostgreSQL usando la opción `ssl_verify` de la configuración activa.
+pub fn create_tls_connector() -> MakeRustlsConnect {
+    create_tls_connector_with(get_active_config().ssl_verify)
+}
+
+/// Crea un conector TLS para PostgreSQL con rustls.
+/// `verify == true` valida el certificado contra las CAs de webpki; `false` cifra sin validar la cadena.
+pub fn create_tls_connector_with(verify: bool) -> MakeRustlsConnect {
+    // Provider explícito: el árbol de dependencias activa ring y aws-lc-rs, y `ClientConfig::builder()` entraría en pánico.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("versiones TLS por defecto válidas");
+    let config = if verify {
+        let roots = RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        builder.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AceptarCualquierCertificado(provider)))
+            .with_no_client_auth()
+    };
+    MakeRustlsConnect::new(config)
 }
 
 /// Genera la configuración predeterminada para la base de datos local de contingencia.
@@ -77,6 +142,7 @@ pub fn get_local_fallback_config() -> DbConfig {
         password,
         ssl_mode: "disable".to_string(),
         connection_url: String::new(),
+        ssl_verify: false,
     }
 }
 
@@ -125,6 +191,9 @@ impl DbConfig {
     }
 
     /// Resuelve la ruta del archivo de configuración `db_config.json`.
+    /// Orden: variable `DB_CONFIG_PATH`; `./db_config.json` si existe (flujo de desarrollo);
+    /// junto al ejecutable si existe (portable); y, en otro caso, el directorio de configuración
+    /// por usuario (`crate::paths::config_dir()`), que se crea si no existe.
     pub fn resolve_config_path() -> PathBuf {
         if let Ok(custom_path) = env::var("DB_CONFIG_PATH") {
             let p = PathBuf::from(custom_path.trim());
@@ -147,7 +216,9 @@ impl DbConfig {
             }
         }
 
-        current_dir_file
+        let user_dir = crate::paths::config_dir();
+        let _ = crate::paths::ensure_dir(&user_dir);
+        user_dir.join(DEFAULT_CONFIG_FILENAME)
     }
 
     /// Carga la configuración desde el disco o crea la inicial.
@@ -221,7 +292,7 @@ impl DbConfig {
 
         // 1. Probar si la base de datos destino ya existe y se conecta directamente
         let target_conn = self.to_connection_string();
-        let tls1 = create_tls_connector();
+        let tls1 = create_tls_connector_with(self.ssl_verify);
         if let Ok(mut client) = postgres::Client::connect(&target_conn, tls1) {
             let _ = client.query_one("SELECT 1", &[]);
             return Ok(());
@@ -236,7 +307,7 @@ impl DbConfig {
 
         for maint_db in maint_dbs {
             let maint_url = self.maintenance_connection_string(maint_db);
-            let tls = create_tls_connector();
+            let tls = create_tls_connector_with(self.ssl_verify);
             if let Ok(mut client) = postgres::Client::connect(&maint_url, tls) {
                 let check_sql = "SELECT 1 FROM pg_database WHERE datname = $1";
                 let exists = client.query(check_sql, &[&target_db]).map(|rows| !rows.is_empty()).unwrap_or(false);
@@ -261,7 +332,7 @@ impl DbConfig {
     /// Prueba la conexión contra el servidor PostgreSQL con estos parámetros sin alterar el pool.
     pub fn test_connection(&self) -> Result<String, String> {
         let conn_str = self.to_connection_string();
-        let connector = create_tls_connector();
+        let connector = create_tls_connector_with(self.ssl_verify);
 
         match postgres::Client::connect(&conn_str, connector) {
             Ok(mut client) => {

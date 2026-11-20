@@ -127,6 +127,14 @@ export struct HistMesUi {
     estado: string,
 }
 
+// NSS alternos de un empleado (tabla empleados_nss_equivalencias)
+export struct EquivalenciaNssUi {
+    id: string,
+    nss: string,
+    motivo: string,
+    creada: string,
+}
+
 export struct RevisionData {
     id: string,
     id_registro_patronal: string,
@@ -904,6 +912,13 @@ export global AppData {
     in-out property <string> emp_edit_nss_status: "";
     in-out property <string> emp_edit_nss_msg: "";
     in-out property <string> emp_edit_cross_warning: "";
+    // NSS alternos del empleado en edición
+    in-out property <[EquivalenciaNssUi]> emp_equivalencias: [];
+    in-out property <string> emp_equiv_nuevo_nss: "";
+    in-out property <string> emp_equiv_nuevo_motivo: "";
+    in-out property <string> emp_equiv_msg: "";
+    in-out property <bool> emp_equiv_msg_error: false;
+    in-out property <bool> emp_equiv_ocupado: false;
 
     // Navegación contextual de Revisiones y Obras
     in-out property <string> selected_rp_id: "";
@@ -1070,13 +1085,14 @@ export global AppData {
     // ==========================================
     in-out property <bool> update_available: false;
     in-out property <string> update_version: "";
-    in-out property <string> update_current_version: "v0.5.0";
+    in-out property <string> update_current_version: "";
     in-out property <string> update_notes: "";
     in-out property <string> update_download_url: "";
     in-out property <string> update_asset_name: "";
     in-out property <bool> show_update_modal: false;
     in-out property <bool> update_checking: false;
     in-out property <bool> update_downloading: false;
+    in-out property <bool> update_installing: false;
     in-out property <float> update_progress: 0.0;
     in-out property <string> update_progress_text: "0%";
     in-out property <string> update_status_msg: "";
@@ -1791,6 +1807,8 @@ callback recargar_cedulas_view();
     callback historial_empleado_abrir(string, string);   // id_empleado, nombre
     callback historial_empleado_cerrar();
     callback historial_empleado_alternar_alcance();
+    callback equivalencia_nss_agregar();                  // usa emp_edit_id, emp_equiv_nuevo_nss/motivo
+    callback equivalencia_nss_eliminar(string);           // id de la equivalencia
     callback filter_empleados_search();
 
     // Validaciones en tiempo real (RFC, CURP, NSS, Registro Patronal, Registro de Obra)

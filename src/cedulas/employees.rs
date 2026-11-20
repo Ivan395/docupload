@@ -1038,4 +1038,30 @@ mod tests {
         assert_eq!(emp.registro_obras[1].registro_obra, "C0701034");
         assert_eq!(emp.registro_obras[1].dias_registro_obra, 17);
     }
+    #[test]
+    fn test_parse_obras_con_dos_puntos_pegados() {
+        let patterns = initialize_patterns().unwrap();
+        // Caso real (cédula AGOSTO 2022, FELIX VELAZQUEZ EDGAR): el extractor nativo pega el
+        // ":" de la fila anterior junto al folio, en todas sus variantes.
+        let s = "21-97-78-3577-2  FELIX VELAZQUEZ EDGAR  XAXX-010101-000\n\
+                 31 181.00 0 0 0 608.50 0.00 0.00 39.28 14.03 58.92 21.04 425.80 98.19 35.07 56.11 1,286.80 70.14 1,356.94\n\
+                 Folio de Registro de Obra: C0617880 DĂ-as 15\n\
+                 Folio de Registro de Obra: C0640941 :DĂ-as 7\n\
+                 Folio de Registro de Obra: C0640943:DĂ-as 9\n\
+                 Folio de Registro de Obra: C0640944 : dias 2\n";
+        let cleaned = crate::cedulas::pdf_extractor::clean_text(s, &patterns);
+        let mut emp = Employee::new();
+        emp.set_values(&cleaned, &[], None, &patterns);
+
+        let obras: Vec<(&str, i64)> = emp
+            .registro_obras
+            .iter()
+            .map(|r| (r.registro_obra.as_str(), r.dias_registro_obra as i64))
+            .collect();
+        assert_eq!(
+            obras,
+            vec![("C0617880", 15), ("C0640941", 7), ("C0640943", 9), ("C0640944", 2)],
+            "texto limpio: {cleaned}"
+        );
+    }
 }

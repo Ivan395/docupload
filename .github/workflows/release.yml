@@ -1,3 +1,9 @@
+# Flujo de empaquetado y publicación multiplataforma de DocuUpload.
+#
+# - Un push a master solo compila, empaqueta y sube artefactos (validación).
+# - Solo una etiqueta v* publica una GitHub Release.
+# - Los scripts de packaging leen la versión desde Cargo.toml.
+
 name: Release Multiplatform Packages
 
 on:
@@ -11,128 +17,446 @@ on:
 permissions:
   contents: write
 
+# Evita dos ejecuciones simultáneas para la misma referencia.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Lee la versión de Cargo.toml y valida que la etiqueta coincida con ella.
+  # ---------------------------------------------------------------------------
+  version:
+    name: Leer versión y validar etiqueta
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Leer versión de Cargo.toml y validar etiqueta
+        id: version
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+          if [ -z "$VERSION" ]; then
+            echo "::error::No se pudo leer la versión de Cargo.toml"
+            exit 1
+          fi
+          echo "Versión en Cargo.toml: $VERSION"
+
+          # Si la ejecución viene de una etiqueta, debe ser exactamente v<versión>.
+          if [[ "$REF" == refs/tags/v* ]] && [ "$REF_NAME" != "v$VERSION" ]; then
+            echo "::error::La etiqueta $REF_NAME no coincide con Cargo.toml (se esperaba v$VERSION)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Binario Linux compilado en manylinux_2_28 (glibc 2.28) para máxima
+  # compatibilidad, más el AppImage.
+  # ---------------------------------------------------------------------------
   build-linux:
-    name: Build Linux Packages (Deb, RPM, Arch, AppImage)
+    name: Compilar binario Linux y AppImage
+    needs: version
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - name: Instalar dependencias del sistema
+        run: |
+          dnf install -y fontconfig-devel freetype-devel clang-devel llvm-devel gcc-c++ make pkgconf-pkg-config perl git zstd file binutils
+          # desktop-file-utils no es crítico para la compilación; si no está disponible, se continúa.
+          dnf install -y desktop-file-utils || true
+
+      # Necesario porque el workspace pertenece a otro usuario dentro del contenedor.
+      - name: Configurar git para el workspace
+        run: git config --global --add safe.directory '*'
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Instalar Rust con rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cachear dependencias de cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-manylinux-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Compilar binario release
+        run: cargo build --release --locked
+
+      # Falla el job si el binario requiere símbolos de glibc > 2.28 o enlaza OpenSSL.
+      - name: Verificar compatibilidad del binario
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/release/docu_ffacd
+
+          MAX_GLIBC=$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sed 's/^GLIBC_//' | sort -Vu | tail -1 || true)
+          if [ -z "$MAX_GLIBC" ]; then
+            echo "::error::No se encontraron símbolos GLIBC en el binario"
+            exit 1
+          fi
+          echo "Versión máxima de GLIBC requerida: $MAX_GLIBC"
+          if [ "$(printf '%s\n%s\n' "$MAX_GLIBC" 2.28 | sort -V | tail -1)" != "2.28" ]; then
+            echo "::error::El binario requiere GLIBC $MAX_GLIBC, mayor que 2.28"
+            exit 1
+          fi
+
+          NEEDED=$(readelf -d "$BIN" | grep NEEDED || true)
+          echo "Bibliotecas dinámicas requeridas (NEEDED):"
+          echo "$NEEDED"
+          case "$NEEDED" in
+            *libssl*|*libcrypto*)
+              echo "::error::El binario enlaza libssl/libcrypto dinámicamente"
+              exit 1
+              ;;
+          esac
+
+      - name: Descargar appimagetool
+        run: |
+          mkdir -p target
+          curl -fsSL https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o target/appimagetool
+          chmod +x target/appimagetool
+
+      - name: Construir AppImage
+        env:
+          # El contenedor no tiene FUSE; appimagetool se ejecuta extrayéndose.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: SKIP_BUILD=1 ./packaging/appimage/build_appimage.sh
+
+      - name: Subir binario Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: target/release/docu_ffacd
+          if-no-files-found: error
+
+      - name: Subir AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: target/packages/*.AppImage
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Genera .deb, .rpm y Arch a partir del binario ya compilado.
+  # ---------------------------------------------------------------------------
+  package-linux:
+    name: Empaquetar Linux (deb, rpm, Arch)
+    needs: [version, build-linux]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies
+      - name: Instalar herramientas de empaquetado
         run: |
           sudo apt-get update
-          sudo apt-get install -y rpm zstd libfontconfig1-dev libfreetype6-dev libx11-dev libxext-dev libxrender-dev libfuse2
+          sudo apt-get install -y rpm zstd libarchive-tools
 
-      - name: Build release binary
-        run: cargo build --release --locked
+      - name: Descargar binario Linux
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-binary
+          path: dist
 
-      - name: Build Debian/Ubuntu Package (.deb)
+      - name: Dar permisos de ejecución al binario
+        run: chmod +x dist/docu_ffacd
+
+      - name: Construir paquete Debian (.deb)
+        env:
+          SKIP_BUILD: 1
+          BIN_PATH: ${{ github.workspace }}/dist/docu_ffacd
         run: ./packaging/debian/build_deb.sh
 
-      - name: Build Fedora/RHEL Package (.rpm)
+      - name: Construir paquete Fedora/RHEL (.rpm)
+        env:
+          SKIP_BUILD: 1
+          BIN_PATH: ${{ github.workspace }}/dist/docu_ffacd
         run: ./packaging/fedora/build_rpm.sh
 
-      - name: Build Arch Linux Package (.pkg.tar.zst)
+      - name: Construir paquete Arch (.pkg.tar.zst)
+        env:
+          SKIP_BUILD: 1
+          BIN_PATH: ${{ github.workspace }}/dist/docu_ffacd
         run: ./packaging/arch/build_arch.sh
 
-      - name: Build Linux AppImage (.AppImage)
-        run: |
-          mkdir -p target
-          curl -fsSL https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o target/appimagetool
-          chmod +x target/appimagetool
-          ./packaging/appimage/build_appimage.sh
-
-      - name: Upload Linux Artifacts
+      - name: Subir paquetes Linux
         uses: actions/upload-artifact@v4
         with:
           name: linux-packages
           path: target/packages/*
+          if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # Windows: compila y empaqueta instalador (.exe) y ZIP portable.
+  # ---------------------------------------------------------------------------
   build-windows:
-    name: Build Windows Packages (.exe installer & .zip)
+    name: Compilar y empaquetar Windows
+    needs: version
     runs-on: windows-latest
+    env:
+      # Disponible para la condición "if" del paso de firma.
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Instalar Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Inno Setup
+      - name: Cachear dependencias de cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-windows-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Instalar Inno Setup
         run: choco install innosetup --no-progress
 
-      - name: Build release binary
-        run: cargo build --release --locked
+      # Configura el entorno MSVC para que dumpbin esté en PATH (lo usa el script).
+      - name: Configurar entorno MSVC
+        uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Package Windows ZIP & Installer
+      # El script compila con crt-static y verifica con dumpbin.
+      - name: Compilar y empaquetar ZIP e instalador
         shell: cmd
         run: packaging\windows\build_windows.bat
 
-      - name: Upload Windows Artifacts
+      # Firma opcional: solo se ejecuta si el secreto del certificado está configurado.
+      # Limitación: el ejecutable dentro del ZIP y del instalador se firma solo si la
+      # firma ocurre antes del empaquetado. Aquí se firma después, así que el
+      # docu_ffacd.exe incluido en los paquetes queda sin firmar; solo el instalador
+      # (y el ejecutable de target\release) quedan firmados.
+      - name: Firmar ejecutable e instalador (opcional)
+        if: env.WINDOWS_CERT_PFX_BASE64 != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Decodifica el certificado en un archivo temporal.
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+
+          # Localiza signtool en el SDK de Windows instalado en el runner.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw 'No se encontró signtool.exe en el runner' }
+
+          $setup = Get-ChildItem 'target\packages\DocuUpload-*-windows-x86_64-setup.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'No se encontró el instalador .exe en target\packages' }
+
+          $targets = @('target\release\docu_ffacd.exe', $setup.FullName)
+          foreach ($file in $targets) {
+            & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $file
+            if ($LASTEXITCODE -ne 0) { throw "Falló la firma de $file" }
+          }
+
+          Remove-Item $pfx -Force
+
+      - name: Subir paquetes Windows
         uses: actions/upload-artifact@v4
         with:
           name: windows-packages
           path: target/packages/*
+          if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # macOS: compila un binario por arquitectura (arm64 e x86_64).
+  # ---------------------------------------------------------------------------
   build-macos:
-    name: Build macOS Packages (.app & .dmg)
-    runs-on: macos-latest
+    name: Compilar macOS (${{ matrix.target }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Instalar Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binary
+      - name: Cachear dependencias de cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-macos-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Compilar binario release
         run: cargo build --release --locked
 
-      - name: Package macOS App & DMG
+      - name: Subir binario macOS
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-bin-${{ matrix.target }}
+          path: target/release/docu_ffacd
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Une los binarios de ambas arquitecturas (universal), firma y genera el .dmg.
+  # ---------------------------------------------------------------------------
+  package-macos:
+    name: Empaquetar macOS (.dmg universal)
+    needs: [version, build-macos]
+    runs-on: macos-latest
+    env:
+      # Disponible para la condición "if" del paso de importación del certificado.
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Descargar binario arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-bin-aarch64-apple-darwin
+          path: dist/arm64
+
+      - name: Descargar binario x86_64
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-bin-x86_64-apple-darwin
+          path: dist/x86_64
+
+      - name: Crear binario universal con lipo
+        shell: bash
+        run: |
+          set -euo pipefail
+          lipo -create -output dist/docu_ffacd dist/arm64/docu_ffacd dist/x86_64/docu_ffacd
+          chmod +x dist/docu_ffacd
+
+          ARCHS=$(lipo -archs dist/docu_ffacd)
+          echo "Arquitecturas del binario: $ARCHS"
+          case "$ARCHS" in
+            *arm64*) ;;
+            *) echo "::error::Falta arm64 en el binario universal"; exit 1 ;;
+          esac
+          case "$ARCHS" in
+            *x86_64*) ;;
+            *) echo "::error::Falta x86_64 en el binario universal"; exit 1 ;;
+          esac
+
+      # Importa el certificado de firma en un llavero temporal, si está configurado.
+      - name: Importar certificado de firma (opcional)
+        if: env.MACOS_CERT_P12_BASE64 != ''
+        shell: bash
+        env:
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Añade el llavero temporal a la lista de búsqueda para codesign.
+          security list-keychains -d user | xargs security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+      - name: Construir DMG
+        shell: bash
+        env:
+          SKIP_BUILD: 1
+          BIN_PATH: ${{ github.workspace }}/dist/docu_ffacd
+          # Vacías si no están configurados; el script firma ad-hoc o notariza según corresponda.
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: ./packaging/macos/build_dmg.sh
 
-      - name: Upload macOS Artifacts
+      - name: Eliminar llavero temporal
+        if: always() && env.MACOS_CERT_P12_BASE64 != ''
+        shell: bash
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+
+      - name: Subir paquetes macOS
         uses: actions/upload-artifact@v4
         with:
           name: macos-packages
           path: target/packages/*
+          if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # Solo para etiquetas v*: reúne todos los paquetes y publica la Release.
+  # ---------------------------------------------------------------------------
   publish-release:
-    name: Publish GitHub Release
-    needs: [build-linux, build-windows, build-macos]
+    name: Publicar GitHub Release
+    needs: [version, package-linux, build-linux, build-windows, package-macos]
     runs-on: ubuntu-latest
-    if: always() && !cancelled() && !contains(needs.*.result, 'failure')
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Determine Release Tag
-        id: release_tag
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          else
-            VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
-            TAG="v${VERSION}"
-          fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Using release tag: $TAG"
-
-      - name: Download all packages
+      # Patrón: linux-packages, windows-packages y macos-packages.
+      - name: Descargar paquetes
         uses: actions/download-artifact@v4
         with:
+          pattern: '*-packages'
           path: all-packages
           merge-multiple: true
 
-      - name: Create GitHub Release
+      # linux-appimage no coincide con el patrón anterior, se descarga aparte.
+      - name: Descargar AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-appimage
+          path: all-packages
+
+      - name: Generar SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd all-packages
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Crear GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release_tag.outputs.tag }}
-          name: "DocUpload ${{ steps.release_tag.outputs.tag }}"
+          tag_name: ${{ github.ref_name }}
+          name: "DocuUpload ${{ github.ref_name }}"
           files: all-packages/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
           draft: false
-          prerelease: false
+          # Las etiquetas con guion (p. ej. v1.2.0-rc1) se marcan como pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}

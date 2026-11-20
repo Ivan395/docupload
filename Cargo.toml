@@ -20,7 +20,6 @@ chrono = "0.4"
 fancy-regex = "0.18"
 indexmap = "2.14"
 log = "0.4"
-simplelog = "0.12"
 rayon = "1.12"
 roxmltree = "0.21"
 rust_xlsxwriter = "0.95"
@@ -42,9 +41,17 @@ rust-s3 = { version = "0.37.2", default-features = false, features = ["sync-rust
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"
-postgres-native-tls = "0.5.3"
-native-tls = "0.2.18"
+# TLS para PostgreSQL con rustls (sin depender de OpenSSL del sistema en Linux)
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+# Descompresión RAR integrada (compila el código de UnRAR; ya no se necesita 7z/unrar instalado)
+unrar = "0.5"
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Verificación de librerías del sistema cargadas en tiempo de ejecución (dlopen)
+libloading = "0.8"
 
 [build-dependencies]
 slint-build = "1.18.1"
@@ -65,7 +72,7 @@ long_description = """
 DocUpload Fiscal & Nóminas ACD
 Procesamiento concurrente y en paralelo de Nóminas CFDI con validación directa ante el WebService SOAP del SAT y Cédulas de Determinación de Cuotas del SUA IMSS con extracción de amortizaciones Infonavit y reportes en Excel.
 """
-osx_minimum_system_version = "10.15"
+osx_minimum_system_version = "11.0"
 
 # --- Metadata para cargo-deb (Debian, Ubuntu) ---
 [package.metadata.deb]

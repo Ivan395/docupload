@@ -41,6 +41,7 @@ pub mod archives;
 pub mod calendario_view_logic;
 pub mod cedulas;
 pub mod db;
+mod deps_check;
 pub mod nominas;
 pub mod nominas_upload_view_logic;
 pub mod nominas_view_logic;
@@ -64,6 +65,7 @@ mod entregable_logic;
 mod operacion_ui;
 pub mod sat;
 pub mod sua_export;
+pub mod paths;
 pub mod updater;
 pub mod validation;
 #[cfg(test)]
@@ -3526,8 +3528,11 @@ fn ensure_linux_desktop_integration() {
 
 fn main() -> Result<(), slint::PlatformError> {
     crate::app_logger::init_app_logger();
+    crate::deps_check::verificar_dependencias_sistema();
     let _ = slint::set_xdg_app_id("docu_ffacd");
     let main_window = MainWindow::new()?;
+    main_window.global::<AppData>().set_update_current_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
+    crate::updater::limpiar_restos_actualizacion();
     let _ = slint::set_xdg_app_id("docu_ffacd");
 
     #[cfg(target_os = "linux")]
@@ -6816,6 +6821,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let app_data = ui.global::<AppData>();
                 app_data.set_emp_edit_is_new(true);
                 app_data.set_emp_edit_id("".into());
+                crate::empleados_view_logic::limpiar_equivalencias(&app_data);
                 app_data.set_emp_edit_nombre("".into());
                 app_data.set_emp_edit_rfc("".into());
                 app_data.set_emp_edit_curp("".into());
@@ -6880,6 +6886,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 app_data.set_emp_edit_cross_warning("".into());
                                 app_data.set_show_edit_empleado_panel(true);
                                 run_validate_empleado(&ui);
+                                crate::empleados_view_logic::cargar_equivalencias(&ui, pool);
                             }
                         }
                     }
@@ -7739,6 +7746,23 @@ fn main() -> Result<(), slint::PlatformError> {
     let downloaded_update_file: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let latest_update_info: Arc<Mutex<Option<crate::updater::UpdateInfo>>> = Arc::new(Mutex::new(None));
 
+    // Vuelca la información de una actualización disponible en las propiedades de la UI
+    fn mostrar_actualizacion_disponible(app_data: &AppData, info: &crate::updater::UpdateInfo) {
+        app_data.set_update_available(true);
+        app_data.set_update_version(info.tag_name.clone().into());
+        app_data.set_update_notes(info.notes.clone().into());
+        match &info.asset {
+            Some(asset) => {
+                app_data.set_update_download_url(asset.browser_download_url.clone().into());
+                app_data.set_update_asset_name(asset.name.clone().into());
+            }
+            None => {
+                app_data.set_update_download_url(info.html_url.clone().into());
+                app_data.set_update_asset_name("Página de descargas".into());
+            }
+        }
+    }
+
     // Callback: Abrir modal de actualización
     {
         let ui_weak = main_window.as_weak();
@@ -7774,23 +7798,22 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui_weak_thread = ui_weak.clone();
             let store = update_info_store.clone();
             std::thread::spawn(move || {
-                let res = crate::updater::check_for_updates();
+                let res = crate::updater::check_for_updates(crate::updater::CheckMode::Manual);
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak_thread.upgrade() {
                         let app_data = ui.global::<AppData>();
                         app_data.set_update_checking(false);
                         match res {
                             Ok(Some(info)) => {
-                                app_data.set_update_available(true);
-                                app_data.set_update_version(info.tag_name.clone().into());
-                                app_data.set_update_notes(info.notes.clone().into());
-                                app_data.set_update_download_url(info.download_url.clone().into());
-                                app_data.set_update_asset_name(info.asset_name.clone().into());
+                                mostrar_actualizacion_disponible(&app_data, &info);
                                 app_data.set_show_update_modal(true);
                                 *store.lock().unwrap() = Some(info);
                             }
                             Ok(None) => {
-                                show_toast_message(&ui, "Tu versión de DocuUpload ya está actualizada (v0.5.0)");
+                                show_toast_message(
+                                    &ui,
+                                    &format!("Tu versión de DocuUpload ya está actualizada (v{})", env!("CARGO_PKG_VERSION")),
+                                );
                             }
                             Err(e) => {
                                 show_toast_message(&ui, &format!("No se pudo verificar actualizaciones: {}", e));
@@ -7808,16 +7831,17 @@ fn main() -> Result<(), slint::PlatformError> {
         let file_store = downloaded_update_file.clone();
         let info_store = latest_update_info.clone();
         app_logic.on_start_update_download(move || {
-            let (url, asset_name) = if let Some(info) = info_store.lock().unwrap().as_ref() {
-                (info.download_url.clone(), info.asset_name.clone())
-            } else if let Some(ui) = ui_weak.upgrade() {
-                let ad = ui.global::<AppData>();
-                (ad.get_update_download_url().to_string(), ad.get_update_asset_name().to_string())
-            } else {
+            let Some(info) = info_store.lock().unwrap().clone() else {
                 return;
             };
 
-            if url.is_empty() {
+            // Sin asset compatible: se abre la página de la release en el navegador
+            if info.asset.is_none() {
+                crate::open_folder_in_os(Path::new(&info.html_url));
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.global::<AppData>().set_show_update_modal(false);
+                    show_toast_message(&ui, "Se abrió la página de descargas");
+                }
                 return;
             }
 
@@ -7834,7 +7858,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let store = file_store.clone();
             std::thread::spawn(move || {
                 let ui_weak_progress = ui_weak_thread.clone();
-                let download_res = crate::updater::download_update_file(&url, &asset_name, move |frac, status| {
+                let download_res = crate::updater::download_update_file(&info, move |frac, status| {
                     let st = status.to_string();
                     let ui_inner = ui_weak_progress.clone();
                     let _ = slint::invoke_from_event_loop(move || {
@@ -7875,15 +7899,45 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = main_window.as_weak();
         let file_store = downloaded_update_file.clone();
+        let info_store = latest_update_info.clone();
         app_logic.on_install_update_now(move || {
             let path_opt = file_store.lock().unwrap().clone();
-            if let Some(path) = path_opt {
-                if let Err(e) = crate::updater::apply_update_now(&path)
-                    && let Some(ui) = ui_weak.upgrade() {
-                        show_toast_message(&ui, &format!("Error al aplicar actualización: {}", e));
+            let info_opt = info_store.lock().unwrap().clone();
+            let (Some(path), Some(info)) = (path_opt, info_opt) else {
+                if let Some(ui) = ui_weak.upgrade() {
+                    show_toast_message(&ui, "No se encontró el archivo de actualización para instalar");
                 }
-            } else if let Some(ui) = ui_weak.upgrade() {
-                show_toast_message(&ui, "No se encontró el archivo de actualización para instalar");
+                return;
+            };
+
+            // Evita lanzar dos instalaciones mientras pkexec espera la contraseña
+            if let Some(ui) = ui_weak.upgrade() {
+                let ad = ui.global::<AppData>();
+                ad.set_update_installing(true);
+                ad.set_update_status_msg("Instalando actualización...".into());
+            }
+
+            // Puede bloquear (pkexec), por eso corre en un hilo aparte
+            let ui_weak_thread = ui_weak.clone();
+            let spawn_result = std::thread::Builder::new()
+                .name("aplicar-actualizacion".to_string())
+                .spawn(move || {
+                    if let Err(e) = crate::updater::apply_update_now(&path, &info) {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak_thread.upgrade() {
+                                let ad = ui.global::<AppData>();
+                                ad.set_update_installing(false);
+                                ad.set_update_status_msg(format!("Error: {}", e).into());
+                                show_toast_message(&ui, &format!("Error al aplicar actualización: {}", e));
+                            }
+                        });
+                    }
+                });
+            if spawn_result.is_err()
+                && let Some(ui) = ui_weak.upgrade()
+            {
+                ui.global::<AppData>().set_update_installing(false);
+                show_toast_message(&ui, "Error: no se pudo iniciar el hilo de actualización");
             }
         });
     }
@@ -7895,15 +7949,10 @@ fn main() -> Result<(), slint::PlatformError> {
         std::thread::spawn(move || {
             // Esperar 3 segundos para que la UI termine de inicializarse suavemente
             std::thread::sleep(std::time::Duration::from_secs(3));
-            if let Ok(Some(info)) = crate::updater::check_for_updates() {
+            if let Ok(Some(info)) = crate::updater::check_for_updates(crate::updater::CheckMode::Startup) {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak_startup.upgrade() {
-                        let app_data = ui.global::<AppData>();
-                        app_data.set_update_available(true);
-                        app_data.set_update_version(info.tag_name.clone().into());
-                        app_data.set_update_notes(info.notes.clone().into());
-                        app_data.set_update_download_url(info.download_url.clone().into());
-                        app_data.set_update_asset_name(info.asset_name.clone().into());
+                        mostrar_actualizacion_disponible(&ui.global::<AppData>(), &info);
                         *store.lock().unwrap() = Some(info);
                     }
                 });

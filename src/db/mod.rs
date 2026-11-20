@@ -9,6 +9,7 @@ pub mod config;
 pub mod depuracion_fase1;
 pub mod entregables;
 pub mod diagnostico_integridad;
+pub mod equivalencias_nss;
 pub mod historial_empleados;
 pub mod ingesta;
 pub mod nominas;
@@ -28,7 +29,7 @@ pub use client::{
     reload_global_pool, set_global_pool, DbPool, PooledClient, PostgresDiagnosis,
 };
 pub use config::{
-    create_tls_connector, get_active_config, get_active_config_path, update_active_config,
+    create_tls_connector, create_tls_connector_with, get_active_config, get_active_config_path, update_active_config,
     DbConfig, DEFAULT_CONFIG_FILENAME,
 };
 pub use nominas::{save_nominas_concurrent, save_nominas_to_db, delete_nominas_de_revision, delete_nominas_de_revision_tx, contar_nominas_de_revision, ConteoNominasRevision, NominasDbStats};
