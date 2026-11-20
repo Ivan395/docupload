@@ -4,8 +4,10 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0\..\.."
 
 :: 0. Leer la version desde Cargo.toml (fuente unica de verdad)
+:: El comando de PowerShell no lleva comillas dobles internas: cmd no reconoce \"
+:: como escape y cerraria el for antes de tiempo. La comilla se obtiene con [char]34.
 set "VERSION="
-for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "(Select-String -Path 'Cargo.toml' -Pattern '^version\s*=\s*\"(.+)\"' | Select-Object -First 1).Matches.Groups[1].Value"`) do set "VERSION=%%V"
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "(Get-Content Cargo.toml | Where-Object { $_ -match '^version\s*=' } | Select-Object -First 1).Split([char]34)[1]"`) do set "VERSION=%%V"
 
 if not defined VERSION (
     echo [ERROR] No se pudo leer la version desde Cargo.toml.
