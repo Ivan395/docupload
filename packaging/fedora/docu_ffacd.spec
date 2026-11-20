@@ -62,5 +62,8 @@ if [ $1 -eq 0 ] ; then
 fi
 
 %changelog
+* Fri Nov 20 2026 Firma Fiscal ACD <soporte@firmafiscalacd.com> - 0.6.0-1
+- Paquetes autosuficientes y actualizador desde GitHub Releases por tipo de instalación.
+
 * Sat Sep 26 2026 Firma Fiscal ACD <soporte@firmafiscalacd.com> - 0.5.0-1
 - Versión 0.5.0 con procesamiento concurrente y en paralelo y soporte multiplataforma.
