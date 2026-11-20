@@ -31,7 +31,7 @@ import { AppData, AppLogic } from "models.slint";
 import { OperacionEnCursoOverlay } from "operacion_overlay.slint";
 
 export component MainWindow inherits Window {
-    title: "Firma Fiscal ACD v0.5.0 - IMSS Correcciones Patronales";
+    title: "Firma Fiscal ACD " + AppData.update_current_version + " - IMSS Correcciones Patronales";
     icon: @image-url("assets/app_icon.png");
     min-width: 1024px;
     min-height: 640px;

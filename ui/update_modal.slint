@@ -280,7 +280,7 @@ export component UpdateModal inherits Rectangle {
                 Rectangle {
                     height: 40px;
                     border-radius: 8px;
-                    background: AppData.update_downloading ? #94a3b8 : (AppData.update_ready_to_install ? (btn_primary.has-hover ? #15803d : #16a34a) : (btn_primary.has-hover ? #1d4ed8 : #2563eb));
+                    background: AppData.update_downloading || AppData.update_installing ? #94a3b8 : (AppData.update_ready_to_install ? (btn_primary.has-hover ? #15803d : #16a34a) : (btn_primary.has-hover ? #1d4ed8 : #2563eb));
 
                     HorizontalLayout {
                         padding-left: 20px;
@@ -289,12 +289,12 @@ export component UpdateModal inherits Rectangle {
                         alignment: center;
 
                         Text {
-                            text: AppData.update_downloading ? "⏳" : (AppData.update_ready_to_install ? "⚡" : "⬇");
+                            text: AppData.update_downloading || AppData.update_installing ? "⏳" : (AppData.update_ready_to_install ? "⚡" : "⬇");
                             font-size: 14px;
                             vertical-alignment: center;
                         }
                         Text {
-                            text: AppData.update_downloading ? "Descargando..." : (AppData.update_ready_to_install ? "Instalar y Reiniciar" : "Actualizar Ahora");
+                            text: AppData.update_installing ? "Instalando..." : AppData.update_downloading ? "Descargando..." : (AppData.update_ready_to_install ? "Instalar y Reiniciar" : "Actualizar Ahora");
                             font-size: 13px;
                             font-weight: 800;
                             color: #ffffff;
@@ -303,9 +303,9 @@ export component UpdateModal inherits Rectangle {
                     }
 
                     btn_primary := TouchArea {
-                        mouse-cursor: AppData.update_downloading ? default : pointer;
+                        mouse-cursor: AppData.update_downloading || AppData.update_installing ? default : pointer;
                         clicked => {
-                            if !AppData.update_downloading {
+                            if !AppData.update_downloading && !AppData.update_installing {
                                 if AppData.update_ready_to_install {
                                     AppLogic.install_update_now();
                                 } else {

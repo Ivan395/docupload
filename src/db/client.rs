@@ -1,13 +1,13 @@
 use postgres::Client;
-use postgres_native_tls::MakeTlsConnector;
+use tokio_postgres_rustls::MakeRustlsConnect;
 use r2d2::Pool;
 use r2d2_postgres::PostgresConnectionManager;
 #[cfg(target_os = "windows")]
 use std::env;
 use std::sync::{Arc, RwLock};
 
-pub type DbPool = Pool<PostgresConnectionManager<MakeTlsConnector>>;
-pub type PooledClient = r2d2::PooledConnection<PostgresConnectionManager<MakeTlsConnector>>;
+pub type DbPool = Pool<PostgresConnectionManager<MakeRustlsConnect>>;
+pub type PooledClient = r2d2::PooledConnection<PostgresConnectionManager<MakeRustlsConnect>>;
 
 static GLOBAL_POOL: RwLock<Option<Arc<DbPool>>> = RwLock::new(None);
 static IS_FALLBACK_ACTIVE: RwLock<bool> = RwLock::new(false);
@@ -49,7 +49,7 @@ pub fn get_connection_string() -> String {
 
 pub fn create_client() -> Result<Client, postgres::Error> {
     let cfg = crate::db::config::get_active_config();
-    let connector = crate::db::config::create_tls_connector();
+    let connector = crate::db::config::create_tls_connector_with(cfg.ssl_verify);
     let conn_str = cfg.to_connection_string();
     Client::connect(&conn_str, connector)
 }
@@ -68,7 +68,7 @@ pub fn create_pool_for_config(cfg: &crate::db::config::DbConfig, max_size: u32) 
     let config: postgres::Config = conn_str
         .parse()
         .map_err(|e| format!("Error parseando configuración PostgreSQL ({}): {}", cfg.host, e))?;
-    let connector = crate::db::config::create_tls_connector();
+    let connector = crate::db::config::create_tls_connector_with(cfg.ssl_verify);
     let manager = PostgresConnectionManager::new(config, connector);
     let target_size = if max_size == 0 {
         optimal_pool_size()
@@ -118,7 +118,7 @@ pub fn diagnose_postgres() -> PostgresDiagnosis {
     let host = cfg.host.clone();
     let port = cfg.port.to_string();
 
-    let connector = crate::db::config::create_tls_connector();
+    let connector = crate::db::config::create_tls_connector_with(cfg.ssl_verify);
     let conn_str = cfg.to_connection_string();
 
     match Client::connect(&conn_str, connector) {

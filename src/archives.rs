@@ -267,6 +267,31 @@ fn extract_rar(
     extract_rar_with_dest(rar_path, target_extension, temp_dir).map(|(_, files)| files)
 }
 
+/// Descomprime un RAR con la librería `unrar` integrada (no requiere 7z ni unrar instalados).
+fn extraer_rar_integrado(rar_path: &Path, dest: &Path) -> Result<(), String> {
+    let mut cursor = unrar::Archive::new(rar_path)
+        .open_for_processing()
+        .map_err(|e| format!("no se pudo abrir el RAR: {e}"))?;
+    loop {
+        let Some(header) = cursor
+            .read_header()
+            .map_err(|e| format!("error leyendo cabecera RAR: {e}"))?
+        else {
+            break;
+        };
+        cursor = if header.entry().is_file() {
+            header
+                .extract_with_base(dest)
+                .map_err(|e| format!("error extrayendo entrada RAR: {e}"))?
+        } else {
+            header
+                .skip()
+                .map_err(|e| format!("error omitiendo entrada RAR: {e}"))?
+        };
+    }
+    Ok(())
+}
+
 pub fn extract_rar_with_dest(
     rar_path: &Path,
     target_extension: &str,
@@ -283,22 +308,37 @@ pub fn extract_rar_with_dest(
     let mut success = false;
     let mut executed_any = false;
     let mut last_error = String::new();
+    let mut error_integrado = String::new();
 
-    // 1. Probar 7z (PATH o carpetas estándar en Windows)
-    for bin in get_7z_candidates() {
-        let mut cmd = create_archive_cmd(&bin);
-        cmd.arg("x")
-            .arg("-y")
-            .arg(format!("-o{}", dest_folder.display()))
-            .arg(rar_path);
-
-        if let Ok(out) = cmd.output() {
+    // 0. Extractor integrado (crate unrar): no depende de 7z ni unrar instalados
+    match extraer_rar_integrado(rar_path, &dest_folder) {
+        Ok(()) => {
+            success = true;
             executed_any = true;
-            if out.status.success() {
-                success = true;
-                break;
-            } else {
-                last_error = String::from_utf8_lossy(&out.stderr).to_string();
+        }
+        Err(e) => {
+            log::warn!("Extractor RAR integrado falló, se intentan herramientas externas: {e}");
+            error_integrado = e;
+        }
+    }
+
+    // 1. Si el extractor integrado falló, probar 7z (PATH o carpetas estándar en Windows)
+    if !success {
+        for bin in get_7z_candidates() {
+            let mut cmd = create_archive_cmd(&bin);
+            cmd.arg("x")
+                .arg("-y")
+                .arg(format!("-o{}", dest_folder.display()))
+                .arg(rar_path);
+
+            if let Ok(out) = cmd.output() {
+                executed_any = true;
+                if out.status.success() {
+                    success = true;
+                    break;
+                } else {
+                    last_error = String::from_utf8_lossy(&out.stderr).to_string();
+                }
             }
         }
     }
@@ -326,8 +366,9 @@ pub fn extract_rar_with_dest(
 
     if !executed_any {
         return Err(format!(
-            "No se encontró '7z' ni 'unrar' en el sistema (ni en PATH ni en directorios comunes de instalación) para descomprimir RAR {:?}",
-            rar_path.file_name().unwrap_or_default()
+            "No se encontró '7z' ni 'unrar' en el sistema (ni en PATH ni en directorios comunes de instalación) para descomprimir RAR {:?}. Extractor integrado: {}",
+            rar_path.file_name().unwrap_or_default(),
+            error_integrado.trim()
         ));
     }
 
