@@ -5,6 +5,21 @@ import { HistorialEmpleadoModal } from "historial_empleado_modal.slint";
 export component EmpleadosView inherits Rectangle {
     background: #f8fafc;
 
+    // Columnas opcionales de la tabla según el ancho disponible. Sin esto, con el panel lateral
+    // abierto la tabla no cabe en 1366px y empuja el panel fuera de la ventana. Umbrales = ancho
+    // mínimo de la tabla con esas columnas (columnas + separaciones de 16px + 32px de padding de la
+    // tabla + 32px de padding de la fila, reservando 220px al nombre); se ocultan en este orden y
+    // la de CURP & NSS al final. Por debajo del último umbral el nombre cede hasta 150px (su
+    // min-width), lo que deja ver el panel completo hasta 1024px de ventana.
+    // La vista tiene min-width: 0 en main_view y los encabezados van en un Flickable, así que
+    // root.width no depende de estas columnas (sin ciclo de enlaces).
+    property <length> ancho-tabla: root.width - 48px - (AppData.show_edit_empleado_panel ? 400px : 0px);
+    property <bool> col-ultima-obra: ancho-tabla >= 1306px;
+    property <bool> col-sbc: ancho-tabla >= 1170px;
+    property <bool> col-reg-patronal: ancho-tabla >= 1044px;
+    property <bool> col-obras: ancho-tabla >= 898px;
+    property <bool> col-curp: ancho-tabla >= 802px;
+
     VerticalLayout {
         padding: 24px;
         spacing: 18px;
@@ -227,25 +242,35 @@ export component EmpleadosView inherits Rectangle {
                     padding: 16px;
                     spacing: 10px;
 
-                    // Encabezados de Columna
-                    Rectangle {
+                    // Encabezados de Columna. Van dentro de un Flickable fijo (igual que las filas
+                    // dentro del ScrollView) para que su ancho mínimo no se propague a la vista: las
+                    // columnas visibles dependen de root.width y propagarlo formaría un ciclo.
+                    Flickable {
                         height: 38px;
-                        background: #f8fafc;
-                        border-radius: 6px;
+                        interactive: false;
+                        content-width: self.width;
+                        content-height: self.height;
 
-                        HorizontalLayout {
-                            padding-left: 16px;
-                            padding-right: 16px;
-                            spacing: 16px;
+                        Rectangle {
+                            width: parent.width;
+                            height: 38px;
+                            background: #f8fafc;
+                            border-radius: 6px;
 
-                            Rectangle { horizontal-stretch: 1; min-width: 220px; Text { text: "EMPLEADO / RFC"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 170px; Text { text: "CURP & NSS"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 130px; Text { text: "REG. PATRONAL"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 110px; Text { text: "SBC DIARIO"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 130px; Text { text: "ESTADO"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
-                            Rectangle { width: 80px; Text { text: "OBRAS ACT."; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
-                            Rectangle { width: 120px; Text { text: "ÚLTIMA OBRA"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
-                            Rectangle { width: 170px; Text { text: "ACCIÓN"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 16px;
+
+                                Rectangle { horizontal-stretch: 1; min-width: 150px; Text { text: "EMPLEADO / RFC"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                if root.col-curp : Rectangle { width: 170px; Text { text: "CURP & NSS"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                if root.col-reg-patronal : Rectangle { width: 130px; Text { text: "REG. PATRONAL"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                if root.col-sbc : Rectangle { width: 110px; Text { text: "SBC DIARIO"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                Rectangle { width: 130px; Text { text: "ESTADO"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                                if root.col-obras : Rectangle { width: 80px; Text { text: "OBRAS ACT."; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                                if root.col-ultima-obra : Rectangle { width: 120px; Text { text: "ÚLTIMA OBRA"; font-size: 11px; font-weight: 800; color: #475569; vertical-alignment: center; } }
+                                Rectangle { width: 170px; Text { text: "ACCIÓN"; font-size: 11px; font-weight: 800; color: #475569; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
                         }
                     }
 
@@ -295,7 +320,7 @@ export component EmpleadosView inherits Rectangle {
                                     // Columna 1: Nombre & RFC con Avatar de Iniciales
                                     Rectangle {
                                         horizontal-stretch: 1;
-                                        min-width: 220px;
+                                        min-width: 150px;
 
                                         HorizontalLayout {
                                             spacing: 12px;
@@ -361,7 +386,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 2: CURP & NSS
-                                    Rectangle {
+                                    if root.col-curp : Rectangle {
                                         width: 170px;
                                         VerticalLayout {
                                             alignment: center;
@@ -384,7 +409,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 3: Registro Patronal
-                                    Rectangle {
+                                    if root.col-reg-patronal : Rectangle {
                                         width: 130px;
                                         VerticalLayout {
                                             alignment: center;
@@ -399,7 +424,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 4: SBC Diario
-                                    Rectangle {
+                                    if root.col-sbc : Rectangle {
                                         width: 110px;
                                         VerticalLayout {
                                             alignment: center;
@@ -466,7 +491,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 6: Obras actuales (obras con días en el último mes)
-                                    Rectangle {
+                                    if root.col-obras : Rectangle {
                                         width: 80px;
                                         VerticalLayout {
                                             alignment: center;
@@ -481,7 +506,7 @@ export component EmpleadosView inherits Rectangle {
                                     }
 
                                     // Columna 7: Última obra
-                                    Rectangle {
+                                    if root.col-ultima-obra : Rectangle {
                                         width: 120px;
                                         VerticalLayout {
                                             alignment: center;
