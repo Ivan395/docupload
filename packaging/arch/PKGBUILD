@@ -1,7 +1,7 @@
 # Maintainer: Firma Fiscal ACD <soporte@firmafiscalacd.com>
 # pkgver debe coincidir con la versión de Cargo.toml (package.version)
 pkgname=docu_ffacd
-pkgver=0.5.0
+pkgver=0.6.0
 pkgrel=1
 pkgdesc="DocuUpload - Procesamiento concurrente de nóminas SAT y cédulas SUA IMSS"
 arch=('x86_64')
