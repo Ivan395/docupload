@@ -1,0 +1,489 @@
+// Revisión de discrepancias antes de cargar cédulas de cuotas o nóminas.
+//
+// Los archivos con errores de captura (RFC, NSS, CURP, nombre, datos del patrón) NO se bloquean:
+// el usuario decide por cada advertencia si deja el dato como viene, usa el sugerido o lo corrige,
+// y elige qué archivos cargar (todos, algunos o ninguno). La lógica vive en src/carga_revision_ui.rs.
+import { ListView, LineEdit } from "std-widgets.slint";
+import { AppData, AppLogic, CargaArchivoUi, CargaAdvertenciaUi } from "models.slint";
+import { ModalOverlay } from "modal_shell.slint";
+import { FormErrorBanner } from "form_field.slint";
+
+component BotonCarga inherits Rectangle {
+    in property <string> texto;
+    in property <string> estilo: "neutro"; // neutro | primario | peligro
+    in property <bool> habilitado: true;
+    callback clicked();
+
+    height: 36px;
+    min-width: 120px;
+    border-radius: 6px;
+    background: !root.habilitado ? #e2e8f0
+        : root.estilo == "primario" ? (toque.has-hover ? #1d4ed8 : #1e3a8a)
+        : root.estilo == "peligro" ? (toque.has-hover ? #fee2e2 : #ffffff)
+        : (toque.has-hover ? #f1f5f9 : #ffffff);
+    border-width: 1px;
+    border-color: root.estilo == "primario" ? #1e3a8a : (root.estilo == "peligro" ? #fca5a5 : #cbd5e1);
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.texto;
+            font-size: 12px;
+            font-weight: 700;
+            color: !root.habilitado ? #94a3b8 : (root.estilo == "primario" ? #ffffff : (root.estilo == "peligro" ? #b91c1c : #334155));
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    toque := TouchArea {
+        enabled: root.habilitado;
+        mouse-cursor: root.habilitado ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+component OpcionAccion inherits Rectangle {
+    in property <string> texto;
+    in property <bool> activa;
+    in property <bool> habilitada: true;
+    callback clicked();
+
+    height: 26px;
+    border-radius: 5px;
+    background: root.activa ? #1e3a8a : (toque.has-hover && root.habilitada ? #e0e7ff : #ffffff);
+    border-width: 1px;
+    border-color: root.activa ? #1e3a8a : #cbd5e1;
+    opacity: root.habilitada ? 1.0 : 0.45;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.texto;
+            font-size: 11px;
+            font-weight: 700;
+            color: root.activa ? #ffffff : #334155;
+            vertical-alignment: center;
+        }
+    }
+
+    toque := TouchArea {
+        enabled: root.habilitada;
+        mouse-cursor: root.habilitada ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+component FilaArchivo inherits Rectangle {
+    in property <CargaArchivoUi> archivo;
+    in property <bool> filtrado;
+
+    height: 40px;
+    border-radius: 6px;
+    background: root.filtrado ? #eef2ff : (toque_nombre.has-hover ? #f8fafc : transparent);
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 8px;
+
+        // Casilla incluir / omitir
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            border-width: 1.5px;
+            border-color: root.archivo.incluir ? #1e3a8a : #94a3b8;
+            background: root.archivo.incluir ? #1e3a8a : #ffffff;
+            Image {
+                visible: root.archivo.incluir;
+                source: @image-url("assets/icons/check.svg");
+                colorize: #ffffff;
+                width: 14px;
+                height: 14px;
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { AppLogic.carga_adv_toggle_archivo(root.archivo.nombre); }
+            }
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.archivo.nombre;
+            font-size: 11px;
+            font-weight: root.filtrado ? 800 : 600;
+            color: root.archivo.incluir ? #0f172a : #94a3b8;
+            overflow: elide;
+            vertical-alignment: center;
+            toque_nombre := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { AppLogic.carga_adv_filtrar(root.filtrado ? "" : root.archivo.nombre); }
+            }
+        }
+
+        if root.archivo.advertencias > 0 : Rectangle {
+            y: (parent.height - self.height) / 2;
+            height: 20px;
+            min-width: 26px;
+            border-radius: 10px;
+            background: root.archivo.graves > 0 ? #fee2e2 : #fef3c7;
+            HorizontalLayout {
+                padding-left: 7px;
+                padding-right: 7px;
+                Text {
+                    text: root.archivo.advertencias;
+                    font-size: 10px;
+                    font-weight: 800;
+                    color: root.archivo.graves > 0 ? #b91c1c : #92400e;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component TarjetaAdvertencia inherits Rectangle {
+    in property <CargaAdvertenciaUi> adv;
+
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.adv.error != "" ? #f87171 : (root.adv.grave ? #fca5a5 : #e2e8f0);
+    background: root.adv.grave ? #fff7f7 : #ffffff;
+    opacity: root.adv.archivo_incluido ? 1.0 : 0.5;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            Rectangle {
+                height: 20px;
+                border-radius: 4px;
+                background: root.adv.grave ? #b91c1c : (root.adv.del_patron ? #7c3aed : #d97706);
+                HorizontalLayout {
+                    padding-left: 7px;
+                    padding-right: 7px;
+                    Text {
+                        text: root.adv.campo;
+                        font-size: 10px;
+                        font-weight: 800;
+                        color: #ffffff;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            Text {
+                text: root.adv.del_patron ? "Datos del patrón" : root.adv.trabajador;
+                font-size: 12px;
+                font-weight: 800;
+                color: #0f172a;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.adv.n_archivos == 1 ? root.adv.archivos : (root.adv.n_archivos + " archivos");
+                font-size: 10px;
+                color: #64748b;
+                vertical-alignment: center;
+                overflow: elide;
+                max-width: 220px;
+            }
+        }
+
+        Text {
+            text: root.adv.mensaje;
+            font-size: 11px;
+            color: #475569;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            Text { text: "Viene:"; font-size: 11px; color: #64748b; vertical-alignment: center; }
+            Text {
+                text: root.adv.encontrado != "" ? root.adv.encontrado : "(vacío)";
+                font-size: 11px;
+                font-weight: 700;
+                font-family: "Noto Sans Mono";
+                color: #b45309;
+                vertical-alignment: center;
+            }
+            if root.adv.sugerido != "" : Text { text: "→  Sugerido:"; font-size: 11px; color: #64748b; vertical-alignment: center; }
+            if root.adv.sugerido != "" : Text {
+                text: root.adv.sugerido;
+                font-size: 11px;
+                font-weight: 700;
+                font-family: "Noto Sans Mono";
+                color: #15803d;
+                vertical-alignment: center;
+            }
+            if root.adv.sugerido != "" : Text { text: "(" + root.adv.origen + ")"; font-size: 10px; color: #94a3b8; vertical-alignment: center; }
+        }
+
+        if root.adv.solo_decidir_archivo : Text {
+            text: "Este dato no se puede corregir (es parte del documento fiscal). Decide si cargas el archivo con la casilla de la izquierda.";
+            font-size: 10px;
+            color: #64748b;
+            wrap: word-wrap;
+        }
+
+        if !root.adv.solo_decidir_archivo : HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+
+            OpcionAccion {
+                texto: "Dejar como viene";
+                activa: root.adv.accion == 0;
+                clicked => { AppLogic.carga_adv_accion(root.adv.id, 0); }
+            }
+            OpcionAccion {
+                texto: "Usar sugerido";
+                activa: root.adv.accion == 1;
+                habilitada: root.adv.sugerido != "";
+                clicked => { AppLogic.carga_adv_accion(root.adv.id, 1); }
+            }
+            OpcionAccion {
+                texto: "Corregir";
+                activa: root.adv.accion == 2;
+                clicked => { AppLogic.carga_adv_accion(root.adv.id, 2); }
+            }
+            if root.adv.accion == 2 : Rectangle {
+                width: 260px;
+                height: 30px;
+                border-radius: 6px;
+                border-width: 1.5px;
+                border-color: root.adv.error != "" ? #dc2626 : transparent;
+                LineEdit {
+                    width: parent.width - 3px;
+                    height: parent.height - 3px;
+                    x: 1.5px;
+                    y: 1.5px;
+                    font-size: 11px;
+                    text: root.adv.correccion;
+                    placeholder-text: "Valor correcto de " + root.adv.campo;
+                    edited(t) => { AppLogic.carga_adv_correccion(root.adv.id, t); }
+                }
+            }
+        }
+
+        if root.adv.accion == 2 && root.adv.error != "" : HorizontalLayout {
+            spacing: 4px;
+            Image { source: @image-url("assets/icons/circle-alert.svg"); colorize: #dc2626; width: 12px; height: 12px; }
+            Text { text: root.adv.error; font-size: 10px; font-weight: 600; color: #dc2626; wrap: word-wrap; horizontal-stretch: 1; }
+        }
+
+        if !root.adv.archivo_incluido : Text {
+            text: "Este archivo no está seleccionado: no se cargará.";
+            font-size: 10px;
+            color: #64748b;
+        }
+    }
+}
+
+export component CargaAdvertenciasModal inherits ModalOverlay {
+    ancho-max: 1100px;
+    alto-contenido: 760px;
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+
+        // Encabezado
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                border-radius: 10px;
+                background: #fef3c7;
+                Image { source: @image-url("assets/icons/alert-triangle.svg"); colorize: #d97706; width: 22px; height: 22px; }
+            }
+            VerticalLayout {
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text {
+                    text: AppData.carga_adv_titulo;
+                    font-size: 17px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "Se encontraron datos que no coinciden (" + AppData.carga_adv_n_advertencias + " advertencias). Los archivos sí se pueden cargar: decide qué hacer con cada dato y qué " + AppData.carga_adv_tipo + " cargar.";
+                    font-size: 12px;
+                    color: #475569;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        if AppData.carga_adv_n_graves > 0 : Rectangle {
+            border-radius: 8px;
+            background: #fef2f2;
+            border-width: 1px;
+            border-color: #fecaca;
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 8px;
+                Image { source: @image-url("assets/icons/alert-triangle.svg"); colorize: #dc2626; width: 16px; height: 16px; }
+                Text {
+                    text: "Hay " + AppData.carga_adv_n_graves + " advertencia(s) graves (en rojo), como un Registro Patronal distinto al de la revisión. Si cargas esos archivos, sus datos se guardan en el Registro Patronal y cliente de esta revisión; verifica que de verdad correspondan.";
+                    font-size: 11px;
+                    color: #991b1b;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        FormErrorBanner { }
+
+        // Cuerpo: archivos (izquierda) y advertencias (derecha)
+        HorizontalLayout {
+            spacing: 14px;
+            vertical-stretch: 1;
+
+            // Archivos
+            Rectangle {
+                width: 320px;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #e2e8f0;
+                background: #ffffff;
+
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        Text {
+                            text: "Archivos: " + AppData.carga_adv_n_incluidos + " de " + AppData.carga_adv_n_total + " seleccionados";
+                            font-size: 12px;
+                            font-weight: 800;
+                            color: #1e3a8a;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: "Seleccionar todos";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: sel_todos.has-hover ? #1d4ed8 : #2563eb;
+                            sel_todos := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.carga_adv_todos(true); } }
+                        }
+                        Text {
+                            text: "Quitar todos";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: sel_ninguno.has-hover ? #1d4ed8 : #2563eb;
+                            sel_ninguno := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.carga_adv_todos(false); } }
+                        }
+                    }
+                    Text {
+                        text: "Marca los archivos que quieres cargar. Clic en el nombre para ver solo sus advertencias.";
+                        font-size: 10px;
+                        color: #94a3b8;
+                        wrap: word-wrap;
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        for archivo in AppData.carga_adv_archivos : FilaArchivo {
+                            archivo: archivo;
+                            filtrado: AppData.carga_adv_filtro == archivo.nombre;
+                        }
+                    }
+                }
+            }
+
+            // Advertencias
+            VerticalLayout {
+                spacing: 8px;
+                horizontal-stretch: 1;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text {
+                        text: AppData.carga_adv_filtro == "" ? "Todas las advertencias" : "Advertencias de: " + AppData.carga_adv_filtro;
+                        font-size: 12px;
+                        font-weight: 800;
+                        color: #0f172a;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    if AppData.carga_adv_filtro != "" : Text {
+                        text: "Ver todas";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: #2563eb;
+                        vertical-alignment: center;
+                        TouchArea { mouse-cursor: pointer; clicked => { AppLogic.carga_adv_filtrar(""); } }
+                    }
+                    OpcionAccion {
+                        texto: "Usar todos los sugeridos";
+                        activa: false;
+                        clicked => { AppLogic.carga_adv_accion_masiva(1); }
+                    }
+                    OpcionAccion {
+                        texto: "Dejar todo como viene";
+                        activa: false;
+                        clicked => { AppLogic.carga_adv_accion_masiva(0); }
+                    }
+                }
+
+                ListView {
+                    vertical-stretch: 1;
+                    for adv in AppData.carga_adv_items : VerticalLayout {
+                        padding-bottom: 8px;
+                        padding-right: 8px;
+                        TarjetaAdvertencia { adv: adv; }
+                    }
+                }
+            }
+        }
+
+        // Pie: las tres decisiones
+        Rectangle { height: 1px; background: #e2e8f0; }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: end;
+
+            Text {
+                text: "Los datos corregidos solo cambian lo que se guarda; los archivos originales no se modifican.";
+                font-size: 10px;
+                color: #94a3b8;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                wrap: word-wrap;
+            }
+            BotonCarga {
+                texto: "No cargar ninguno";
+                estilo: "peligro";
+                clicked => { AppLogic.carga_adv_cancelar(); }
+            }
+            BotonCarga {
+                texto: "Cargar seleccionados (" + AppData.carga_adv_n_incluidos + ")";
+                habilitado: AppData.carga_adv_n_incluidos > 0;
+                clicked => { AppLogic.carga_adv_confirmar(1); }
+            }
+            BotonCarga {
+                texto: "Cargar todos (" + AppData.carga_adv_n_total + ")";
+                estilo: "primario";
+                clicked => { AppLogic.carga_adv_confirmar(0); }
+            }
+        }
+    }
+}

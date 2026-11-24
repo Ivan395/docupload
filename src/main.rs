@@ -68,9 +68,14 @@ pub mod sua_export;
 pub mod paths;
 pub mod updater;
 pub mod validation;
+pub mod form_errors;
+pub mod advertencias_carga;
+mod carga_revision_ui;
+mod duplicados_ui;
 #[cfg(test)]
 mod pruebas_golden_excel;
 #[cfg(test)] mod captura_ui;
+#[cfg(test)] mod captura_errores_ui;
 
 use crate::calendario_view_logic::*;
 use crate::db::{create_pool, ensure_schema, DbPool, CedulasDbStats};
@@ -906,6 +911,7 @@ fn load_revisiones_ui(ui: &MainWindow, pool: &DbPool, rp_id: &str) {
             } else {
                 format!("#{}", r.id)
             };
+            let aprobada_imss = r.estatus_imss.trim().eq_ignore_ascii_case("APROBADA POR IMSS");
             RevisionData {
                 id: r.id.into(),
                 id_registro_patronal: r.id_registro_patronal.into(),
@@ -928,6 +934,7 @@ fn load_revisiones_ui(ui: &MainWindow, pool: &DbPool, rp_id: &str) {
                 periodo_inicio: r.periodo_inicio.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default().into(),
                 periodo_fin: r.periodo_fin.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default().into(),
                 pidio_prorroga: r.pidio_prorroga,
+                aprobada_imss,
                 obras_count: r.obras_count,
                 created_at_str: r.created_at.into(),
                 id_db_label: id_short.into(),
@@ -1274,7 +1281,7 @@ fn spawn_nominas_worker(
 
         let exp_rfc_opt = if !nom_client_rfc.trim().is_empty() { Some(nom_client_rfc.as_str()) } else { None };
         let exp_rp_opt = if nom_rp_reg != "GENERAL" && !nom_rp_reg.trim().is_empty() { Some(nom_rp_reg.as_str()) } else { None };
-        let res = nominas::processor::process_nominas(&nominas_paths, &nominas_out_path, &temp_dir, progress_cb, nom_rev_id, exp_rfc_opt, exp_rp_opt);
+        let res = nominas::processor::process_nominas(&nominas_paths, &nominas_out_path, &temp_dir, progress_cb, nom_rev_id, exp_rfc_opt, exp_rp_opt, None);
 
         let ui_event = ui_w.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -2572,7 +2579,167 @@ fn spawn_cedulas_view_worker(
             &temp_dir,
             progress_cb,
         ) {
-            Ok((audit_res, businesses, mismatch_report)) => {
+            Ok((audit_res, mut businesses, mut mismatch_report)) => {
+                // ── Revisión de discrepancias: el usuario decide qué cargar ──
+                // Errores de captura en datos del patrón o de los trabajadores ya no bloquean la carga:
+                // se muestran como advertencias y el hilo espera la decisión (cargar todas, algunas o ninguna).
+                {
+                    use crate::advertencias_carga as adv;
+                    let nombres_nuevos_rev: HashSet<String> =
+                        archivos_pendientes.iter().map(|a| a.nombre_archivo.clone()).collect();
+                    let es_nuevo = |f: &Option<String>| f.as_deref().is_some_and(|f| nombres_nuevos_rev.contains(f));
+
+                    let catalogo = match (pool_w.as_ref(), Uuid::parse_str(&revision_id)) {
+                        (Some(pool), Ok(rev)) => pool
+                            .get()
+                            .map_err(|e| e.to_string())
+                            .and_then(|mut c| adv::cargar_catalogo(&mut *c, rev))
+                            .unwrap_or_else(|e| {
+                                log::warn!("Advertencias de carga: sin catálogo de empleados ({})", e);
+                                adv::CatalogoEmpleados::default()
+                            }),
+                        _ => adv::CatalogoEmpleados::default(),
+                    };
+                    let registros: Vec<adv::RegistroTrabajador> = businesses
+                        .iter()
+                        .flat_map(|b| b.employees.iter())
+                        .filter(|e| es_nuevo(&e.file_name))
+                        .map(|e| adv::RegistroTrabajador {
+                            archivo: e.file_name.clone().unwrap_or_default(),
+                            nss: e.no_seguro_social.clone(),
+                            nombre: e.nombre.clone(),
+                            rfc: e.rfc.clone(),
+                            curp: e.curp.clone(),
+                        })
+                        .collect();
+                    let mut advertencias = adv::detectar_trabajadores(&registros, &catalogo);
+                    advertencias.extend(
+                        mismatch_report
+                            .advertencias_patron
+                            .iter()
+                            .filter(|a| a.archivos.iter().any(|f| nombres_nuevos_rev.contains(f)))
+                            .cloned(),
+                    );
+                    let advertencias = adv::numerar(advertencias);
+
+                    if !advertencias.is_empty() {
+                        // Archivos nuevos con trabajadores: son los que el usuario puede elegir
+                        let archivos_revisados: Vec<String> = businesses
+                            .iter()
+                            .flat_map(|b| b.employees.iter())
+                            .filter(|e| es_nuevo(&e.file_name))
+                            .filter_map(|e| e.file_name.clone())
+                            .collect::<std::collections::BTreeSet<String>>()
+                            .into_iter()
+                            .collect();
+
+                        // El indicador de "Procesando" taparía el modal mientras se espera la decisión
+                        let ui_pausa = ui_w.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_pausa.upgrade() {
+                                let app_data = ui.global::<AppData>();
+                                app_data.set_cedulas_view_is_processing(false);
+                                app_data.set_is_processing(false);
+                            }
+                        });
+
+                        let decision = crate::carga_revision_ui::solicitar_decision(
+                            ui_w.clone(),
+                            "cédulas",
+                            "Revisa las cédulas de cuotas antes de cargarlas",
+                            archivos_revisados.clone(),
+                            advertencias.clone(),
+                        );
+
+                        match decision {
+                            adv::DecisionCarga::Cancelar => {
+                                // No cargar ninguna: se descarta el lote en staging y se restaura la vista
+                                if let Some(ref batch_id) = staging_batch_id_opt {
+                                    let _ = crate::rustfs::rollback_staging_files_in_rustfs(
+                                        &client_nombre,
+                                        &rp_for_rustfs,
+                                        &revision_nombre,
+                                        "Cedulas_de_cuotas",
+                                        batch_id,
+                                    );
+                                }
+                                for p in &staged_local_paths {
+                                    let _ = std::fs::remove_file(p);
+                                }
+                                let sync_id = if !revision_id.trim().is_empty() { revision_id.clone() } else { effective_rp_id.clone() };
+                                let cards = crate::rustfs::sync_and_load_cedulas_view_files(
+                                    &client_nombre,
+                                    &rp_for_rustfs,
+                                    &revision_nombre,
+                                    &cache_dir,
+                                )
+                                .unwrap_or_default();
+                                let committed = pool_w
+                                    .as_ref()
+                                    .and_then(|p| p.get().ok())
+                                    .and_then(|mut c| load_cedulas_from_db(&mut c, &sync_id).ok().flatten());
+                                let ui_c = ui_w.clone();
+                                let session_c = session_w.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_c.upgrade() {
+                                        let mut sess = session_c.lock().unwrap();
+                                        sess.files = cards;
+                                        if let Some((db_audit, db_businesses, _)) = committed {
+                                            sess.audit_res = Some(db_audit);
+                                            sess.businesses = db_businesses;
+                                            update_cedulas_view_file_list_ui(&ui, &sess);
+                                            update_cedulas_audit_view_ui(&ui, &mut sess);
+                                            ui.global::<AppData>().set_cedulas_view_state(2);
+                                        } else {
+                                            reset_cedulas_ui_to_state_zero(&ui, &mut sess);
+                                        }
+                                        drop(sess);
+                                        let app_data = ui.global::<AppData>();
+                                        app_data.set_cedulas_view_is_processing(false);
+                                        app_data.set_is_processing(false);
+                                        app_data.set_cedulas_view_progress_fraction(0.0);
+                                        app_data.set_cedulas_view_progress_text("".into());
+                                        app_data.set_progress_percentage(0.0);
+                                        app_data.set_current_file_name("".into());
+                                        show_toast_message(&ui, "Carga cancelada: no se cargó ninguna cédula.");
+                                    }
+                                });
+                                return;
+                            }
+                            adv::DecisionCarga::Cargar { incluidos, acciones } => {
+                                let omitidos = adv::aplicar_a_cedulas(
+                                    &mut businesses,
+                                    &advertencias,
+                                    &acciones,
+                                    &incluidos,
+                                    &archivos_revisados,
+                                );
+                                for f in omitidos {
+                                    mismatch_report.items.push(CedulaMismatchItem {
+                                        filename: f,
+                                        error_type: "Omitida por el usuario".to_string(),
+                                        expected_val: String::new(),
+                                        found_val: String::new(),
+                                        details: "Se decidió no cargar esta cédula al revisar sus discrepancias.".to_string(),
+                                    });
+                                }
+                                log::info!(
+                                    "Cédulas: el usuario cargará {} de {} archivo(s) revisados; {} decisión(es) sobre advertencias",
+                                    incluidos.len(),
+                                    archivos_revisados.len(),
+                                    acciones.len()
+                                );
+                                let ui_reanuda = ui_w.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_reanuda.upgrade() {
+                                        ui.global::<AppData>().set_cedulas_view_is_processing(true);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Mover a Trash en RustFS únicamente los archivos que fallaron por completo
                 for bad_item in &mismatch_report.items {
                     if let Err(e) = crate::rustfs::move_file_to_trash(
@@ -2958,6 +3125,8 @@ fn spawn_cedulas_view_worker(
                                     None
                                 };
                                 if let Some(rev_uuid) = effective_rev_uuid {
+                                    // Errores de captura pudieron crear empleados duplicados: avisar para corregirlos
+                                    crate::duplicados_ui::revisar_tras_carga(ui.as_weak(), pool.clone(), rev_uuid);
                                     if let Ok((has_cedulas, has_nominas, has_liquidaciones, has_obras)) = 
                                         check_all_data_exists(&mut client, rev_uuid) {
                                         app_data.set_revision_has_cedulas(has_cedulas);
@@ -3435,7 +3604,7 @@ fn handle_confirmar_borrar_todas_cedulas(
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 if let Some(err) = error_msg {
-                    show_toast_message(&ui, &err);
+                    form_errors::mostrar_error_sistema(&ui, "No se pudieron borrar las cédulas", &form_errors::describir_error(&err));
                     return;
                 }
 
@@ -5056,37 +5225,62 @@ fn main() -> Result<(), slint::PlatformError> {
                 let rp_id = app_data.get_selected_rp_id().to_string();
                 let rp_reg = app_data.get_selected_rp_registro().to_string();
                 if let Err(e) = validate_registro_patronal(&rp_reg) {
-                    show_toast_message(&ui, &format!("No se puede guardar la revisión: {}", e));
+                    form_errors::mostrar_error_general(
+                        &ui,
+                        "El Registro Patronal seleccionado no es válido",
+                        &format!("No se puede guardar la revisión: {}", e),
+                    );
                     return;
                 }
-                if nombre.trim().is_empty() {
-                    show_toast_message(&ui, "El nombre de la revisión es obligatorio.");
-                    return;
+
+                let mut errores = form_errors::ErroresFormulario::new();
+                errores.requerido("nombre", nombre.as_str(), "El nombre de la revisión");
+
+                // Fechas capturadas a mano: si tienen texto debe ser una fecha DD/MM/AAAA válida
+                for (campo, valor) in [
+                    ("f_ent_imss", f_ent_imss.as_str()),
+                    ("f_aprob_imss", f_aprob_imss.as_str()),
+                    ("f_ent_rev", f_ent_rev.as_str()),
+                    ("periodo_inicio", per_ini.as_str()),
+                    ("periodo_fin", per_fin.as_str()),
+                ] {
+                    if !form_errors::es_vacio(valor) && parse_date_opt(valor).is_none() {
+                        errores.agregar(campo, "Formato inválido: usa DD/MM/AAAA.");
+                    }
+                }
+                if pidio_pror && !form_errors::es_vacio(f_aprob_pror.as_str()) && parse_date_opt(f_aprob_pror.as_str()).is_none() {
+                    errores.agregar("f_aprob_pror", "Formato inválido: usa DD/MM/AAAA.");
                 }
 
                 // Periodo revisado: ambas fechas deben ser válidas y en orden, o ambas vacías
                 let d_per_ini = parse_date_opt(per_ini.as_str());
                 let d_per_fin = parse_date_opt(per_fin.as_str());
-                if let (Some(i), Some(f)) = (d_per_ini, d_per_fin) {
-                    if i > f {
-                        show_toast_message(&ui, "El periodo revisado es inválido: el inicio es posterior al fin.");
-                        return;
+                match (d_per_ini, d_per_fin) {
+                    (Some(i), Some(f)) if i > f => {
+                        errores.agregar("periodo_fin", "El fin del periodo no puede ser anterior al inicio.");
                     }
+                    (Some(_), None) if form_errors::es_vacio(per_fin.as_str()) => {
+                        errores.agregar("periodo_fin", "Captura también el fin del periodo (o deja ambos vacíos).");
+                    }
+                    (None, Some(_)) if form_errors::es_vacio(per_ini.as_str()) => {
+                        errores.agregar("periodo_inicio", "Captura también el inicio del periodo (o deja ambos vacíos).");
+                    }
+                    _ => {}
                 }
-                let (periodo_ini_val, periodo_fin_val, periodo_warn) = match (d_per_ini, d_per_fin) {
+
+                if !errores.is_empty() {
+                    form_errors::mostrar_errores(&ui, &errores);
+                    return;
+                }
+                let (periodo_ini_val, periodo_fin_val, periodo_warn): (_, _, Option<&str>) = match (d_per_ini, d_per_fin) {
                     (Some(i), Some(f)) => (Some(i), Some(f), None),
-                    (None, None) => (None, None, None),
-                    _ => (
-                        None,
-                        None,
-                        Some("Captura inicio y fin del periodo revisado (o deja ambos vacíos)."),
-                    ),
+                    _ => (None, None, None),
                 };
                 if let Some(ref pool) = pool_clone {
                     let mut client = match pool.get() {
                         Ok(c) => c,
                         Err(e) => {
-                            show_toast_message(&ui, &format!("Error de conexión: {}", e));
+                            form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error de conexión: {}", e));
                             return;
                         }
                     };
@@ -5216,7 +5410,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             show_toast_message(&ui, &msg_final);
                         }
                         Err(e) => {
-                            show_toast_message(&ui, &format!("Error al guardar revisión: {}", e));
+                            form_errors::mostrar_error_general(&ui, "No se pudo guardar la revisión", &e);
                         }
                     }
                 }
@@ -5304,7 +5498,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                         show_toast_message(&ui, "Revisión eliminada correctamente.");
                                     }
                                     Err(e) => {
-                                        show_toast_message(&ui, &format!("Error al eliminar revisión: {}", e));
+                                        form_errors::mostrar_error_sistema(&ui, "No se pudo eliminar la revisión", &form_errors::describir_error(&e.to_string()));
                                     }
                                 }
                             }
@@ -5493,7 +5687,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                         "delete_cliente",
                                         &format!("Error eliminando cliente {}: {}", cliente_id_str, e),
                                     );
-                                    show_toast_message(&ui, &format!("Error al eliminar cliente: {}", e));
+                                    form_errors::mostrar_error_sistema(&ui, "No se pudo eliminar el cliente", &form_errors::describir_error(&e.to_string()));
                                 }
                             }
                         }
@@ -5583,7 +5777,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                         show_toast_message(&ui, "Registro patronal y datos asociados eliminados correctamente.");
                                     }
                                     Err(e) => {
-                                        show_toast_message(&ui, &format!("Error al eliminar registro patronal: {}", e));
+                                        form_errors::mostrar_error_sistema(&ui, "No se pudo eliminar el Registro Patronal", &form_errors::describir_error(&e.to_string()));
                                     }
                                 }
                             }
@@ -5741,36 +5935,54 @@ fn main() -> Result<(), slint::PlatformError> {
                 let rev_id = app_data.get_selected_revision_id().to_string();
                 let rp_id = app_data.get_selected_rp_id().to_string();
 
+                // Validación de todos los campos a la vez (cada error se marca en su campo)
+                let mut errores = form_errors::ErroresFormulario::new();
                 let clean_numero = clean_alphanumeric_input(&numero);
-                if clean_numero.is_empty() {
-                    show_toast_message(&ui, "El número de registro de obra es obligatorio.");
-                    return;
-                }
-                if let Err(e) = validate_registro_obra(&clean_numero) {
-                    show_toast_message(&ui, &format!("Estructura de registro de obra inválida: {}", e));
-                    return;
+                if errores.requerido("numero", &clean_numero, "El número de registro de obra") {
+                    if let Err(e) = validate_registro_obra(&clean_numero) {
+                        errores.agregar("numero", format!("Formato inválido: {}", e));
+                    }
                 }
 
                 let fecha_inicio_opt = parse_date_opt(f_ini.as_str());
                 if fecha_inicio_opt.is_none() {
-                    show_toast_message(&ui, "La fecha de inicio de la obra es obligatoria (DD/MM/AAAA).");
-                    return;
+                    if form_errors::es_vacio(f_ini.as_str()) {
+                        errores.agregar("fecha_inicio", "La fecha de inicio es obligatoria.");
+                    } else {
+                        errores.agregar("fecha_inicio", "Formato inválido: usa DD/MM/AAAA.");
+                    }
                 }
 
                 let fecha_fin_opt = parse_date_opt(f_fin.as_str());
                 if fecha_fin_opt.is_none() {
-                    show_toast_message(&ui, "La fecha final de la obra es obligatoria (DD/MM/AAAA).");
-                    return;
+                    if form_errors::es_vacio(f_fin.as_str()) {
+                        errores.agregar("fecha_fin", "La fecha final es obligatoria.");
+                    } else {
+                        errores.agregar("fecha_fin", "Formato inválido: usa DD/MM/AAAA.");
+                    }
                 }
 
                 if let (Some(ini), Some(fin)) = (fecha_inicio_opt, fecha_fin_opt) {
                     if ini > fin {
-                        show_toast_message(&ui, "La fecha de inicio no puede ser posterior a la fecha final.");
-                        return;
+                        errores.agregar("fecha_fin", "La fecha final no puede ser anterior a la fecha de inicio.");
                     }
                 }
 
-                let sup: f64 = sup_str.trim().parse().unwrap_or(0.0);
+                let sup: f64 = {
+                    let s = sup_str.replace(',', "");
+                    let s = s.trim();
+                    if s.is_empty() {
+                        0.0
+                    } else {
+                        match s.parse::<f64>() {
+                            Ok(v) if v.is_finite() && v >= 0.0 => v,
+                            _ => {
+                                errores.agregar("superficie", "Formato inválido: escribe los m² como número, por ejemplo 4500.00");
+                                0.0
+                            }
+                        }
+                    }
+                };
                 let monto: Option<f64> = {
                     let s = monto_str.replace(',', "");
                     let s = s.trim();
@@ -5778,14 +5990,23 @@ fn main() -> Result<(), slint::PlatformError> {
                         None
                     } else {
                         match s.parse::<f64>() {
-                            Ok(v) => Some(v),
+                            Ok(v) if v.is_finite() && v >= 0.0 => Some(v),
+                            Ok(_) => {
+                                errores.agregar("monto", "El monto no puede ser negativo.");
+                                None
+                            }
                             Err(_) => {
-                                show_toast_message(&ui, "El monto de la obra no es un número válido.");
-                                return;
+                                errores.agregar("monto", "Formato inválido: escribe el monto como número, por ejemplo 300,000.00");
+                                None
                             }
                         }
                     }
                 };
+
+                if !errores.is_empty() {
+                    form_errors::mostrar_errores(&ui, &errores);
+                    return;
+                }
 
                 if let Some(ref pool) = pool_clone {
                     let item = RegistroObraItem {
@@ -5846,7 +6067,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                         show_toast_message(&ui, &msg);
                                     }
                                     Err(e) => {
-                                        show_toast_message(&ui, &format!("Error al guardar obra: {}", e));
+                                        form_errors::mostrar_error_general(&ui, "No se pudo guardar el registro de obra", &e);
                                     }
                                 }
                             }
@@ -5987,7 +6208,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                         show_toast_message(&ui, &msg);
                                     }
                                     Err(e) => {
-                                        show_toast_message(&ui, &format!("Error al eliminar registro de obra: {}", e));
+                                        form_errors::mostrar_error_sistema(&ui, "No se pudo eliminar el registro de obra", &form_errors::describir_error(&e.to_string()));
                                     }
                                 }
                             }
@@ -6138,8 +6359,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     None
                 };
 
-                if let Err(e) = validate_cliente_data(nombre.as_str(), rfc.as_str(), curp.as_str(), tp_opt) {
-                    show_toast_message(&ui, &format!("Validación fallida: {}", e));
+                let errores = crate::validation::validar_campos_cliente(nombre.as_str(), rfc.as_str(), curp.as_str(), tp_opt);
+                if !errores.is_empty() {
+                    form_errors::mostrar_errores(&ui, &errores);
                     return;
                 }
 
@@ -6192,12 +6414,12 @@ fn main() -> Result<(), slint::PlatformError> {
                                     update_global_stats(&ui, pool);
                                 }
                                 Err(e) => {
-                                    show_toast_message(&ui, &e);
+                                    form_errors::mostrar_error_general(&ui, "No se pudo registrar el cliente", &e);
                                 }
                             }
                         }
                         Err(e) => {
-                            show_toast_message(&ui, &format!("Error de conexión con la base de datos: {}", e));
+                            form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error de conexión con la base de datos: {}", e));
                         }
                     }
                 } else {
@@ -6207,7 +6429,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         "create_cliente",
                         &format!("No se puede guardar el cliente '{}': {}. {}", nombre, diag.status_text, diag.detail_text),
                     );
-                    show_toast_message(&ui, &format!("No se puede guardar: {}. {}", diag.status_text, diag.detail_text));
+                    form_errors::mostrar_error_general(&ui, "No se puede guardar", &format!("{}. {}", diag.status_text, diag.detail_text));
                 }
             }
         });
@@ -6349,8 +6571,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     None
                 };
 
-                if let Err(e) = validate_cliente_data(nombre.as_str(), rfc.as_str(), curp.as_str(), tp_opt) {
-                    show_toast_message(&ui, &format!("Validación fallida: {}", e));
+                let errores = crate::validation::validar_campos_cliente(nombre.as_str(), rfc.as_str(), curp.as_str(), tp_opt);
+                if !errores.is_empty() {
+                    form_errors::mostrar_errores(&ui, &errores);
                     return;
                 }
 
@@ -6403,12 +6626,12 @@ fn main() -> Result<(), slint::PlatformError> {
                                     update_global_stats(&ui, pool);
                                 }
                                 Err(e) => {
-                                    show_toast_message(&ui, &e);
+                                    form_errors::mostrar_error_general(&ui, "No se pudo actualizar el cliente", &e);
                                 }
                             }
                         }
                         Err(e) => {
-                            show_toast_message(&ui, &format!("Error de conexión: {}", e));
+                            form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error de conexión: {}", e));
                         }
                     }
                 } else {
@@ -6418,7 +6641,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         "update_cliente",
                         &format!("No se puede actualizar el cliente '{}': {}. {}", nombre, diag.status_text, diag.detail_text),
                     );
-                    show_toast_message(&ui, &format!("No se puede guardar: {}. {}", diag.status_text, diag.detail_text));
+                    form_errors::mostrar_error_general(&ui, "No se puede guardar", &format!("{}. {}", diag.status_text, diag.detail_text));
                 }
             }
         });
@@ -6569,16 +6792,21 @@ fn main() -> Result<(), slint::PlatformError> {
         let pool_clone = db_pool.clone();
         app_logic.on_submit_registro_patronal(move |id, id_cliente, reg, act, dom, cp, ent, area, del, subdel, prima_str, clase_str, fracc_str| {
             if let Some(ui) = ui_weak.upgrade() {
-                let clean_reg = clean_alphanumeric_input(reg.as_str());
-                if let Err(e) = validate_registro_patronal(&clean_reg) {
-                    show_toast_message(&ui, &format!("No se puede guardar: {}", e));
+                let errores = crate::validation::validar_campos_registro_patronal(
+                    reg.as_str(),
+                    act.as_str(),
+                    cp.as_str(),
+                    prima_str.as_str(),
+                );
+                if !errores.is_empty() {
+                    form_errors::mostrar_errores(&ui, &errores);
                     return;
                 }
 
                 if let Some(ref pool) = pool_clone {
                     match pool.get() {
                         Ok(mut client) => {
-                            let prima_opt = prima_str.trim().parse::<f64>().ok();
+                            let prima_opt = prima_str.trim().trim_end_matches('%').trim().replace(',', ".").parse::<f64>().ok();
 
                             let mut id_clase_opt: Option<String> = None;
                             let roman = extract_clase_roman(clase_str.as_str());
@@ -6650,7 +6878,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                         update_global_stats(&ui, pool);
                                     }
                                     Err(e) => {
-                                        show_toast_message(&ui, &e);
+                                        form_errors::mostrar_error_general(&ui, "No se pudo guardar el Registro Patronal", &e);
                                     }
                                 }
                             } else {
@@ -6695,13 +6923,13 @@ fn main() -> Result<(), slint::PlatformError> {
                                         update_global_stats(&ui, pool);
                                     }
                                     Err(e) => {
-                                        show_toast_message(&ui, &e);
+                                        form_errors::mostrar_error_general(&ui, "No se pudo guardar el Registro Patronal", &e);
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            show_toast_message(&ui, &format!("Error de conexión: {}", e));
+                            form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error de conexión: {}", e));
                         }
                     }
                 } else {
@@ -6711,7 +6939,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         "create_rp",
                         &format!("No se puede guardar el registro patronal '{}': {}. {}", reg, diag.status_text, diag.detail_text),
                     );
-                    show_toast_message(&ui, &format!("No se puede guardar: {}. {}", diag.status_text, diag.detail_text));
+                    form_errors::mostrar_error_general(&ui, "No se puede guardar", &format!("{}. {}", diag.status_text, diag.detail_text));
                 }
             }
         });
@@ -6932,14 +7160,15 @@ fn main() -> Result<(), slint::PlatformError> {
         app_logic.on_submit_edit_empleado(move |id, id_cliente, nombre, rfc, curp, nss, esta_activo| {
             if let Some(ui) = ui_weak.upgrade() {
                 let client_rfc = ui.global::<AppData>().get_selected_cliente_rfc().to_string();
-                if let Err(e) = validate_empleado_data(
+                let errores = crate::validation::validar_campos_empleado(
                     nombre.as_str(),
                     rfc.as_str(),
                     curp.as_str(),
                     nss.as_str(),
                     if client_rfc.is_empty() { None } else { Some(&client_rfc) },
-                ) {
-                    show_toast_message(&ui, &format!("Validación fallida: {}", e));
+                );
+                if !errores.is_empty() {
+                    form_errors::mostrar_errores(&ui, &errores);
                     return;
                 }
 
@@ -6957,7 +7186,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                         update_global_stats(&ui, pool);
                                     }
                                     Err(e) => {
-                                        show_toast_message(&ui, &e);
+                                        form_errors::mostrar_error_general(&ui, "No se pudo guardar el empleado", &e);
                                     }
                                 }
                             } else {
@@ -6970,13 +7199,13 @@ fn main() -> Result<(), slint::PlatformError> {
                                         update_global_stats(&ui, pool);
                                     }
                                     Err(e) => {
-                                        show_toast_message(&ui, &e);
+                                        form_errors::mostrar_error_general(&ui, "No se pudo guardar el empleado", &e);
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            show_toast_message(&ui, &format!("Error conectando a la base de datos: {}", e));
+                            form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error conectando a la base de datos: {}", e));
                         }
                     }
                 }
@@ -7555,6 +7784,7 @@ fn main() -> Result<(), slint::PlatformError> {
         app_logic.on_close_system_error_modal(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.global::<AppData>().set_show_system_error_modal(false);
+                ui.global::<AppData>().set_system_error_modal_generico(false);
             }
         });
     }
@@ -7574,6 +7804,12 @@ fn main() -> Result<(), slint::PlatformError> {
     crate::empleados_view_logic::wire_empleados_callbacks(&main_window, db_pool.clone());
     // Selector de analista de la sesión (ADD-05)
     analista_view_logic::wire_analista_callbacks(&main_window, db_pool.clone());
+    // Errores de formularios y modales (campos en rojo + causa general)
+    form_errors::wire_callbacks(&main_window);
+    // Revisión de discrepancias antes de cargar cédulas/nóminas
+    carga_revision_ui::wire_callbacks(&main_window);
+    // Posibles empleados duplicados (revisión y fusión desde la app)
+    duplicados_ui::wire_callbacks(&main_window, db_pool.clone());
 
     // 56. Callbacks de Calendario Fiscal & Revisiones IMSS
     register_calendar_callbacks(&main_window, db_pool.clone(), imss_inhabiles.clone());

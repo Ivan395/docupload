@@ -1,6 +1,7 @@
 import { ScrollView, LineEdit, Button, Switch } from "std-widgets.slint";
 import { AppData, AppLogic, EmpleadoData } from "models.slint";
 import { HistorialEmpleadoModal } from "historial_empleado_modal.slint";
+import { FormField, FormErrorBanner, LeyendaObligatorios } from "form_field.slint";
 
 export component EmpleadosView inherits Rectangle {
     background: #f8fafc;
@@ -87,6 +88,35 @@ export component EmpleadosView inherits Rectangle {
             HorizontalLayout {
                 spacing: 12px;
                 alignment: end;
+
+                // Botón Posibles duplicados (revisión y fusión)
+                Rectangle {
+                    height: 38px;
+                    border-radius: 8px;
+                    background: btn_dup_emp.has-hover ? #fef3c7 : #ffffff;
+                    border-width: 1px;
+                    border-color: #fcd34d;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 6px;
+                        alignment: center;
+                        Image { source: @image-url("assets/icons/users.svg"); colorize: #b45309; width: 14px; height: 14px; y: (parent.height - self.height) / 2; }
+                        Text {
+                            text: "Posibles duplicados";
+                            font-size: 12px;
+                            font-weight: 700;
+                            color: #92400e;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn_dup_emp := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AppLogic.duplicados_abrir(""); }
+                    }
+                }
 
                 // Botón Registrar Empleado
                 Rectangle {
@@ -643,49 +673,62 @@ export component EmpleadosView inherits Rectangle {
 
                         Rectangle { height: 1px; background: #f1f5f9; }
 
-                        // 1. Nombre Completo
                         VerticalLayout {
-                            spacing: 4px;
-                            Text { text: "Nombre Completo del Empleado *"; font-size: 11px; font-weight: 700; color: #1e293b; }
+                            spacing: 2px;
+                            LeyendaObligatorios { }
+                            Text {
+                                text: "RFC, NSS y CURP son opcionales, pero se requiere al menos uno.";
+                                font-size: 10px;
+                                color: #64748b;
+                                wrap: word-wrap;
+                            }
+                        }
+                        FormErrorBanner { }
+
+                        // 1. Nombre Completo
+                        FormField {
+                            label: "Nombre Completo del Empleado";
+                            label-size: 11px;
+                            campo: "nombre";
+                            required: true;
                             LineEdit {
                                 text <=> AppData.emp_edit_nombre;
                                 placeholder-text: "Ej. JUAN PÉREZ GONZÁLEZ";
+                                edited => { AppLogic.limpiar_error_campo("nombre"); }
                             }
                         }
 
                         // 2. RFC
-                        VerticalLayout {
-                            spacing: 3px;
-                            Text { text: "RFC SAT (13 Posiciones - Persona Física)"; font-size: 11px; font-weight: 700; color: #475569; }
+                        FormField {
+                            label: "RFC SAT (13 posiciones, persona física)";
+                            label-size: 11px;
+                            campo: "rfc";
+                            error-vivo: AppData.emp_edit_rfc_status == "invalid" ? AppData.emp_edit_rfc_msg : "";
+                            ayuda: AppData.emp_edit_rfc_status == "valid" ? AppData.emp_edit_rfc_msg : "";
                             LineEdit {
                                 text <=> AppData.emp_edit_rfc;
                                 placeholder-text: "Ej. PEGJ800101XYZ";
-                                edited => { AppLogic.validate_empleado_input(); }
-                            }
-                            if AppData.emp_edit_rfc_msg != "" : Text {
-                                text: AppData.emp_edit_rfc_msg;
-                                font-size: 10px;
-                                font-weight: 600;
-                                color: AppData.emp_edit_rfc_status == "valid" ? #16a34a : #dc2626;
-                                wrap: word-wrap;
+                                edited => {
+                                    AppLogic.limpiar_error_campo("rfc");
+                                    AppLogic.validate_empleado_input();
+                                }
                             }
                         }
 
                         // 3. NSS
-                        VerticalLayout {
-                            spacing: 3px;
-                            Text { text: "NSS IMSS (11 Dígitos)"; font-size: 11px; font-weight: 700; color: #475569; }
+                        FormField {
+                            label: "NSS IMSS (11 dígitos)";
+                            label-size: 11px;
+                            campo: "nss";
+                            error-vivo: AppData.emp_edit_nss_status == "invalid" ? AppData.emp_edit_nss_msg : "";
+                            ayuda: AppData.emp_edit_nss_status == "valid" ? AppData.emp_edit_nss_msg : "";
                             LineEdit {
                                 text <=> AppData.emp_edit_nss;
                                 placeholder-text: "Ej. 12345678901";
-                                edited => { AppLogic.validate_empleado_input(); }
-                            }
-                            if AppData.emp_edit_nss_msg != "" : Text {
-                                text: AppData.emp_edit_nss_msg;
-                                font-size: 10px;
-                                font-weight: 600;
-                                color: AppData.emp_edit_nss_status == "valid" ? #16a34a : #dc2626;
-                                wrap: word-wrap;
+                                edited => {
+                                    AppLogic.limpiar_error_campo("nss");
+                                    AppLogic.validate_empleado_input();
+                                }
                             }
                         }
 
@@ -782,20 +825,19 @@ export component EmpleadosView inherits Rectangle {
                         }
 
                         // 4. CURP
-                        VerticalLayout {
-                            spacing: 3px;
-                            Text { text: "CURP RENAPO (18 Posiciones)"; font-size: 11px; font-weight: 700; color: #475569; }
+                        FormField {
+                            label: "CURP RENAPO (18 posiciones)";
+                            label-size: 11px;
+                            campo: "curp";
+                            error-vivo: AppData.emp_edit_curp_status == "invalid" ? AppData.emp_edit_curp_msg : "";
+                            ayuda: AppData.emp_edit_curp_status == "valid" ? AppData.emp_edit_curp_msg : "";
                             LineEdit {
                                 text <=> AppData.emp_edit_curp;
                                 placeholder-text: "Ej. PEGJ800101HDFRRN01";
-                                edited => { AppLogic.validate_empleado_input(); }
-                            }
-                            if AppData.emp_edit_curp_msg != "" : Text {
-                                text: AppData.emp_edit_curp_msg;
-                                font-size: 10px;
-                                font-weight: 600;
-                                color: AppData.emp_edit_curp_status == "valid" ? #16a34a : #dc2626;
-                                wrap: word-wrap;
+                                edited => {
+                                    AppLogic.limpiar_error_campo("curp");
+                                    AppLogic.validate_empleado_input();
+                                }
                             }
                         }
 
@@ -867,7 +909,7 @@ export component EmpleadosView inherits Rectangle {
                             Rectangle {
                                 height: 38px;
                                 border-radius: 6px;
-                                background: AppData.emp_edit_nombre != "" ? #1e3a8a : #94a3b8;
+                                background: emp_submit_ta.has-hover ? #1e40af : #1e3a8a;
                                 horizontal-stretch: 1;
 
                                 HorizontalLayout {
@@ -881,20 +923,18 @@ export component EmpleadosView inherits Rectangle {
                                     }
                                 }
 
-                                TouchArea {
-                                    mouse-cursor: AppData.emp_edit_nombre != "" ? pointer : default;
+                                emp_submit_ta := TouchArea {
+                                    mouse-cursor: pointer;
                                     clicked => {
-                                        if AppData.emp_edit_nombre != "" {
-                                            AppLogic.submit_edit_empleado(
-                                                AppData.emp_edit_id,
-                                                AppData.selected_cliente_id,
-                                                AppData.emp_edit_nombre,
-                                                AppData.emp_edit_rfc,
-                                                AppData.emp_edit_curp,
-                                                AppData.emp_edit_nss,
-                                                AppData.emp_edit_esta_activo
-                                            );
-                                        }
+                                        AppLogic.submit_edit_empleado(
+                                            AppData.emp_edit_id,
+                                            AppData.selected_cliente_id,
+                                            AppData.emp_edit_nombre,
+                                            AppData.emp_edit_rfc,
+                                            AppData.emp_edit_curp,
+                                            AppData.emp_edit_nss,
+                                            AppData.emp_edit_esta_activo
+                                        );
                                     }
                                 }
                             }

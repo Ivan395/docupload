@@ -517,32 +517,38 @@ pub fn register_calendar_callbacks(
         app_logic.on_cal_submit_add_holiday(move |date_str, motivo| {
             if let Some(ui) = ui_weak.upgrade() {
                 let app_data = ui.global::<AppData>();
+                app_data.set_cal_holiday_error_msg("".into());
+                let mut errores = crate::form_errors::ErroresFormulario::new();
+                let fecha_opt = parse_date_opt(date_str.as_str());
+                if fecha_opt.is_none() {
+                    if crate::form_errors::es_vacio(date_str.as_str()) {
+                        errores.agregar("fecha", "La fecha es obligatoria.");
+                    } else {
+                        errores.agregar("fecha", "Formato inválido: usa DD/MM/AAAA.");
+                    }
+                }
+                let motivo_str = motivo.trim().to_string();
+                errores.requerido("motivo", &motivo_str, "El motivo del día festivo");
+                let fecha = match fecha_opt {
+                    Some(f) if errores.is_empty() => f,
+                    _ => {
+                        crate::form_errors::mostrar_errores(&ui, &errores);
+                        return;
+                    }
+                };
+
                 let pool = match pool_clone {
                     Some(ref p) => p,
                     None => {
-                        app_data.set_cal_holiday_error_msg("No hay conexión con la base de datos.".into());
+                        crate::form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", "No hay conexión con la base de datos.");
                         return;
                     }
                 };
-
-                let fecha = match parse_date_opt(date_str.as_str()) {
-                    Some(d) => d,
-                    None => {
-                        app_data.set_cal_holiday_error_msg("Fecha inválida. Utilice el formato DD/MM/YYYY.".into());
-                        return;
-                    }
-                };
-
-                let motivo_str = motivo.trim().to_string();
-                if motivo_str.is_empty() {
-                    app_data.set_cal_holiday_error_msg("El motivo del día festivo es obligatorio.".into());
-                    return;
-                }
 
                 let mut client = match pool.get() {
                     Ok(c) => c,
                     Err(e) => {
-                        app_data.set_cal_holiday_error_msg(format!("Error de conexión: {}", e).into());
+                        crate::form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error de conexión: {}", e));
                         return;
                     }
                 };
@@ -590,7 +596,7 @@ pub fn register_calendar_callbacks(
                         load_calendar_ui(&ui, pool, None, None, None);
                     }
                     Err(e) => {
-                        app_data.set_cal_holiday_error_msg(e.into());
+                        crate::form_errors::mostrar_error_general(&ui, "No se pudo guardar el día festivo", &e);
                     }
                 }
             }
@@ -638,7 +644,7 @@ pub fn register_calendar_callbacks(
                 let mut client = match pool.get() {
                     Ok(c) => c,
                     Err(e) => {
-                        show_toast_message(&ui, &format!("Error de base de datos: {}", e));
+                        crate::form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error de conexión: {}", e));
                         return;
                     }
                 };
@@ -676,8 +682,7 @@ pub fn register_calendar_callbacks(
                         load_calendar_ui(&ui, pool, None, None, None);
                     }
                     Err(e) => {
-                        app_data.set_cal_show_delete_holiday_modal(false);
-                        show_toast_message(&ui, &format!("Error: {}", e));
+                        crate::form_errors::mostrar_error_general(&ui, "No se pudo eliminar el día festivo", &e.to_string());
                     }
                 }
             }

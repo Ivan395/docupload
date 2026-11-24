@@ -306,6 +306,9 @@ export component DatePickerField inherits Rectangle {
         input_field := LineEdit {
             visible: root.enabled;
             horizontal-stretch: root.enabled ? 1 : 0;
+            // Oculto (campo calculado) sigue en el layout: sin esto ocupa ancho y empuja el texto.
+            min-width: 0px;
+            max-width: root.enabled ? 100000px : 0px;
             text <=> root.date-val;
             placeholder-text: root.placeholder-text;
             font-size: 11px;
@@ -374,6 +377,8 @@ export component DatePickerField inherits Rectangle {
             font-weight: root.date-val != "" ? 700 : 400;
             color: root.date-val != "" ? #334155 : #94a3b8;
             vertical-alignment: center;
+            overflow: elide;
+            min-width: 0px;
         }
 
         if !root.enabled && root.label-badge != "" : Rectangle {

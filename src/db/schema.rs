@@ -2395,6 +2395,9 @@ pub fn ensure_schema(client: &mut Client) -> Result<(), postgres::Error> {
     // 19. Equivalencias de NSS: NSS alternos que la carga resuelve al empleado indicado
     exec_schema_step(client, "11_equivalencias_nss", SQL_EQUIVALENCIAS_NSS)?;
 
+    // 20. Pares de empleados marcados como "no son la misma persona" (revisión de duplicados)
+    exec_schema_step(client, "12_duplicados_descartados", crate::db::duplicados_empleados::SQL_DUPLICADOS_DESCARTADOS)?;
+
     match restricciones_fase1_pendientes(client) {
         Ok(lista) if !lista.is_empty() => log::warn!(
             "Restricciones de integridad pendientes (hay duplicados por depurar): {}",

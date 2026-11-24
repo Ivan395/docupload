@@ -3226,7 +3226,10 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             .cloned()
                             .collect()
                     };
+                    let ui_weak_bg = ui.as_weak();
                     std::thread::spawn(move || {
+                        // Errores del guardado en segundo plano: se avisan al usuario (antes solo iban al log)
+                        let mut errores_bg: Vec<String> = Vec::new();
                         match pool_bg.get() {
                             Ok(mut client) => {
                                 for r in &current_worker_rows {
@@ -3243,6 +3246,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                             "Error Guardando Fila",
                                             &format!("Fila {}: {}", r.id_reporte_liq, e),
                                         );
+                                        errores_bg.push(e.to_string());
                                     }
                                 }
                             }
@@ -3253,7 +3257,25 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                     "Error Conexión DB Pool",
                                     &format!("No se pudo obtener cliente del pool: {}", e),
                                 );
+                                errores_bg.push(format!("Error de conexión: {}", e));
                             }
+                        }
+                        if !errores_bg.is_empty() {
+                            let n = errores_bg.len();
+                            let detalle = errores_bg.join("\n");
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = ui_weak_bg.upgrade() {
+                                    crate::form_errors::mostrar_error_sistema(
+                                        &ui,
+                                        "No se guardaron todos los cambios del trabajador",
+                                        &format!(
+                                            "{} fila(s) no se pudieron guardar en la base de datos; lo que ves en pantalla puede no coincidir con lo guardado. Recarga el reporte antes de seguir.\n\n{}",
+                                            n,
+                                            crate::form_errors::describir_error(&detalle)
+                                        ),
+                                    );
+                                }
+                            });
                         }
                     });
                 }
@@ -3570,17 +3592,30 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     Ok(u) => u,
                     Err(_) => return,
                 };
-                let obra_uuid = match Uuid::parse_str(obra_id_str.trim()) {
-                    Ok(u) => u,
-                    Err(_) => {
-                        crate::show_toast_message(&ui, "Por favor selecciona una obra válida.");
-                        return;
+                let mut errores = crate::form_errors::ErroresFormulario::new();
+                let obra_uuid = Uuid::parse_str(obra_id_str.trim()).ok();
+                if obra_uuid.is_none() {
+                    errores.agregar("obra", "Selecciona la obra a la que se vinculará el trabajador.");
+                }
+                let dias_obra: i16 = if errores.requerido("dias_obra", dias_obra_str.as_str(), "Los días de obra") {
+                    match dias_obra_str.trim().parse::<i16>() {
+                        Ok(d) if d > 0 && d <= 31 => d,
+                        Ok(_) => {
+                            errores.agregar("dias_obra", "Fuera de rango: deben ser entre 1 y 31 días.");
+                            0
+                        }
+                        Err(_) => {
+                            errores.agregar("dias_obra", "Formato inválido: escribe un número entero de días.");
+                            0
+                        }
                     }
+                } else {
+                    0
                 };
-                let dias_obra: i16 = match dias_obra_str.trim().parse() {
-                    Ok(d) if d > 0 && d <= 31 => d,
+                let obra_uuid = match obra_uuid {
+                    Some(u) if errores.is_empty() => u,
                     _ => {
-                        crate::show_toast_message(&ui, "Los días de obra deben ser un número entero entre 1 y 31.");
+                        crate::form_errors::mostrar_errores(&ui, &errores);
                         return;
                     }
                 };
@@ -3590,7 +3625,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     match state.all_rows.iter().find(|r| r.id_reporte_liq == row_uuid) {
                         Some(r) => r.id_parent_reporte_liq,
                         None => {
-                            crate::show_toast_message(&ui, "No se encontró el registro base del trabajador.");
+                            crate::form_errors::mostrar_error_general(&ui, "No se puede vincular", "No se encontró el registro base del trabajador. Recarga el reporte e intenta de nuevo.");
                             return;
                         }
                     }
@@ -3614,14 +3649,18 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         app_data.set_reporte_add_alert_show(true);
                         app_data.set_reporte_add_alert_text(err_msg.clone().into());
                         app_data.set_reporte_add_alert_type("error".into());
-                        crate::show_toast_message(&ui, &err_msg);
+                        let mut errores = crate::form_errors::ErroresFormulario::new();
+                        errores.agregar("dias_obra", format!("Máximo disponible: {} días.", (cur_row.dias_cedula - sum_used).max(0)));
+                        app_data.set_form_errors(crate::form_errors::modelo(&errores));
                         return;
                     }
 
                     let new_obra = match state.obras_options.iter().find(|o| o.id == obra_uuid) {
                         Some(o) => o,
                         None => {
-                            crate::show_toast_message(&ui, "La obra seleccionada no existe.");
+                            let mut errores = crate::form_errors::ErroresFormulario::new();
+                            errores.agregar("obra", "La obra seleccionada ya no existe. Elige otra.");
+                            crate::form_errors::mostrar_errores(&ui, &errores);
                             return;
                         }
                     };
@@ -3634,7 +3673,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 app_data.set_reporte_add_alert_show(true);
                                 app_data.set_reporte_add_alert_text(err_msg.clone().into());
                                 app_data.set_reporte_add_alert_type("error".into());
-                                crate::show_toast_message(&ui, &err_msg);
+                                let mut errores = crate::form_errors::ErroresFormulario::new();
+                                errores.agregar("dias_obra", format!("La obra solo está activa {} días en este periodo.", tope_mes));
+                                app_data.set_form_errors(crate::form_errors::modelo(&errores));
                                 return;
                             }
                         }
@@ -3648,7 +3689,9 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 app_data.set_reporte_add_alert_show(true);
                                 app_data.set_reporte_add_alert_text(err_msg.clone().into());
                                 app_data.set_reporte_add_alert_type("error".into());
-                                crate::show_toast_message(&ui, &err_msg);
+                                let mut errores = crate::form_errors::ErroresFormulario::new();
+                                errores.agregar("obra", "El trabajador ya está vinculado a esta obra en el periodo.");
+                                app_data.set_form_errors(crate::form_errors::modelo(&errores));
                                 return;
                             }
                         }
@@ -3660,7 +3703,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     let mut client = match pool.get() {
                         Ok(c) => c,
                         Err(e) => {
-                            crate::show_toast_message(&ui, &format!("Error conectando a BD: {}", e));
+                            crate::form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error conectando a BD: {}", e));
                             return;
                         }
                     };
@@ -3687,8 +3730,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             let app_data = ui.global::<AppData>();
                             app_data.set_reporte_add_alert_show(true);
                             app_data.set_reporte_add_alert_text(e.clone().into());
-                            app_data.set_reporte_add_alert_type("error".into());
-                            crate::show_toast_message(&ui, &format!("Error vinculando obra: {}", e));
+                            app_data.set_reporte_add_alert_show(false);
+                            crate::form_errors::mostrar_error_general(&ui, "No se pudo vincular la obra", &e);
                         }
                     }
                 }
@@ -3910,20 +3953,45 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                 // Persistir en PostgreSQL
                 if let Some(ref pool) = pool_clone {
-                    let pool_bg = pool.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(mut client) = pool_bg.get() {
-                            if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
-                                log::error!("Error persistiendo igualar días en BD: {}", e);
-                            }
-                        }
-                    });
+                    persistir_filas_en_segundo_plano(&ui, pool.clone(), rows_for_db, "No se guardó «igualar días» en la base de datos");
                 }
 
                 crate::show_toast_message(
                     &ui,
                     &format!("Se asignaron los días de obra máximos a {} registros.", count_modified),
                 );
+            }
+        });
+    }
+
+    /// Guarda filas del reporte en segundo plano. Si falla, avisa al usuario con la causa
+    /// (antes el error solo se registraba en el log y la pantalla mostraba datos no guardados).
+    fn persistir_filas_en_segundo_plano(
+        ui: &MainWindow,
+        pool: Arc<DbPool>,
+        rows_for_db: Vec<(Uuid, i16, i16, Option<Uuid>)>,
+        titulo: &'static str,
+    ) {
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let res = pool
+                .get()
+                .map_err(|e| format!("Error de conexión: {}", e))
+                .and_then(|mut client| batch_save_reporte_row_updates(&mut client, &rows_for_db).map_err(|e| e.to_string()));
+            if let Err(e) = res {
+                log::error!("{}: {}", titulo, e);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        crate::form_errors::mostrar_error_sistema(
+                            &ui,
+                            titulo,
+                            &format!(
+                                "Los cambios se ven en pantalla, pero no quedaron guardados. Recarga el reporte e inténtalo de nuevo.\n\n{}",
+                                crate::form_errors::describir_error(&e)
+                            ),
+                        );
+                    }
+                });
             }
         });
     }
@@ -4401,7 +4469,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         match dias_ced_str.trim().parse::<i16>() {
                             Ok(d) if (1..=31).contains(&d) => Some(d),
                             _ => {
-                                crate::show_toast_message(&ui, "Los Días Cédula deben ser un número entre 1 y 31.");
+                                crate::form_errors::mostrar_error_campo(&ui, "dias_cedula", "Debe ser un número entero entre 1 y 31.");
                                 return;
                             }
                         }
@@ -4413,7 +4481,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         match dias_obr_str.trim().parse::<i16>() {
                             Ok(d) if (0..=31).contains(&d) => Some(d),
                             _ => {
-                                crate::show_toast_message(&ui, "Los Días Obra deben ser un número entre 0 y 31.");
+                                crate::form_errors::mostrar_error_campo(&ui, "dias_obra", "Debe ser un número entero entre 0 y 31.");
                                 return;
                             }
                         }
@@ -4439,7 +4507,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     };
 
                     if parent_ids.is_empty() {
-                        crate::show_toast_message(&ui, "No se encontraron empleados válidos para vincular.");
+                        crate::form_errors::mostrar_error_general(&ui, "No hay empleados para vincular", "Ninguno de los empleados seleccionados puede vincularse (por ejemplo, todos están dados de baja).");
                         return;
                     }
 
@@ -4447,7 +4515,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         let mut client = match pool.get() {
                             Ok(c) => c,
                             Err(e) => {
-                                crate::show_toast_message(&ui, &format!("Error conectando a BD: {}", e));
+                                crate::form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", &format!("Error conectando a BD: {}", e));
                                 return;
                             }
                         };
@@ -4489,8 +4557,8 @@ pub fn wire_reporte_liquidaciones_callbacks(
                             Err(err_msg) => {
                                 app_data.set_reporte_batch_edit_alert_text(err_msg.clone().into());
                                 app_data.set_reporte_batch_edit_alert_type("error".into());
-                                app_data.set_reporte_batch_edit_alert_show(true);
-                                crate::show_toast_message(&ui, &err_msg);
+                                app_data.set_reporte_batch_edit_alert_show(false);
+                                crate::form_errors::mostrar_error_general(&ui, "No se pudieron vincular las obras", &err_msg);
                                 return;
                             }
                         }
@@ -4533,7 +4601,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 "Validación Días Cédula Fuera de Rango",
                                 &format!("Valor inválido: '{}'", dias_ced_str),
                             );
-                            crate::show_toast_message(&ui, "Los Días Cédula deben ser un número entre 1 y 31.");
+                            crate::form_errors::mostrar_error_campo(&ui, "dias_cedula", "Debe ser un número entero entre 1 y 31.");
                             return;
                         }
                     }
@@ -4551,7 +4619,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                                 "Validación Días Obra Fuera de Rango",
                                 &format!("Valor inválido: '{}'", dias_obr_str),
                             );
-                            crate::show_toast_message(&ui, "Los Días Obra deben ser un número entre 0 y 31.");
+                            crate::form_errors::mostrar_error_campo(&ui, "dias_obra", "Debe ser un número entero entre 0 y 31.");
                             return;
                         }
                     }
@@ -4575,7 +4643,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     let mut state = session_clone.lock().unwrap();
                     let ids_to_modify: HashSet<Uuid> = state.selected_ids.clone();
                     if ids_to_modify.is_empty() {
-                        crate::show_toast_message(&ui, "No hay filas seleccionadas.");
+                        crate::form_errors::mostrar_error_general(&ui, "No hay filas seleccionadas", "Selecciona al menos una fila del reporte antes de aplicar la edición masiva.");
                         return;
                     }
 
@@ -4667,14 +4735,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                 // Persistir en segundo plano
                 if let Some(ref pool) = pool_clone {
-                    let pool_bg = pool.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(mut client) = pool_bg.get() {
-                            if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
-                                log::error!("Error persistiendo modificación masiva de modal en BD: {}", e);
-                            }
-                        }
-                    });
+                    persistir_filas_en_segundo_plano(&ui, pool.clone(), rows_for_db, "No se guardó la edición masiva en la base de datos");
                 }
 
                 let desc = modified_fields.join(", ");
@@ -4750,7 +4811,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     return;
                 }
                 let Some(pool) = pool_clone.clone() else {
-                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    crate::form_errors::mostrar_error_sistema(&ui, "No se pudo generar el Excel de trabajo", &crate::form_errors::describir_error("Sin conexión a la base de datos."));
                     return;
                 };
                 let alcance = if solo_vista_filtrada { "solo vista filtrada" } else { "todas las filas activas" };
@@ -4775,7 +4836,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         }
                         Err(e) => {
                             log::error!("Error generando borrador de liquidaciones: {}", e);
-                            crate::show_toast_message(ui, &e);
+                            crate::form_errors::mostrar_error_sistema(ui, "No se pudo generar el Excel de trabajo", &crate::form_errors::describir_error(&e));
                         }
                     },
                 );
@@ -4804,7 +4865,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     ContextoEntregable::desde_estado(&state)
                 };
                 let Some(pool) = pool_clone.clone() else {
-                    crate::show_toast_message(&ui, "Sin conexión a la base de datos.");
+                    crate::form_errors::mostrar_error_sistema(&ui, "No se pudo generar el entregable", &crate::form_errors::describir_error("Sin conexión a la base de datos."));
                     return;
                 };
                 crate::operacion_ui::ejecutar_con_avance(
@@ -4826,7 +4887,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                         }
                         Err(e) => {
                             log::error!("Error generando entregable de liquidaciones: {}", e);
-                            crate::show_toast_message(ui, &e);
+                            crate::form_errors::mostrar_error_sistema(ui, "No se pudo generar el entregable", &crate::form_errors::describir_error(&e));
                         }
                     },
                 );
@@ -5632,14 +5693,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
 
                 if count > 0 {
                     if let Some(ref pool) = pool_clone {
-                        let pool_bg = pool.clone();
-                        std::thread::spawn(move || {
-                            if let Ok(mut client) = pool_bg.get() {
-                                if let Err(e) = batch_save_reporte_row_updates(&mut client, &rows_for_db) {
-                                    log::error!("Error persistiendo desvinculación masiva en BD: {}", e);
-                                }
-                            }
-                        });
+                        persistir_filas_en_segundo_plano(&ui, pool.clone(), rows_for_db, "No se guardó la desvinculación masiva en la base de datos");
                     }
 
                     crate::show_toast_message(
@@ -5780,7 +5834,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                 };
 
                 if selected_obra_ids.is_empty() && !include_unassigned {
-                    crate::show_toast_message(&ui, "Debe seleccionar al menos una opción (obra o sin asignar) para exportar.");
+                    crate::form_errors::mostrar_error_general(&ui, "Falta elegir qué exportar", "Selecciona al menos una obra o la opción «Sin asignar» para exportar.");
                     return;
                 }
 
@@ -5797,7 +5851,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     .collect();
 
                 if filtered_rows.is_empty() {
-                    crate::show_toast_message(&ui, "No se encontraron empleados para las opciones seleccionadas.");
+                    crate::form_errors::mostrar_error_general(&ui, "No hay datos para exportar", "No se encontraron empleados para las obras u opciones seleccionadas. Elige otras obras.");
                     return;
                 }
 
@@ -5855,7 +5909,7 @@ pub fn wire_reporte_liquidaciones_callbacks(
                     }
                     Err(e) => {
                         log::error!("Error exportando archivos SUA: {}", e);
-                        crate::show_toast_message(&ui, &format!("Error exportando SUA: {}", e));
+                        crate::form_errors::mostrar_error_general(&ui, "No se pudo exportar al SUA", &e.to_string());
                     }
                 }
             }

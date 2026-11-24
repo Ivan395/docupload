@@ -617,6 +617,127 @@ pub fn validate_empleado_data(
     Ok(())
 }
 
+/// Igual que [`validate_cliente_data`], pero devuelve TODOS los errores, uno por campo
+/// (`nombre`, `rfc`, `curp`), para marcarlos en el formulario.
+pub fn validar_campos_cliente(
+    nombre: &str,
+    rfc: &str,
+    curp: &str,
+    tipo_persona: Option<&str>,
+) -> crate::form_errors::ErroresFormulario {
+    let mut e = crate::form_errors::ErroresFormulario::new();
+    e.requerido("nombre", nombre, "El nombre del cliente o empresa");
+
+    let rfc_info = if e.requerido("rfc", rfc, "El RFC") {
+        match validate_rfc(rfc, tipo_persona) {
+            Ok(info) => Some(info),
+            Err(m) => {
+                e.agregar("rfc", m);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let clean_curp = clean_alphanumeric_input(curp);
+    if !clean_curp.is_empty() {
+        if rfc_info.as_ref().is_some_and(|i| i.is_moral) {
+            e.agregar("curp", "Una empresa o persona moral no lleva CURP. Deja este campo vacío.");
+        } else if e.validar("curp", validate_curp(&clean_curp)) {
+            if let Some(info) = &rfc_info {
+                e.validar("curp", cross_validate_rfc_curp(&info.clean, &clean_curp));
+            }
+        }
+    }
+    e
+}
+
+/// Igual que [`validate_empleado_data`], pero devuelve TODOS los errores, uno por campo
+/// (`nombre`, `rfc`, `curp`, `nss`). Los cruces RFC/CURP se marcan en `curp` y los del NSS en `nss`.
+pub fn validar_campos_empleado(
+    nombre: &str,
+    rfc: &str,
+    curp: &str,
+    nss: &str,
+    cliente_rfc: Option<&str>,
+) -> crate::form_errors::ErroresFormulario {
+    let mut e = crate::form_errors::ErroresFormulario::new();
+    e.requerido("nombre", nombre, "El nombre del empleado");
+
+    let clean_rfc = clean_alphanumeric_input(rfc);
+    let clean_curp = clean_alphanumeric_input(curp);
+    let clean_nss = clean_alphanumeric_input(nss);
+
+    if clean_rfc.is_empty() && clean_curp.is_empty() && clean_nss.is_empty() {
+        let msg = "Captura al menos un identificador: RFC, CURP o NSS.";
+        e.agregar("rfc", msg);
+        e.agregar("curp", msg);
+        e.agregar("nss", msg);
+        return e;
+    }
+
+    let mut rfc_ok = false;
+    if !clean_rfc.is_empty() {
+        match validate_rfc(&clean_rfc, Some("FISICA")) {
+            Ok(info) if info.is_moral => {
+                e.agregar("rfc", "El RFC del empleado debe ser de persona física (13 posiciones).");
+            }
+            Ok(_) => {
+                let cli = cliente_rfc.map(clean_alphanumeric_input).unwrap_or_default();
+                if !cli.is_empty() && cli == clean_rfc {
+                    e.agregar("rfc", "Es el mismo RFC de la empresa (patrón). Verifica la captura.");
+                } else {
+                    rfc_ok = true;
+                }
+            }
+            Err(m) => e.agregar("rfc", m),
+        }
+    }
+    let curp_ok = !clean_curp.is_empty() && e.validar("curp", validate_curp(&clean_curp));
+    let nss_ok = !clean_nss.is_empty() && e.validar("nss", validate_nss(&clean_nss));
+
+    if rfc_ok && curp_ok {
+        e.validar("curp", cross_validate_rfc_curp(&clean_rfc, &clean_curp));
+    }
+    if nss_ok && curp_ok {
+        e.validar("nss", cross_validate_nss_curp(&clean_nss, &clean_curp));
+    }
+    if nss_ok && rfc_ok {
+        e.validar("nss", cross_validate_nss_rfc(&clean_nss, &clean_rfc));
+    }
+    e
+}
+
+/// Campos del Registro Patronal: `registro` (obligatorio), `codigo_postal`, `prima`, `actividad`.
+pub fn validar_campos_registro_patronal(
+    registro: &str,
+    actividad: &str,
+    codigo_postal: &str,
+    prima: &str,
+) -> crate::form_errors::ErroresFormulario {
+    let mut e = crate::form_errors::ErroresFormulario::new();
+    if e.requerido("registro", registro, "El número de Registro Patronal") {
+        e.validar("registro", validate_registro_patronal(&clean_alphanumeric_input(registro)));
+    }
+    if actividad.chars().count() > 300 {
+        e.agregar("actividad", "La actividad económica no puede exceder 300 caracteres.");
+    }
+    let cp = codigo_postal.trim();
+    if !cp.is_empty() && (cp.len() != 5 || !cp.chars().all(|c| c.is_ascii_digit())) {
+        e.agregar("codigo_postal", "Formato inválido: el código postal debe tener 5 dígitos.");
+    }
+    let p = prima.trim().trim_end_matches('%').trim();
+    if !p.is_empty() {
+        match p.replace(',', ".").parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 && v <= 15.0 => {}
+            Ok(_) => e.agregar("prima", "La prima de riesgo debe ser mayor a 0 y como máximo 15 (% anual)."),
+            Err(_) => e.agregar("prima", "Formato inválido: escribe un número, por ejemplo 0.54355."),
+        }
+    }
+    e
+}
+
 /// Valida la estructura de un Registro Patronal (IMSS NRP).
 /// Formato oficial: 11 caracteres alfanuméricos.
 /// - Posición 1: 1 letra (jurisdicción IMSS, 'A'..='Z')
@@ -912,6 +1033,37 @@ pub fn validar_obra(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validar_campos_cliente_acumula_errores() {
+        let e = validar_campos_cliente("", "XYZ", "", None);
+        assert!(e.tiene("nombre"));
+        assert!(e.tiene("rfc"));
+        assert!(!e.tiene("curp"));
+        let e = validar_campos_cliente("Empresa", "", "", None);
+        assert_eq!(e.mensaje("rfc"), Some("El RFC es obligatorio."));
+    }
+
+    #[test]
+    fn test_validar_campos_empleado_sin_identificadores() {
+        let e = validar_campos_empleado("", "", "", "", None);
+        assert!(e.tiene("nombre") && e.tiene("rfc") && e.tiene("curp") && e.tiene("nss"));
+        let e = validar_campos_empleado("Juan", "", "", "123", None);
+        assert!(e.tiene("nss"));
+        assert!(!e.tiene("rfc"));
+    }
+
+    #[test]
+    fn test_validar_campos_registro_patronal() {
+        let e = validar_campos_registro_patronal("", "", "12", "abc");
+        assert!(e.tiene("registro"));
+        assert!(e.tiene("codigo_postal"));
+        assert!(e.tiene("prima"));
+        let e = validar_campos_registro_patronal("", "", "01234", "0.54355");
+        assert!(!e.tiene("codigo_postal"));
+        assert!(!e.tiene("prima"));
+        assert!(validar_campos_registro_patronal("", "", "", "20").tiene("prima"));
+    }
 
     #[test]
     fn test_validar_obra_casos() {

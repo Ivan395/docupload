@@ -3,6 +3,7 @@ import { AsignacionEmpleadosView } from "asignacion_empleados_view.slint";
 import { AsignacionObraView } from "asignacion_obra_view.slint";
 import { AppData, AppLogic, ReporteLiquidacionRow, ReporteObraItem, ReporteEditObraItem, ReporteBatchWorkerItem, ReporteSelectedItem, ReporteUniqueEmpleadoItem } from "models.slint";
 import { ModalOverlay } from "modal_shell.slint";
+import { FormField, FormErrorBanner, LeyendaObligatorios } from "form_field.slint";
 // Botón de acción de la cabecera: su ancho sale del contenido (icono + texto).
 // Con solo-icono se muestra únicamente el icono, con un botón cuadrado de 38px.
 component BotonAccion inherits Rectangle {
@@ -4793,6 +4794,9 @@ export component ReporteLiquidacionesView inherits FocusScope {
                 }
             }
 
+            LeyendaObligatorios { }
+            FormErrorBanner { }
+
             // ALERTA TEMPORAL EN EL MODAL (Visible ante errores/restricciones)
             if AppData.reporte_add_alert_show : Rectangle {
                 border-radius: 8px;
@@ -4850,12 +4854,16 @@ export component ReporteLiquidacionesView inherits FocusScope {
 
                 HorizontalLayout {
                     alignment: space-between;
-                    Text {
-                        text: "Seleccionar Obra Adicional (SIROC):";
-                        font-size: 13px;
-                        font-weight: 700;
-                        color: #334155;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "Seleccionar Obra Adicional (SIROC)";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: AppLogic.campo_error(AppData.form_errors, "obra") != "" ? #b91c1c : #334155;
+                            vertical-alignment: center;
+                        }
+                        Text { text: "*"; font-size: 14px; font-weight: 800; color: #dc2626; vertical-alignment: center; }
                     }
                     Text {
                         text: AppData.reporte_add_selected_obra_id != "" ? "Obra Seleccionada" : "Selecciona una obra...";
@@ -4871,7 +4879,7 @@ export component ReporteLiquidacionesView inherits FocusScope {
                     border-radius: 6px;
                     background: #ffffff;
                     border-width: 1.5px;
-                    border-color: AppData.reporte_add_dropdown_open ? #3b82f6 : #cbd5e1;
+                    border-color: AppLogic.campo_error(AppData.form_errors, "obra") != "" ? #dc2626 : (AppData.reporte_add_dropdown_open ? #3b82f6 : #cbd5e1);
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -4973,6 +4981,7 @@ export component ReporteLiquidacionesView inherits FocusScope {
                                         add_search_input.text = o.label;
                                         AppData.reporte_add_search_query = o.label;
                                         AppData.reporte_add_dropdown_open = false;
+                                        AppLogic.limpiar_error_campo("obra");
                                         AppLogic.reporte_select_add_obra(o.id, o.label);
                                     }
                                 }
@@ -5008,19 +5017,28 @@ export component ReporteLiquidacionesView inherits FocusScope {
                 spacing: 6px;
                 HorizontalLayout {
                     alignment: space-between;
-                    Text { text: "Días para esta obra:"; font-size: 13px; font-weight: 700; color: #1e40af; }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text { text: "Días para esta obra"; font-size: 13px; font-weight: 700; color: #1e40af; }
+                        Text { text: "*"; font-size: 14px; font-weight: 800; color: #dc2626; }
+                    }
                     Text { text: "(Máx. disponibles: " + AppData.reporte_add_dias_available + " días)"; font-size: 12px; font-weight: 700; color: #64748b; }
                 }
-                Rectangle {
-                    height: 40px;
-                    border-radius: 6px;
-                    background: #ffffff;
-                    border-width: 1.5px;
-                    border-color: #93c5fd;
+                FormField {
+                    sin-etiqueta: true;
+                    campo: "dias_obra";
+                    Rectangle {
+                        height: 40px;
+                        border-radius: 6px;
+                        background: #ffffff;
+                        border-width: 1.5px;
+                        border-color: #93c5fd;
 
-                    LineEdit {
-                        text <=> AppData.reporte_add_dias_obra_val;
-                        placeholder-text: "Ej: " + AppData.reporte_add_dias_available;
+                        LineEdit {
+                            text <=> AppData.reporte_add_dias_obra_val;
+                            placeholder-text: "Ej: " + AppData.reporte_add_dias_available;
+                            edited => { AppLogic.limpiar_error_campo("dias_obra"); }
+                        }
                     }
                 }
             }
@@ -5143,6 +5161,8 @@ export component ReporteLiquidacionesView inherits FocusScope {
                 cuerpo_batch_contenido := VerticalLayout {
                     spacing: 12px;
                     padding-right: 4px;
+
+            FormErrorBanner { }
 
             // ALERTA TEMPORAL EN EL MODAL MASIVO (Visible ante errores/restricciones)
             if AppData.reporte_batch_edit_alert_show : Rectangle {
@@ -5546,23 +5566,28 @@ export component ReporteLiquidacionesView inherits FocusScope {
                         }
                     }
 
-                    Rectangle {
-                        height: 38px;
-                        border-radius: 6px;
-                        background: #ffffff;
-                        border-width: 1.5px;
-                        border-color: AppData.reporte_batch_edit_change_dias_cedula ? #3b82f6 : #cbd5e1;
+                    FormField {
+                        sin-etiqueta: true;
+                        campo: "dias_cedula";
+                        Rectangle {
+                            height: 38px;
+                            border-radius: 6px;
+                            background: #ffffff;
+                            border-width: 1.5px;
+                            border-color: AppLogic.campo_error(AppData.form_errors, "dias_cedula") != "" ? #dc2626 : (AppData.reporte_batch_edit_change_dias_cedula ? #3b82f6 : #cbd5e1);
 
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
 
-                            LineEdit {
-                                placeholder-text: "Ej. 30 (dejar vacío para no cambiar)";
-                                text <=> AppData.reporte_batch_edit_dias_cedula_val;
-                                edited(text) => {
-                                    AppData.reporte_batch_edit_change_dias_cedula = (text != "");
-                                    AppLogic.reporte_batch_edit_dias_cedula_changed(text);
+                                LineEdit {
+                                    placeholder-text: "Ej. 30 (dejar vacío para no cambiar)";
+                                    text <=> AppData.reporte_batch_edit_dias_cedula_val;
+                                    edited(text) => {
+                                        AppLogic.limpiar_error_campo("dias_cedula");
+                                        AppData.reporte_batch_edit_change_dias_cedula = (text != "");
+                                        AppLogic.reporte_batch_edit_dias_cedula_changed(text);
+                                    }
                                 }
                             }
                         }
@@ -5610,22 +5635,27 @@ export component ReporteLiquidacionesView inherits FocusScope {
                         }
                     }
 
-                    Rectangle {
-                        height: 38px;
-                        border-radius: 6px;
-                        background: #ffffff;
-                        border-width: 1.5px;
-                        border-color: AppData.reporte_batch_edit_change_dias_obra ? #3b82f6 : #cbd5e1;
+                    FormField {
+                        sin-etiqueta: true;
+                        campo: "dias_obra";
+                        Rectangle {
+                            height: 38px;
+                            border-radius: 6px;
+                            background: #ffffff;
+                            border-width: 1.5px;
+                            border-color: AppLogic.campo_error(AppData.form_errors, "dias_obra") != "" ? #dc2626 : (AppData.reporte_batch_edit_change_dias_obra ? #3b82f6 : #cbd5e1);
 
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
 
-                            LineEdit {
-                                placeholder-text: "Ej. 15 ó 0 (dejar vacío para tope máx)";
-                                text <=> AppData.reporte_batch_edit_dias_obra_val;
-                                edited(text) => {
-                                    AppData.reporte_batch_edit_change_dias_obra = (text != "");
+                                LineEdit {
+                                    placeholder-text: "Ej. 15 ó 0 (dejar vacío para tope máx)";
+                                    text <=> AppData.reporte_batch_edit_dias_obra_val;
+                                    edited(text) => {
+                                        AppLogic.limpiar_error_campo("dias_obra");
+                                        AppData.reporte_batch_edit_change_dias_obra = (text != "");
+                                    }
                                 }
                             }
                         }
@@ -7073,6 +7103,8 @@ export component ReporteLiquidacionesView inherits FocusScope {
                     }
                 }
             }
+            FormErrorBanner { }
+
             // Cuerpo desplazable: cabecera y pie siempre visibles; solo se desplaza si no cabe
             ScrollView {
                 vertical-stretch: 1;

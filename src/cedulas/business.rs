@@ -256,6 +256,10 @@ pub struct Business {
     pub area_geografica: Option<String>,
     pub prima: Option<String>,
     pub employees: Vec<Employee>,
+    /// true cuando el usuario cargó esta cédula aceptando discrepancias en los datos del patrón
+    /// (RFC, razón social o registro patronal): sus datos no deben sobrescribir el catálogo del
+    /// cliente ni del registro patronal de la revisión.
+    pub omitir_actualizar_catalogo: bool,
 }
 
 impl Business {

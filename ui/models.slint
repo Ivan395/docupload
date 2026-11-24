@@ -28,6 +28,60 @@ export struct UnprocessedItemData {
     is_sat_error: bool,
 }
 
+// Error de validación de un campo de formulario (ver ui/form_field.slint y src/form_errors.rs)
+export struct CampoErrorUi {
+    campo: string,
+    mensaje: string,
+}
+
+// Revisión de discrepancias antes de cargar cédulas/nóminas (ver src/carga_revision_ui.rs)
+export struct CargaArchivoUi {
+    nombre: string,
+    incluir: bool,
+    advertencias: int,
+    graves: int,
+}
+
+export struct CargaAdvertenciaUi {
+    id: int,
+    campo: string,
+    del_patron: bool,
+    trabajador: string,
+    archivos: string,
+    n_archivos: int,
+    encontrado: string,
+    sugerido: string,
+    origen: string,
+    mensaje: string,
+    grave: bool,
+    // 0 = dejar como viene, 1 = usar sugerido, 2 = corregir
+    accion: int,
+    correccion: string,
+    error: string,
+    archivo_incluido: bool,
+    // sin opciones de corrección: solo se decide si el archivo se carga
+    solo_decidir_archivo: bool,
+}
+
+// Par de posibles empleados duplicados (ver src/duplicados_ui.rs)
+export struct ParDuplicadoUi {
+    a_id: string,
+    a_nombre: string,
+    a_nss: string,
+    a_rfc: string,
+    a_curp: string,
+    a_liq: int,
+    a_nom: int,
+    b_id: string,
+    b_nombre: string,
+    b_nss: string,
+    b_rfc: string,
+    b_curp: string,
+    b_liq: int,
+    b_nom: int,
+    motivo: string,
+}
+
 export struct MismatchDetailItem {
     filename: string,
     tipo_error: string,
@@ -157,6 +211,8 @@ export struct RevisionData {
     periodo_inicio: string,
     periodo_fin: string,
     pidio_prorroga: bool,
+    // true si el estatus IMSS es "APROBADA POR IMSS" (calculado en Rust)
+    aprobada_imss: bool,
     obras_count: int,
     created_at_str: string,
     id_db_label: string,
@@ -1627,9 +1683,47 @@ export global AppData {
     in-out property <string> nominas_faltantes_status_msg: "";
 
     // Modal global de Error de Sistema / Guardado Atómico (PostgreSQL + rustfs)
+    // Errores del formulario/modal abierto (solo hay uno abierto a la vez).
+    // form_errors: error por campo; form_error_*: causa general (servidor, red o validación).
+    in-out property <[CampoErrorUi]> form_errors: [];
+    in-out property <string> form_error_titulo: "";
+    in-out property <string> form_error_general: "";
+    public function limpiar_errores_formulario() {
+        self.form_errors = [];
+        self.form_error_titulo = "";
+        self.form_error_general = "";
+    }
+
+    // Modal: revisión de discrepancias antes de cargar (cédulas o nóminas)
+    in-out property <bool> show_carga_adv_modal: false;
+    in-out property <string> carga_adv_tipo: "cédulas";
+    in-out property <string> carga_adv_titulo: "";
+    in-out property <[CargaArchivoUi]> carga_adv_archivos: [];
+    in-out property <[CargaAdvertenciaUi]> carga_adv_items: [];
+    in-out property <string> carga_adv_filtro: "";
+    in-out property <int> carga_adv_n_incluidos: 0;
+    in-out property <int> carga_adv_n_total: 0;
+    in-out property <int> carga_adv_n_advertencias: 0;
+    in-out property <int> carga_adv_n_graves: 0;
+
+    // Modal: posibles empleados duplicados
+    in-out property <bool> show_duplicados_modal: false;
+    in-out property <[ParDuplicadoUi]> duplicados_items: [];
+    in-out property <string> duplicados_cliente_id: "";
+    in-out property <string> duplicados_cliente_nombre: "";
+    in-out property <bool> duplicados_cargando: false;
+    in-out property <int> duplicados_confirmar_idx: -1;
+    in-out property <bool> duplicados_confirmar_conservar_a: true;
+    // Aviso tras una carga: cuántos pares quedan por revisar
+    in-out property <int> duplicados_pendientes: 0;
+    in-out property <bool> duplicados_aviso_visible: false;
+
     in-out property <bool> show_system_error_modal: false;
     in-out property <string> system_error_modal_title: "Error al Guardar la Información";
     in-out property <string> system_error_modal_detail: "";
+    // true cuando el error no viene de un guardado atómico revertido (borrados, guardados en segundo plano…):
+    // el modal muestra textos genéricos en lugar de "Se revirtieron automáticamente los cambios…"
+    in-out property <bool> system_error_modal_generico: false;
 }
 
 export global AppLogic {
@@ -1696,6 +1790,25 @@ export global AppLogic {
     callback confirmar_reparar_rustfs();
     callback cancelar_reparar_rustfs();
     callback close_system_error_modal();
+    // Errores de formulario: búsqueda del error de un campo y limpieza al editarlo
+    pure callback campo_error(errores: [CampoErrorUi], campo: string) -> string;
+    callback limpiar_error_campo(campo: string);
+    // Revisión de discrepancias antes de cargar
+    callback carga_adv_toggle_archivo(nombre: string);
+    callback carga_adv_todos(incluir: bool);
+    callback carga_adv_filtrar(nombre: string);
+    callback carga_adv_accion(id: int, accion: int);
+    callback carga_adv_correccion(id: int, texto: string);
+    callback carga_adv_accion_masiva(accion: int);
+    callback carga_adv_confirmar(modo: int);
+    callback carga_adv_cancelar();
+    // Posibles empleados duplicados
+    callback duplicados_abrir(id_cliente: string);
+    callback duplicados_cerrar();
+    callback duplicados_pedir_fusion(idx: int, conservar_a: bool);
+    callback duplicados_confirmar_fusion();
+    callback duplicados_cancelar_fusion();
+    callback duplicados_descartar(idx: int);
     callback select_cliente_for_rp(string, string, string, bool);
     callback select_cliente_for_empleados(string, string, string);
 

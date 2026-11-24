@@ -1,5 +1,6 @@
 import { ScrollView, LineEdit, ComboBox } from "std-widgets.slint";
 import { AppData, AppLogic, NominaRow, NominaPercepcionItem, NominaMesTotalItem, NominaEmpleadoDiaItem, NominaRegistroPatronalTotalItem, NominaEditableConceptoItem, NominaTemplateOptionItem, NominaFaltanteItem } from "models.slint";
+import { FormField, FormErrorBanner } from "form_field.slint";
 
 // Tarjeta de KPI del encabezado.
 component KpiCard inherits Rectangle {
@@ -1067,6 +1068,8 @@ export component NominasView inherits Rectangle {
                     }
                 }
 
+                FormErrorBanner { }
+
                 // Banner de advertencia si tiene baja
                 if AppData.nominas_edit_is_baja : Rectangle {
                     height: 48px;
@@ -1118,12 +1121,20 @@ export component NominasView inherits Rectangle {
                             alignment: center;
                             spacing: 2px;
                             Text { text: "NUEVOS DÍAS A MODIFICAR"; font-size: 10px; font-weight: 700; color: #2563eb; }
-                            LineEdit {
-                                width: 120px;
-                                height: 32px;
-                                text: AppData.nominas_edit_dias_input;
-                                enabled: !AppData.nominas_edit_is_baja;
-                                edited(val) => { AppLogic.nominas_edit_recalc_dias(val); }
+                            FormField {
+                                sin-etiqueta: true;
+                                campo: "dias";
+                                width: 180px;
+                                LineEdit {
+                                    width: 120px;
+                                    height: 32px;
+                                    text: AppData.nominas_edit_dias_input;
+                                    enabled: !AppData.nominas_edit_is_baja;
+                                    edited(val) => {
+                                        AppLogic.limpiar_error_campo("dias");
+                                        AppLogic.nominas_edit_recalc_dias(val);
+                                    }
+                                }
                             }
                         }
 
@@ -1323,6 +1334,8 @@ export component NominasView inherits Rectangle {
                     }
                 }
 
+                FormErrorBanner { }
+
                 // Selección de Plantilla Origen
                 Rectangle {
                     height: 52px;
@@ -1378,24 +1391,40 @@ export component NominasView inherits Rectangle {
                         VerticalLayout {
                             alignment: center;
                             spacing: 2px;
-                            Text { text: "Año Destino"; font-size: 10px; font-weight: 700; color: #475569; }
-                            LineEdit {
-                                width: 80px;
-                                height: 30px;
-                                text: AppData.nominas_copy_target_anio;
-                                edited(val) => { AppLogic.nominas_copy_set_anio(val); }
+                            FormField {
+                                label: "Año Destino";
+                                campo: "anio";
+                                required: true;
+                                width: 150px;
+                                LineEdit {
+                                    width: 80px;
+                                    height: 30px;
+                                    text: AppData.nominas_copy_target_anio;
+                                    edited(val) => {
+                                        AppLogic.limpiar_error_campo("anio");
+                                        AppLogic.nominas_copy_set_anio(val);
+                                    }
+                                }
                             }
                         }
 
                         VerticalLayout {
                             alignment: center;
                             spacing: 2px;
-                            Text { text: "Días Nómina Destino"; font-size: 10px; font-weight: 700; color: #2563eb; }
-                            LineEdit {
-                                width: 110px;
-                                height: 30px;
-                                text: AppData.nominas_copy_dias_input;
-                                edited(val) => { AppLogic.nominas_copy_recalc_dias(val); }
+                            FormField {
+                                label: "Días Nómina Destino";
+                                campo: "dias";
+                                width: 170px;
+                                ayuda: "Vacío = días de la plantilla";
+                                LineEdit {
+                                    width: 110px;
+                                    height: 30px;
+                                    text: AppData.nominas_copy_dias_input;
+                                    edited(val) => {
+                                        AppLogic.limpiar_error_campo("dias");
+                                        AppLogic.nominas_copy_recalc_dias(val);
+                                    }
+                                }
                             }
                         }
 

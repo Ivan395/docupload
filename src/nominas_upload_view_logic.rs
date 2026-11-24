@@ -596,8 +596,34 @@ pub fn wire_nominas_upload_callbacks(
             let rfc_arg = if !client_rfc_cb.trim().is_empty() { Some(client_rfc_cb.as_str()) } else { None };
             let rp_arg = if !rustfs_rp_cb.trim().is_empty() && rustfs_rp_cb != "GENERAL" { Some(rustfs_rp_cb.as_str()) } else { None };
 
+            // Discrepancias (RFC emisor/RP distintos, errores de captura de NSS, RFC, CURP o nombre):
+            // se pausa el proceso y el usuario decide qué nóminas cargar.
+            let ui_rev = ui_w.clone();
+            let revisor = move |archivos: Vec<String>, advertencias: Vec<crate::advertencias_carga::AdvertenciaCarga>| {
+                let ui_p = ui_rev.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_p.upgrade() {
+                        ui.global::<AppData>().set_nominas_view_is_processing(false);
+                    }
+                });
+                let decision = crate::carga_revision_ui::solicitar_decision(
+                    ui_rev.clone(),
+                    "nóminas",
+                    "Revisa las nóminas antes de cargarlas",
+                    archivos,
+                    advertencias,
+                );
+                let ui_p = ui_rev.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_p.upgrade() {
+                        ui.global::<AppData>().set_nominas_view_is_processing(true);
+                    }
+                });
+                decision
+            };
+
             let res = crate::nominas::processor::process_nominas(
-                &paths, &temp_excel, &temp_dir, progress_cb, revision_id_w, rfc_arg, rp_arg,
+                &paths, &temp_excel, &temp_dir, progress_cb, revision_id_w, rfc_arg, rp_arg, Some(&revisor),
             );
 
             // Subida a RustFS de los archivos originales, conservando
@@ -768,10 +794,34 @@ pub fn wire_nominas_upload_callbacks(
                             msg.push(' ');
                             msg.push_str(extra);
                         }
-                        show_toast_message(&ui, &msg);
+                        if let Some(ref err) = r.error_guardado {
+                            crate::form_errors::mostrar_error_sistema(
+                                &ui,
+                                "Las nóminas no se guardaron en la base de datos",
+                                &format!(
+                                    "Se procesaron {} nómina(s) válidas, pero no se pudieron guardar.\n\n{}",
+                                    r.valid_count,
+                                    crate::form_errors::describir_error(err)
+                                ),
+                            );
+                        } else if r.valid_count == 0 && r.invalid_items.iter().any(|i| i.category == "CARGA CANCELADA") {
+                            show_toast_message(&ui, "Carga cancelada: no se cargó ninguna nómina.");
+                        } else {
+                            show_toast_message(&ui, &msg);
+                            // Errores de captura pudieron crear empleados duplicados: avisar para corregirlos
+                            if r.valid_count > 0 {
+                                if let Some(ref pool) = pool_final {
+                                    crate::duplicados_ui::revisar_tras_carga(ui.as_weak(), pool.clone(), revision_id_w);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
-                        show_toast_message(&ui, &format!("Error al procesar nóminas: {}", e));
+                        crate::form_errors::mostrar_error_sistema(
+                            &ui,
+                            "No se pudieron procesar las nóminas",
+                            &crate::form_errors::describir_error(&e),
+                        );
                     }
                 }
             });
@@ -976,7 +1026,7 @@ pub fn wire_nominas_upload_callbacks(
                     let _ = load_nominas_upload_stats(&ui, pool, &session_final);
                 }
                 match err_msg {
-                    Some(e) => show_toast_message(&ui, &e),
+                    Some(e) => crate::form_errors::mostrar_error_sistema(&ui, "No se pudieron borrar las nóminas", &crate::form_errors::describir_error(&e)),
                     None => show_toast_message(
                         &ui,
                         &format!("Se borraron {} registro(s) de nóminas de la revisión.", del_count),

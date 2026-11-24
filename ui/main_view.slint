@@ -26,6 +26,8 @@ import { ActionPanel } from "action_panel.slint";
 import { ResultsPanel } from "results_panel.slint";
 import { UpdateModal } from "update_modal.slint";
 import { AnalistaModal } from "analista_modal.slint";
+import { CargaAdvertenciasModal } from "carga_advertencias_modal.slint";
+import { DuplicadosModal, AvisoDuplicados } from "duplicados_modal.slint";
 export { AppData, AppLogic, DateHelper, DateDmy, FileItemData, UnprocessedItemData, MismatchDetailItem, ProcessingSummary, ClienteCardData, RegistroPatronalData, EmpleadoData, RevisionData, RegistroObraData, CedulaFileItem, CedulaDetalleRow, CedulaSumatoriaRow, ReporteObraItem, ReporteLiquidacionRow, CalendarDayCell, CalendarHolidayItem, CalendarRevisionItem } from "models.slint";
 import { AppData, AppLogic } from "models.slint";
 import { OperacionEnCursoOverlay } from "operacion_overlay.slint";
@@ -406,6 +408,29 @@ export component MainWindow inherits Window {
     // SELECTOR DE ANALISTA DE LA SESIÓN (ADD-05)
     if AppData.show_analista_modal : AnalistaModal {}
 
+    // AVISO Y MODAL DE POSIBLES EMPLEADOS DUPLICADOS
+    if AppData.duplicados_aviso_visible && AppData.duplicados_pendientes > 0 && !AppData.show_duplicados_modal : AvisoDuplicados {
+        x: 16px;
+        y: parent.height - self.height - 16px;
+        z: 8000;
+    }
+    if AppData.show_duplicados_modal : DuplicadosModal {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        z: 9400;
+    }
+
+    // REVISIÓN DE DISCREPANCIAS ANTES DE CARGAR CÉDULAS / NÓMINAS
+    if AppData.show_carga_adv_modal : CargaAdvertenciasModal {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        z: 9500;
+    }
+
     // MODAL GLOBAL DE ERROR DEL SISTEMA Y ROLLBACK ATÓMICO (PostgreSQL + rustfs)
     // Capa global de avance para operaciones largas
     if AppData.operacion_en_curso : OperacionEnCursoOverlay {
@@ -473,7 +498,9 @@ export component MainWindow inherits Window {
                         }
 
                         Text {
-                            text: "Se revirtieron automáticamente los cambios en PostgreSQL y rustfs para proteger la integridad de los datos.";
+                            text: AppData.system_error_modal_generico
+                                ? "La operación no se completó. Abajo está la causa."
+                                : "Se revirtieron automáticamente los cambios en PostgreSQL y rustfs para proteger la integridad de los datos.";
                             font-size: 11.5px;
                             font-weight: 600;
                             color: #64748b;
@@ -489,7 +516,7 @@ export component MainWindow inherits Window {
 
                 // Cuerpo del mensaje descriptivo requerido
                 Text {
-                    text: "No se pudo guardar la información debido a un error del sistema:";
+                    text: AppData.system_error_modal_generico ? "¿Por qué ocurrió?" : "No se pudo guardar la información debido a un error del sistema:";
                     font-size: 13px;
                     font-weight: 700;
                     color: #1e293b;

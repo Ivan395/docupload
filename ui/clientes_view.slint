@@ -1,5 +1,6 @@
 import { ScrollView, LineEdit, Button, ComboBox } from "std-widgets.slint";
 import { AppData, AppLogic, ClienteCardData } from "models.slint";
+import { FormField, FormErrorBanner, LeyendaObligatorios } from "form_field.slint";
 
 export component ClientesView inherits Rectangle {
     background: #f8fafc;
@@ -572,8 +573,8 @@ export component ClientesView inherits Rectangle {
         }
 
         Rectangle {
-            width: 520px;
-            height: 490px;
+            width: Math.min(parent.width - 32px, 520px);
+            height: Math.min(parent.height - 32px, new_cli_form.preferred-height);
             background: #ffffff;
             border-radius: 12px;
             border-width: 1px;
@@ -581,7 +582,7 @@ export component ClientesView inherits Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
 
-            VerticalLayout {
+            new_cli_form := VerticalLayout {
                 padding: 18px;
                 spacing: 8px;
                 alignment: start;
@@ -614,68 +615,62 @@ export component ClientesView inherits Rectangle {
                     }
                 }
 
-                Text {
-                    text: "Ingresa los datos del cliente. Nombre y RFC son obligatorios; los demás datos son opcionales.";
-                    font-size: 11px;
-                    color: #64748b;
-                }
+                LeyendaObligatorios { }
 
-                VerticalLayout {
-                    spacing: 2px;
-                    Text { text: "Nombre de la Empresa / Comercial *"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                FormErrorBanner { }
+
+                FormField {
+                    label: "Nombre de la Empresa / Comercial";
+                    campo: "nombre";
+                    required: true;
                     LineEdit {
                         height: 34px;
                         text <=> AppData.new_cliente_nombre;
                         placeholder-text: "Ej. Gondesa o Constructora del Centro SA de CV";
+                        edited => { AppLogic.limpiar_error_campo("nombre"); }
                     }
                 }
 
                 HorizontalLayout {
                     spacing: 12px;
-                    alignment: start;
-                    VerticalLayout {
-                        spacing: 2px;
+                    FormField {
                         horizontal-stretch: 1;
-                        alignment: start;
-                        Text { text: "RFC SAT *"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                        label: "RFC SAT";
+                        campo: "rfc";
+                        required: true;
+                        error-vivo: AppData.new_cliente_rfc_status == "invalid" ? AppData.new_cliente_rfc_msg : "";
+                        ayuda: AppData.new_cliente_rfc_status == "valid" ? AppData.new_cliente_rfc_msg : "12 posiciones (moral) o 13 (física)";
                         LineEdit {
                             height: 34px;
                             text <=> AppData.new_cliente_rfc;
                             placeholder-text: "RFC a 12 o 13 posiciones";
-                            edited => { AppLogic.validate_new_cliente_input(); }
-                        }
-                        if AppData.new_cliente_rfc_msg != "" : Text {
-                            text: AppData.new_cliente_rfc_msg;
-                            font-size: 10px;
-                            font-weight: 600;
-                            color: AppData.new_cliente_rfc_status == "valid" ? #16a34a : #dc2626;
-                            wrap: word-wrap;
+                            edited => {
+                                AppLogic.limpiar_error_campo("rfc");
+                                AppLogic.validate_new_cliente_input();
+                            }
                         }
                     }
-                    VerticalLayout {
-                        spacing: 2px;
+                    FormField {
                         horizontal-stretch: 1;
-                        alignment: start;
-                        Text { text: "CURP (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                        label: "CURP";
+                        campo: "curp";
+                        error-vivo: AppData.new_cliente_curp_status == "invalid" ? AppData.new_cliente_curp_msg : "";
+                        ayuda: AppData.new_cliente_curp_status == "valid" ? AppData.new_cliente_curp_msg : "Solo personas físicas (18 posiciones)";
                         LineEdit {
                             height: 34px;
                             text <=> AppData.new_cliente_curp;
                             placeholder-text: "CURP a 18 posiciones";
-                            edited => { AppLogic.validate_new_cliente_input(); }
-                        }
-                        if AppData.new_cliente_curp_msg != "" : Text {
-                            text: AppData.new_cliente_curp_msg;
-                            font-size: 10px;
-                            font-weight: 600;
-                            color: AppData.new_cliente_curp_status == "valid" ? #16a34a : #dc2626;
-                            wrap: word-wrap;
+                            edited => {
+                                AppLogic.limpiar_error_campo("curp");
+                                AppLogic.validate_new_cliente_input();
+                            }
                         }
                     }
                 }
 
-                VerticalLayout {
-                    spacing: 2px;
-                    Text { text: "Razón Social (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                FormField {
+                    label: "Razón Social";
+                    campo: "razon_social";
                     LineEdit {
                         height: 34px;
                         text <=> AppData.new_cliente_razon_social;
@@ -683,9 +678,9 @@ export component ClientesView inherits Rectangle {
                     }
                 }
 
-                VerticalLayout {
-                    spacing: 2px;
-                    Text { text: "Representante Legal (firma entregables IMSS)"; font-size: 10px; font-weight: 700; color: #475569; }
+                FormField {
+                    label: "Representante Legal (firma entregables IMSS)";
+                    campo: "representante_legal";
                     LineEdit {
                         height: 34px;
                         text <=> AppData.new_cliente_representante_legal;
@@ -693,40 +688,38 @@ export component ClientesView inherits Rectangle {
                     }
                 }
 
-                // Dropdown Tipo de Persona
-                VerticalLayout {
-                    spacing: 2px;
-                    Text { text: "Tipo de Persona (Opcional)"; font-size: 10px; font-weight: 700; color: #1e293b; }
-                    ComboBox {
-                        height: 34px;
-                        model: AppData.tipos_personas_combo;
-                        current-value: AppData.new_cliente_tipo_persona_val;
-                        selected(val) => {
-                            AppData.new_cliente_tipo_persona_val = val;
-                            AppLogic.change_new_tipo_persona(val);
+                HorizontalLayout {
+                    spacing: 12px;
+                    FormField {
+                        horizontal-stretch: 1;
+                        label: "Tipo de Persona";
+                        campo: "tipo_persona";
+                        ComboBox {
+                            height: 34px;
+                            model: AppData.tipos_personas_combo;
+                            current-value: AppData.new_cliente_tipo_persona_val;
+                            selected(val) => {
+                                AppData.new_cliente_tipo_persona_val = val;
+                                AppLogic.limpiar_error_campo("tipo_persona");
+                                AppLogic.limpiar_error_campo("rfc");
+                                AppLogic.change_new_tipo_persona(val);
+                            }
                         }
                     }
-                }
-
-                // Dropdown Régimen Fiscal
-                VerticalLayout {
-                    spacing: 2px;
-                    HorizontalLayout {
-                        alignment: space-between;
-                        Text { text: "Régimen Fiscal SAT (Opcional)"; font-size: 10px; font-weight: 700; color: #1e293b; }
-                        if !AppData.new_cliente_regimen_enabled : Text {
-                            text: "Seleccione Tipo de Persona para habilitar";
-                            font-size: 9px;
-                            color: #94a3b8;
-                        }
-                    }
-                    ComboBox {
-                        height: 34px;
-                        enabled: AppData.new_cliente_regimen_enabled;
-                        model: AppData.new_cliente_regimenes_combo;
-                        current-value: AppData.new_cliente_regimen_val;
-                        selected(val) => {
-                            AppData.new_cliente_regimen_val = val;
+                    FormField {
+                        horizontal-stretch: 1;
+                        label: "Régimen Fiscal SAT";
+                        campo: "regimen";
+                        ayuda: AppData.new_cliente_regimen_enabled ? "" : "Elige primero el tipo de persona";
+                        ComboBox {
+                            height: 34px;
+                            enabled: AppData.new_cliente_regimen_enabled;
+                            model: AppData.new_cliente_regimenes_combo;
+                            current-value: AppData.new_cliente_regimen_val;
+                            selected(val) => {
+                                AppData.new_cliente_regimen_val = val;
+                                AppLogic.limpiar_error_campo("regimen");
+                            }
                         }
                     }
                 }
@@ -742,11 +735,12 @@ export component ClientesView inherits Rectangle {
                         clicked => { AppLogic.close_new_cliente_dialog(); }
                     }
 
+                    // Siempre habilitado: al enviar se marcan los campos obligatorios vacíos o inválidos
                     Rectangle {
                         height: 34px;
                         width: 140px;
                         border-radius: 6px;
-                        background: (AppData.new_cliente_nombre != "" && AppData.new_cliente_rfc != "") ? #1e3a8a : #94a3b8;
+                        background: new_cli_submit.has-hover ? #1e40af : #1e3a8a;
 
                         HorizontalLayout {
                             alignment: center;
@@ -759,11 +753,10 @@ export component ClientesView inherits Rectangle {
                             }
                         }
 
-                        TouchArea {
-                            mouse-cursor: (AppData.new_cliente_nombre != "" && AppData.new_cliente_rfc != "") ? pointer : default;
+                        new_cli_submit := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => {
-                                if AppData.new_cliente_nombre != "" && AppData.new_cliente_rfc != "" {
-                                    AppLogic.submit_new_cliente(
+                                AppLogic.submit_new_cliente(
                                         AppData.new_cliente_nombre,
                                         AppData.new_cliente_rfc,
                                         AppData.new_cliente_razon_social,
@@ -771,8 +764,7 @@ export component ClientesView inherits Rectangle {
                                         AppData.new_cliente_tipo_persona_val,
                                         AppData.new_cliente_regimen_val,
                                         AppData.new_cliente_representante_legal
-                                    );
-                                }
+                                );
                             }
                         }
                     }
@@ -790,8 +782,8 @@ export component ClientesView inherits Rectangle {
         }
 
         Rectangle {
-            width: 520px;
-            height: 490px;
+            width: Math.min(parent.width - 32px, 520px);
+            height: Math.min(parent.height - 32px, edit_cli_form.preferred-height);
             background: #ffffff;
             border-radius: 12px;
             border-width: 1px;
@@ -799,7 +791,7 @@ export component ClientesView inherits Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
 
-            VerticalLayout {
+            edit_cli_form := VerticalLayout {
                 padding: 18px;
                 spacing: 8px;
                 alignment: start;
@@ -832,62 +824,62 @@ export component ClientesView inherits Rectangle {
                     }
                 }
 
-                VerticalLayout {
-                    spacing: 2px;
-                    Text { text: "Nombre de la Empresa / Comercial *"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                LeyendaObligatorios { }
+
+                FormErrorBanner { }
+
+                FormField {
+                    label: "Nombre de la Empresa / Comercial";
+                    campo: "nombre";
+                    required: true;
                     LineEdit {
                         height: 34px;
                         text <=> AppData.edit_cliente_nombre;
-                        placeholder-text: "Nombre comercial o identificador de la empresa";
+                        placeholder-text: "Ej. Gondesa o Constructora del Centro SA de CV";
+                        edited => { AppLogic.limpiar_error_campo("nombre"); }
                     }
                 }
 
                 HorizontalLayout {
                     spacing: 12px;
-                    alignment: start;
-                    VerticalLayout {
-                        spacing: 2px;
+                    FormField {
                         horizontal-stretch: 1;
-                        alignment: start;
-                        Text { text: "RFC SAT *"; font-size: 10px; font-weight: 700; color: #1e293b; }
+                        label: "RFC SAT";
+                        campo: "rfc";
+                        required: true;
+                        error-vivo: AppData.edit_cliente_rfc_status == "invalid" ? AppData.edit_cliente_rfc_msg : "";
+                        ayuda: AppData.edit_cliente_rfc_status == "valid" ? AppData.edit_cliente_rfc_msg : "12 posiciones (moral) o 13 (física)";
                         LineEdit {
                             height: 34px;
                             text <=> AppData.edit_cliente_rfc;
                             placeholder-text: "RFC a 12 o 13 posiciones";
-                            edited => { AppLogic.validate_edit_cliente_input(); }
-                        }
-                        if AppData.edit_cliente_rfc_msg != "" : Text {
-                            text: AppData.edit_cliente_rfc_msg;
-                            font-size: 10px;
-                            font-weight: 600;
-                            color: AppData.edit_cliente_rfc_status == "valid" ? #16a34a : #dc2626;
-                            wrap: word-wrap;
+                            edited => {
+                                AppLogic.limpiar_error_campo("rfc");
+                                AppLogic.validate_edit_cliente_input();
+                            }
                         }
                     }
-                    VerticalLayout {
-                        spacing: 2px;
+                    FormField {
                         horizontal-stretch: 1;
-                        alignment: start;
-                        Text { text: "CURP"; font-size: 10px; font-weight: 700; color: #475569; }
+                        label: "CURP";
+                        campo: "curp";
+                        error-vivo: AppData.edit_cliente_curp_status == "invalid" ? AppData.edit_cliente_curp_msg : "";
+                        ayuda: AppData.edit_cliente_curp_status == "valid" ? AppData.edit_cliente_curp_msg : "Solo personas físicas (18 posiciones)";
                         LineEdit {
                             height: 34px;
                             text <=> AppData.edit_cliente_curp;
                             placeholder-text: "CURP a 18 posiciones";
-                            edited => { AppLogic.validate_edit_cliente_input(); }
-                        }
-                        if AppData.edit_cliente_curp_msg != "" : Text {
-                            text: AppData.edit_cliente_curp_msg;
-                            font-size: 10px;
-                            font-weight: 600;
-                            color: AppData.edit_cliente_curp_status == "valid" ? #16a34a : #dc2626;
-                            wrap: word-wrap;
+                            edited => {
+                                AppLogic.limpiar_error_campo("curp");
+                                AppLogic.validate_edit_cliente_input();
+                            }
                         }
                     }
                 }
 
-                VerticalLayout {
-                    spacing: 2px;
-                    Text { text: "Razón Social"; font-size: 10px; font-weight: 700; color: #475569; }
+                FormField {
+                    label: "Razón Social";
+                    campo: "razon_social";
                     LineEdit {
                         height: 34px;
                         text <=> AppData.edit_cliente_razon_social;
@@ -895,9 +887,9 @@ export component ClientesView inherits Rectangle {
                     }
                 }
 
-                VerticalLayout {
-                    spacing: 2px;
-                    Text { text: "Representante Legal (firma entregables IMSS)"; font-size: 10px; font-weight: 700; color: #475569; }
+                FormField {
+                    label: "Representante Legal (firma entregables IMSS)";
+                    campo: "representante_legal";
                     LineEdit {
                         height: 34px;
                         text <=> AppData.edit_cliente_representante_legal;
@@ -905,40 +897,38 @@ export component ClientesView inherits Rectangle {
                     }
                 }
 
-                // Dropdown Tipo de Persona
-                VerticalLayout {
-                    spacing: 2px;
-                    Text { text: "Tipo de Persona"; font-size: 10px; font-weight: 700; color: #1e293b; }
-                    ComboBox {
-                        height: 34px;
-                        model: AppData.tipos_personas_combo;
-                        current-value: AppData.edit_cliente_tipo_persona_val;
-                        selected(val) => {
-                            AppData.edit_cliente_tipo_persona_val = val;
-                            AppLogic.change_tipo_persona(val);
+                HorizontalLayout {
+                    spacing: 12px;
+                    FormField {
+                        horizontal-stretch: 1;
+                        label: "Tipo de Persona";
+                        campo: "tipo_persona";
+                        ComboBox {
+                            height: 34px;
+                            model: AppData.tipos_personas_combo;
+                            current-value: AppData.edit_cliente_tipo_persona_val;
+                            selected(val) => {
+                                AppData.edit_cliente_tipo_persona_val = val;
+                                AppLogic.limpiar_error_campo("tipo_persona");
+                                AppLogic.limpiar_error_campo("rfc");
+                                AppLogic.change_tipo_persona(val);
+                            }
                         }
                     }
-                }
-
-                // Dropdown Régimen Fiscal
-                VerticalLayout {
-                    spacing: 2px;
-                    HorizontalLayout {
-                        alignment: space-between;
-                        Text { text: "Régimen Fiscal SAT"; font-size: 10px; font-weight: 700; color: #1e293b; }
-                        if !AppData.edit_cliente_regimen_enabled : Text {
-                            text: "Seleccione Tipo de Persona para habilitar";
-                            font-size: 9px;
-                            color: #94a3b8;
-                        }
-                    }
-                    ComboBox {
-                        height: 34px;
-                        enabled: AppData.edit_cliente_regimen_enabled;
-                        model: AppData.regimenes_fiscales_combo;
-                        current-value: AppData.edit_cliente_regimen_val;
-                        selected(val) => {
-                            AppData.edit_cliente_regimen_val = val;
+                    FormField {
+                        horizontal-stretch: 1;
+                        label: "Régimen Fiscal SAT";
+                        campo: "regimen";
+                        ayuda: AppData.edit_cliente_regimen_enabled ? "" : "Elige primero el tipo de persona";
+                        ComboBox {
+                            height: 34px;
+                            enabled: AppData.edit_cliente_regimen_enabled;
+                            model: AppData.regimenes_fiscales_combo;
+                            current-value: AppData.edit_cliente_regimen_val;
+                            selected(val) => {
+                                AppData.edit_cliente_regimen_val = val;
+                                AppLogic.limpiar_error_campo("regimen");
+                            }
                         }
                     }
                 }
@@ -954,11 +944,12 @@ export component ClientesView inherits Rectangle {
                         clicked => { AppLogic.close_edit_cliente_dialog(); }
                     }
 
+                    // Siempre habilitado: al enviar se marcan los campos obligatorios vacíos o inválidos
                     Rectangle {
                         height: 34px;
                         width: 150px;
                         border-radius: 6px;
-                        background: (AppData.edit_cliente_nombre != "" && AppData.edit_cliente_rfc != "") ? #1e3a8a : #94a3b8;
+                        background: edit_cli_submit.has-hover ? #1e40af : #1e3a8a;
 
                         HorizontalLayout {
                             alignment: center;
@@ -971,11 +962,10 @@ export component ClientesView inherits Rectangle {
                             }
                         }
 
-                        TouchArea {
-                            mouse-cursor: (AppData.edit_cliente_nombre != "" && AppData.edit_cliente_rfc != "") ? pointer : default;
+                        edit_cli_submit := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => {
-                                if AppData.edit_cliente_nombre != "" && AppData.edit_cliente_rfc != "" {
-                                    AppLogic.submit_edit_cliente(
+                                AppLogic.submit_edit_cliente(
                                         AppData.edit_cliente_id,
                                         AppData.edit_cliente_nombre,
                                         AppData.edit_cliente_razon_social,
@@ -984,8 +974,7 @@ export component ClientesView inherits Rectangle {
                                         AppData.edit_cliente_tipo_persona_val,
                                         AppData.edit_cliente_regimen_val,
                                         AppData.edit_cliente_representante_legal
-                                    );
-                                }
+                                );
                             }
                         }
                     }
