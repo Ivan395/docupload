@@ -1,6 +1,7 @@
 // Alta masiva de revisiones (ADD-03): modal con generador por prefijo y tabla pegada o importada.
 import { ScrollView, LineEdit, TextEdit } from "std-widgets.slint";
 import { AppData, AppLogic } from "models.slint";
+import { FormField, FormErrorBanner } from "form_field.slint";
 
 component BotonLote inherits Rectangle {
     in property <string> texto;
@@ -74,6 +75,8 @@ export component RevisionesLoteModal inherits Rectangle {
                 }
             }
 
+            FormErrorBanner { }
+
             // Sección (a): generador por prefijo
             Rectangle {
                 background: #f8fafc;
@@ -91,27 +94,39 @@ export component RevisionesLoteModal inherits Rectangle {
                     }
                     HorizontalLayout {
                         spacing: 8px;
-                        VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Prefijo de nombre"; font-size: 10px; color: #64748b; }
-                            gen_prefijo_nombre := LineEdit { placeholder-text: "REV-"; }
+                        FormField {
+                            label: "Prefijo de nombre";
+                            campo: "gen_prefijo";
+                            required: true;
+                            gen_prefijo_nombre := LineEdit {
+                                placeholder-text: "REV-";
+                                edited => { AppLogic.limpiar_error_campo("gen_prefijo"); }
+                            }
                         }
-                        VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Prefijo de folio (opcional)"; font-size: 10px; color: #64748b; }
+                        FormField {
+                            label: "Prefijo de folio";
+                            campo: "gen_folio";
                             gen_prefijo_folio := LineEdit { placeholder-text: "F-"; }
                         }
-                        VerticalLayout {
-                            spacing: 2px;
-                            width: 90px;
-                            Text { text: "Desde"; font-size: 10px; color: #64748b; }
-                            gen_desde := LineEdit { text: "1"; }
+                        FormField {
+                            width: 110px;
+                            label: "Desde";
+                            campo: "gen_desde";
+                            required: true;
+                            gen_desde := LineEdit {
+                                text: "1";
+                                edited => { AppLogic.limpiar_error_campo("gen_desde"); }
+                            }
                         }
-                        VerticalLayout {
-                            spacing: 2px;
-                            width: 90px;
-                            Text { text: "Cantidad"; font-size: 10px; color: #64748b; }
-                            gen_cantidad := LineEdit { placeholder-text: "1 a 200"; }
+                        FormField {
+                            width: 110px;
+                            label: "Cantidad";
+                            campo: "gen_cantidad";
+                            required: true;
+                            gen_cantidad := LineEdit {
+                                placeholder-text: "1 a 200";
+                                edited => { AppLogic.limpiar_error_campo("gen_cantidad"); }
+                            }
                         }
                         VerticalLayout {
                             alignment: end;

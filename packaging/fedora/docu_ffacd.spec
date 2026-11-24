@@ -62,6 +62,9 @@ if [ $1 -eq 0 ] ; then
 fi
 
 %changelog
+* Tue Nov 24 2026 Firma Fiscal ACD <soporte@firmafiscalacd.com> - 0.6.1-1
+- Errores por campo en formularios, revisión aprobada por IMSS y carga flexible de cédulas y nóminas con advertencias y detección de empleados duplicados.
+
 * Fri Nov 20 2026 Firma Fiscal ACD <soporte@firmafiscalacd.com> - 0.6.0-1
 - Paquetes autosuficientes y actualizador desde GitHub Releases por tipo de instalación.
 

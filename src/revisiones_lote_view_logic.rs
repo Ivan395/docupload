@@ -321,10 +321,36 @@ pub fn wire_revisiones_lote_callbacks(
         app_logic.on_revisiones_lote_generar(
             move |prefijo_nombre: SharedString, prefijo_folio: SharedString, desde: SharedString, cantidad: SharedString| {
                 let Some(ui) = ui_weak.upgrade() else { return };
-                let (Ok(desde), Ok(cantidad)) = (desde.trim().parse::<u32>(), cantidad.trim().parse::<u32>()) else {
-                    show_toast_message(&ui, "Desde y cantidad deben ser números enteros.");
+                let mut errores = crate::form_errors::ErroresFormulario::new();
+                errores.requerido("gen_prefijo", prefijo_nombre.as_str(), "El prefijo del nombre");
+                let desde_n = if errores.requerido("gen_desde", desde.as_str(), "El número inicial") {
+                    desde.trim().parse::<u32>().map_err(|_| errores.agregar("gen_desde", "Formato inválido: escribe un número entero.")).ok()
+                } else {
+                    None
+                };
+                let cantidad_n = if errores.requerido("gen_cantidad", cantidad.as_str(), "La cantidad") {
+                    match cantidad.trim().parse::<u32>() {
+                        Ok(c) if (1..=200).contains(&c) => Some(c),
+                        Ok(_) => {
+                            errores.agregar("gen_cantidad", "Fuera de rango: debe estar entre 1 y 200.");
+                            None
+                        }
+                        Err(_) => {
+                            errores.agregar("gen_cantidad", "Formato inválido: escribe un número entero.");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let (Some(desde), Some(cantidad)) = (desde_n, cantidad_n) else {
+                    crate::form_errors::mostrar_errores(&ui, &errores);
                     return;
                 };
+                if !errores.is_empty() {
+                    crate::form_errors::mostrar_errores(&ui, &errores);
+                    return;
+                }
                 match generar_por_prefijo(
                     prefijo_nombre.as_str(),
                     prefijo_folio.as_str(),
@@ -333,7 +359,7 @@ pub fn wire_revisiones_lote_callbacks(
                     ANCHO_CONSECUTIVO,
                 ) {
                     Ok(filas) => clasificar_en_hilo(&ui, pool.clone(), estado.clone(), filas),
-                    Err(e) => show_toast_message(&ui, &e),
+                    Err(e) => crate::form_errors::mostrar_error_general(&ui, "No se pudieron generar las revisiones", &e),
                 }
             },
         );

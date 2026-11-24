@@ -1,6 +1,6 @@
 [package]
 name = "docu_ffacd"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 authors = ["Firma Fiscal ACD <soporte@firmafiscalacd.com>"]
 description = "DocuUpload - Procesamiento concurrente y validación de nóminas CFDI (SAT SOAP) y cédulas SUA IMSS"
@@ -64,7 +64,7 @@ winres = "0.1"
 name = "DocUpload"
 identifier = "com.docuffacd.docupload"
 icon = ["ui/assets/app_icon.png", "ui/assets/app_icon_256.png", "ui/assets/app_icon.ico", "ui/assets/app_icon.icns"]
-version = "0.6.0"
+version = "0.6.1"
 copyright = "Copyright © 2026 Firma Fiscal ACD. Todos los derechos reservados."
 category = "Business"
 short_description = "DocUpload Fiscal & Nóminas"

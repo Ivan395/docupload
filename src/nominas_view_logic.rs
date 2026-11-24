@@ -1078,8 +1078,17 @@ pub fn wire_nominas_callbacks(
     let ui_weak_save_edit = main_window.as_weak();
     app_logic.on_nominas_save_edit(move || {
         let Some(win) = ui_weak_save_edit.upgrade() else { return };
-        let Some(ref pool) = pool_save_edit else { return };
-        let Ok(mut client) = pool.get() else { return };
+        let Some(ref pool) = pool_save_edit else {
+            crate::form_errors::mostrar_error_general(&win, "Sin conexión con la base de datos", "No hay conexión con la base de datos.");
+            return;
+        };
+        let mut client = match pool.get() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::form_errors::mostrar_error_general(&win, "Sin conexión con la base de datos", &format!("Error de conexión: {}", e));
+                return;
+            }
+        };
 
         let (id_nom, nuevos_dias, id_y_montos) = {
             let st = match s_save_edit.lock() {
@@ -1087,11 +1096,26 @@ pub fn wire_nominas_callbacks(
                 Err(_) => return,
             };
             let Some(id) = st.edit_id_nomina else { return };
-            let dias = st
-                .edit_dias_input
-                .trim()
-                .parse::<f64>()
-                .unwrap_or(st.edit_dias_original);
+            let dias_txt = st.edit_dias_input.trim().replace(',', ".");
+            let dias = if dias_txt.is_empty() {
+                st.edit_dias_original
+            } else {
+                match dias_txt.parse::<f64>() {
+                    Ok(d) if d.is_finite() && d >= 0.0 => d,
+                    Ok(_) => {
+                        let mut errores = crate::form_errors::ErroresFormulario::new();
+                        errores.agregar("dias", "Los días no pueden ser negativos.");
+                        crate::form_errors::mostrar_errores(&win, &errores);
+                        return;
+                    }
+                    Err(_) => {
+                        let mut errores = crate::form_errors::ErroresFormulario::new();
+                        errores.agregar("dias", "Formato inválido: escribe un número, por ejemplo 15 o 7.5");
+                        crate::form_errors::mostrar_errores(&win, &errores);
+                        return;
+                    }
+                }
+            };
             let montos: Vec<(Uuid, f64)> = st
                 .edit_conceptos
                 .iter()
@@ -1100,9 +1124,14 @@ pub fn wire_nominas_callbacks(
             (id, dias, montos)
         };
 
-        if let Ok(_) = update_dias_y_conceptos_nomina(&mut client, id_nom, nuevos_dias, &id_y_montos) {
-            win.global::<AppData>().set_nominas_show_edit_modal(false);
-            let _ = sync_and_load_nominas_data(&win, pool, &s_save_edit, None);
+        match update_dias_y_conceptos_nomina(&mut client, id_nom, nuevos_dias, &id_y_montos) {
+            Ok(_) => {
+                win.global::<AppData>().set_nominas_show_edit_modal(false);
+                let _ = sync_and_load_nominas_data(&win, pool, &s_save_edit, None);
+            }
+            Err(e) => {
+                crate::form_errors::mostrar_error_general(&win, "No se pudo guardar la nómina", &e.to_string());
+            }
         }
     });
 
@@ -1309,8 +1338,17 @@ pub fn wire_nominas_callbacks(
     let ui_weak_submit_copy = main_window.as_weak();
     app_logic.on_nominas_submit_create_nomina(move || {
         let Some(win) = ui_weak_submit_copy.upgrade() else { return };
-        let Some(ref pool) = pool_submit_copy else { return };
-        let Ok(mut client) = pool.get() else { return };
+        let Some(ref pool) = pool_submit_copy else {
+            crate::form_errors::mostrar_error_general(&win, "Sin conexión con la base de datos", "No hay conexión con la base de datos.");
+            return;
+        };
+        let mut client = match pool.get() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::form_errors::mostrar_error_general(&win, "Sin conexión con la base de datos", &format!("Error de conexión: {}", e));
+                return;
+            }
+        };
 
         let meses = [
             "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
@@ -1323,12 +1361,47 @@ pub fn wire_nominas_callbacks(
                 Err(_) => return,
             };
             let Some(id_emp) = st.copy_id_empleado else { return };
-            if st.copy_templates.is_empty() { return; }
-            let id_template = st.copy_templates[st.copy_selected_template_idx].id_nomina;
-            let anio = st.copy_target_anio.trim().parse::<i32>().unwrap_or(2026);
+            if st.copy_templates.is_empty() {
+                crate::form_errors::mostrar_error_general(&win, "No hay nómina plantilla", "El empleado no tiene nóminas que puedan usarse como plantilla.");
+                return;
+            }
+            let id_template = st.copy_templates[st.copy_selected_template_idx.min(st.copy_templates.len() - 1)].id_nomina;
+
+            let mut errores = crate::form_errors::ErroresFormulario::new();
+            let anio_txt = st.copy_target_anio.trim().to_string();
+            let anio = if errores.requerido("anio", &anio_txt, "El año destino") {
+                match anio_txt.parse::<i32>() {
+                    Ok(a) if (2000..=2100).contains(&a) => a,
+                    _ => {
+                        errores.agregar("anio", "Formato inválido: escribe un año de 4 dígitos, por ejemplo 2025.");
+                        0
+                    }
+                }
+            } else {
+                0
+            };
             let mes_idx = st.copy_target_mes_idx.min(11);
             let mes = meses[mes_idx];
-            let dias = st.copy_dias_input.trim().parse::<f64>().unwrap_or(st.copy_dias_original);
+            let dias_txt = st.copy_dias_input.trim().replace(',', ".");
+            let dias = if dias_txt.is_empty() {
+                st.copy_dias_original
+            } else {
+                match dias_txt.parse::<f64>() {
+                    Ok(d) if d.is_finite() && d > 0.0 => d,
+                    Ok(_) => {
+                        errores.agregar("dias", "Los días deben ser mayores a 0.");
+                        0.0
+                    }
+                    Err(_) => {
+                        errores.agregar("dias", "Formato inválido: escribe un número, por ejemplo 15 o 7.5");
+                        0.0
+                    }
+                }
+            };
+            if !errores.is_empty() {
+                crate::form_errors::mostrar_errores(&win, &errores);
+                return;
+            }
             (id_template, id_emp, anio, mes, dias, st.copy_conceptos.clone())
         };
 
@@ -1337,7 +1410,7 @@ pub fn wire_nominas_callbacks(
             .map(|c| (c.id_concepto, c.importe))
             .collect();
 
-        if let Ok(_) = create_nomina_from_template(
+        match create_nomina_from_template(
             &mut client,
             id_emp,
             id_template,
@@ -1346,8 +1419,13 @@ pub fn wire_nominas_callbacks(
             dias_modificados,
             Some(&custom_pairs),
         ) {
-            win.global::<AppData>().set_nominas_show_copy_modal(false);
-            let _ = sync_and_load_nominas_data(&win, pool, &s_submit_copy, None);
+            Ok(_) => {
+                win.global::<AppData>().set_nominas_show_copy_modal(false);
+                let _ = sync_and_load_nominas_data(&win, pool, &s_submit_copy, None);
+            }
+            Err(e) => {
+                crate::form_errors::mostrar_error_general(&win, "No se pudo crear la nómina", &e.to_string());
+            }
         }
     });
 

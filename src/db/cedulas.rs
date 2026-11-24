@@ -123,6 +123,12 @@ fn update_cliente_and_rp_from_biz(
     id_registro_patronal: Uuid,
     biz: &Business,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Cédula cargada con discrepancias en los datos del patrón aceptadas por el usuario:
+    // sus datos patronales no son confiables, así que no se tocan los catálogos.
+    if biz.omitir_actualizar_catalogo {
+        return Ok(());
+    }
+
     // 1. Actualizar Registro Patronal con la información obtenida de las cédulas
     let act_upper = biz.actividad.as_deref().map(|s| crate::cedulas::business::clean_actividad(s)).filter(|s| !s.is_empty());
     let dom_upper = biz.domicilio.as_deref().map(|s| crate::cedulas::business::clean_domicilio(s)).filter(|s| !s.is_empty());

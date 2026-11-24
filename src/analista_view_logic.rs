@@ -103,8 +103,14 @@ pub fn wire_analista_callbacks(main_window: &MainWindow, db_pool: Option<Arc<DbP
         app_logic.on_analista_elegir(move |nombre| {
             let nombre = nombre.to_string();
             let Some(ui) = ui_weak.upgrade() else { return };
+            if nombre.trim().is_empty() {
+                let mut errores = crate::form_errors::ErroresFormulario::new();
+                errores.agregar("nombre_analista", "Escribe el nombre del analista para agregarlo.");
+                crate::form_errors::mostrar_errores(&ui, &errores);
+                return;
+            }
             let Some(pool) = pool.clone() else {
-                show_toast_message(&ui, "Sin conexión a la base de datos.");
+                crate::form_errors::mostrar_error_general(&ui, "Sin conexión con la base de datos", "Sin conexión a la base de datos.");
                 return;
             };
             let ui_weak = ui_weak.clone();
@@ -129,7 +135,7 @@ pub fn wire_analista_callbacks(main_window: &MainWindow, db_pool: Option<Arc<DbP
                             app.set_show_analista_modal(false);
                             show_toast_message(&ui, &format!("Analista en sesión: {}", a.nombre));
                         }
-                        Err(e) => show_toast_message(&ui, &e),
+                        Err(e) => crate::form_errors::mostrar_error_general(&ui, "No se pudo registrar al analista", &e),
                     }
                 });
             });

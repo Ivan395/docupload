@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -45,6 +45,8 @@ pub struct NominasProcessResult {
     pub not_found_count: usize,
     pub invalid_items: Vec<UnprocessedNomina>,
     pub excel_path: Option<PathBuf>,
+    /// Error al guardar en la base de datos (antes solo se registraba en el log).
+    pub error_guardado: Option<String>,
 }
 
 pub fn process_nominas(
@@ -55,6 +57,9 @@ pub fn process_nominas(
     revision_id: Uuid,
     expected_client_rfc: Option<&str>,
     expected_rp: Option<&str>,
+    // Si se indica, las discrepancias (RFC emisor/RP distintos, errores de captura de NSS, RFC,
+    // CURP o nombre) se presentan al usuario para que decida qué cargar en lugar de descartarse.
+    revisor: Option<&dyn Fn(Vec<String>, Vec<crate::advertencias_carga::AdvertenciaCarga>) -> crate::advertencias_carga::DecisionCarga>,
 ) -> Result<NominasProcessResult, String> {
     progress_callback(0, 0, "Buscando y extrayendo nóminas XML...");
 
@@ -70,6 +75,7 @@ pub fn process_nominas(
             not_found_count: 0,
             invalid_items: Vec::new(),
             excel_path: None,
+            error_guardado: None,
         });
     }
 
@@ -156,13 +162,27 @@ pub fn process_nominas(
     let clean_exp_rp = expected_rp.map(|s| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase()).filter(|s| !s.is_empty() && s != "GENERAL");
 
     let mut context_filtered = Vec::new();
+    // XML con datos del patrón distintos a la revisión: con `revisor` se presentan como advertencia
+    // (el usuario decide); sin él se descartan como antes.
+    let mut patron_items: HashMap<String, UnprocessedNomina> = HashMap::new();
+    let mut patron_advs: Vec<crate::advertencias_carga::AdvertenciaCarga> = Vec::new();
     for (file_display_name, emp) in parsed_ok {
         // Validar RFC Emisor
         if let Some(ref exp_rfc) = clean_exp_rfc {
             let emisor = emp.rfc_emisor.as_deref().unwrap_or("").trim().to_uppercase();
             if !emisor.is_empty() && emisor != *exp_rfc {
-                invalid_items.push(UnprocessedNomina {
-                    filename: file_display_name,
+                let mut adv = crate::advertencias_carga::advertencia_patron(
+                    crate::advertencias_carga::CampoAdvertencia::RfcPatron,
+                    &emp.nombrearchivo,
+                    &emisor,
+                    exp_rfc,
+                    format!("El RFC emisor del XML ({}) no es el RFC del cliente de la revisión ({}).", emisor, exp_rfc),
+                    false,
+                );
+                adv.solo_decidir_archivo = true;
+                patron_advs.push(adv);
+                patron_items.insert(emp.nombrearchivo.clone(), UnprocessedNomina {
+                    filename: file_display_name.clone(),
                     uuid: emp.uuid.clone().unwrap_or_default(),
                     rfc_emisor: emisor.clone(),
                     rfc_receptor: emp.rfc_receptor.clone().unwrap_or_default(),
@@ -174,6 +194,7 @@ pub fn process_nominas(
                     ),
                     is_sat_error: false,
                 });
+                context_filtered.push((file_display_name, emp));
                 continue;
             }
         }
@@ -183,8 +204,18 @@ pub fn process_nominas(
             if let Some(ref rp) = emp.registro_patronal {
                 let clean_rp: String = rp.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
                 if !clean_rp.is_empty() && clean_rp != *exp_rp {
-                    invalid_items.push(UnprocessedNomina {
-                        filename: file_display_name,
+                    let mut adv = crate::advertencias_carga::advertencia_patron(
+                        crate::advertencias_carga::CampoAdvertencia::RegistroPatronal,
+                        &emp.nombrearchivo,
+                        &clean_rp,
+                        exp_rp,
+                        format!("El Registro Patronal del XML ({}) no es el de la revisión ({}).", clean_rp, exp_rp),
+                        true,
+                    );
+                    adv.solo_decidir_archivo = true;
+                    patron_advs.push(adv);
+                    patron_items.insert(emp.nombrearchivo.clone(), UnprocessedNomina {
+                        filename: file_display_name.clone(),
                         uuid: emp.uuid.clone().unwrap_or_default(),
                         rfc_emisor: emp.rfc_emisor.clone().unwrap_or_default(),
                         rfc_receptor: emp.rfc_receptor.clone().unwrap_or_default(),
@@ -196,6 +227,7 @@ pub fn process_nominas(
                         ),
                         is_sat_error: false,
                     });
+                    context_filtered.push((file_display_name, emp));
                     continue;
                 }
             }
@@ -406,6 +438,105 @@ pub fn process_nominas(
         false
     });
 
+    // ── Revisión de discrepancias: el usuario decide qué nóminas cargar ──
+    match revisor {
+        None => {
+            if !patron_items.is_empty() {
+                valid_employees.retain(|e| !patron_items.contains_key(&e.nombrearchivo));
+                invalid_items.extend(patron_items.into_values());
+            }
+        }
+        Some(revisar) => {
+            use crate::advertencias_carga as adv;
+            let catalogo = crate::db::get_global_pool()
+                .and_then(|p| p.get().ok())
+                .map(|mut c| {
+                    adv::cargar_catalogo(&mut *c, revision_id).unwrap_or_else(|e| {
+                        log::warn!("Advertencias de nóminas: sin catálogo de empleados ({})", e);
+                        adv::CatalogoEmpleados::default()
+                    })
+                })
+                .unwrap_or_default();
+            let registros: Vec<adv::RegistroTrabajador> = valid_employees
+                .iter()
+                .map(|e| adv::RegistroTrabajador {
+                    archivo: e.nombrearchivo.clone(),
+                    nss: e.numseguridadsocial.clone(),
+                    nombre: e.nombre.clone(),
+                    rfc: e.rfc_receptor.clone(),
+                    curp: e.curp_receptor.clone(),
+                })
+                .collect();
+            let presentes: HashSet<&str> = valid_employees.iter().map(|e| e.nombrearchivo.as_str()).collect();
+            let mut advertencias = adv::detectar_trabajadores(&registros, &catalogo);
+            advertencias.extend(patron_advs.into_iter().filter(|a| a.archivos.iter().any(|f| presentes.contains(f.as_str()))));
+            let advertencias = adv::numerar(advertencias);
+            if !advertencias.is_empty() {
+                let archivos: Vec<String> = presentes
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<std::collections::BTreeSet<String>>()
+                    .into_iter()
+                    .collect();
+                progress_callback(0, 0, "Esperando tu decisión sobre las discrepancias encontradas...");
+                match revisar(archivos.clone(), advertencias.clone()) {
+                    adv::DecisionCarga::Cancelar => {
+                        for e in valid_employees.drain(..) {
+                            invalid_items.push(UnprocessedNomina {
+                                filename: e.nombrearchivo.clone(),
+                                uuid: e.uuid.as_deref().unwrap_or("").trim().to_uppercase(),
+                                rfc_emisor: e.rfc_emisor.clone().unwrap_or_default(),
+                                rfc_receptor: e.rfc_receptor.clone().unwrap_or_default(),
+                                total: e.total.unwrap_or(0.0),
+                                category: "CARGA CANCELADA".to_string(),
+                                reason: "Se decidió no cargar ninguna nómina al revisar las discrepancias.".to_string(),
+                                is_sat_error: false,
+                            });
+                        }
+                    }
+                    adv::DecisionCarga::Cargar { incluidos, acciones } => {
+                        let cambios = adv::cambios_por_trabajador(&advertencias, &acciones);
+                        let mut conservadas = Vec::with_capacity(valid_employees.len());
+                        for mut e in valid_employees.drain(..) {
+                            if !incluidos.contains(&e.nombrearchivo) {
+                                invalid_items.push(UnprocessedNomina {
+                                    filename: e.nombrearchivo.clone(),
+                                    uuid: e.uuid.as_deref().unwrap_or("").trim().to_uppercase(),
+                                    rfc_emisor: e.rfc_emisor.clone().unwrap_or_default(),
+                                    rfc_receptor: e.rfc_receptor.clone().unwrap_or_default(),
+                                    total: e.total.unwrap_or(0.0),
+                                    category: "OMITIDA POR EL USUARIO".to_string(),
+                                    reason: "Se decidió no cargar esta nómina al revisar sus discrepancias.".to_string(),
+                                    is_sat_error: false,
+                                });
+                                continue;
+                            }
+                            let clave = adv::ClaveTrabajador::nueva(
+                                e.numseguridadsocial.as_deref(),
+                                e.nombre.as_deref(),
+                                e.rfc_receptor.as_deref(),
+                                e.curp_receptor.as_deref(),
+                            );
+                            if let Some(c) = cambios.get(&(e.nombrearchivo.clone(), clave)) {
+                                for (campo, v) in c {
+                                    match campo {
+                                        adv::CampoAdvertencia::Nss => e.numseguridadsocial = Some(v.clone()),
+                                        adv::CampoAdvertencia::Rfc => e.rfc_receptor = Some(v.clone()),
+                                        adv::CampoAdvertencia::Curp => e.curp_receptor = Some(v.clone()),
+                                        adv::CampoAdvertencia::Nombre => e.nombre = Some(v.clone()),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            conservadas.push(e);
+                        }
+                        valid_employees = conservadas;
+                    }
+                }
+            }
+        }
+    }
+
     let other_inv = dropped_missing_fields;
 
     // Sort valid employees using dedicated CPU pool
@@ -467,6 +598,7 @@ pub fn process_nominas(
     }
 
     // Guardar en la base de datos PostgreSQL si hay empleados válidos
+    let mut error_guardado: Option<String> = None;
     if !valid_employees.is_empty() {
         let total_val = valid_employees.len();
         progress_callback(
@@ -508,11 +640,13 @@ pub fn process_nominas(
                     }
                     Err(e) => {
                         log::error!("Error al guardar nóminas concurrentes en PostgreSQL: {}", e);
+                        error_guardado = Some(e.to_string());
                     }
                 }
             }
             Err(e) => {
                 log::warn!("No se pudo inicializar pool de PostgreSQL para guardar nóminas: {}", e);
+                error_guardado = Some(format!("Sin conexión con la base de datos: {}", e));
             }
         }
     }
@@ -526,5 +660,6 @@ pub fn process_nominas(
         not_found_count: stats.not_found_count,
         invalid_items,
         excel_path: generated_excel_path,
+        error_guardado,
     })
 }

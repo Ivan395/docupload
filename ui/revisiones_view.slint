@@ -1,6 +1,7 @@
 import { ScrollView, LineEdit, Button, ComboBox } from "std-widgets.slint";
 import { AppData, AppLogic, RevisionData } from "models.slint";
 import { DatePickerField } from "date_picker.slint";
+import { FormField, FormErrorBanner, LeyendaObligatorios } from "form_field.slint";
 import { RevisionesLoteModal } from "revisiones_lote_modal.slint";
 
 export component RevisionesView inherits Rectangle {
@@ -727,13 +728,13 @@ export component RevisionesView inherits Rectangle {
                                 Rectangle {
                                     height: 28px;
                                     border-radius: 14px;
-                                    background: rev.estatus_imss == "APROBADA POR IMSS" ? #064e3b : #0f172a;
+                                    background: rev.aprobada_imss ? #064e3b : #0f172a;
                                     HorizontalLayout {
                                         padding-left: 10px;
                                         padding-right: 10px;
                                         spacing: 4px;
                                         Text {
-                                            text: rev.estatus_imss == "APROBADA POR IMSS" ? "✓" : "⚖";
+                                            text: rev.aprobada_imss ? "✓" : "⚖";
                                             font-size: 12px;
                                             color: #ffffff;
                                             font-weight: 800;
@@ -789,8 +790,8 @@ export component RevisionesView inherits Rectangle {
                                 Text { text: "Realizada patrón"; font-size: 10px; color: #94a3b8; }
                             }
 
-                            // 2. F. Máx Entrega Rev.
-                            VerticalLayout {
+                            // 2. F. Máx Entrega Rev. (si ya está aprobada por el IMSS se muestra en la última columna, en rojo)
+                            if !rev.aprobada_imss : VerticalLayout {
                                 horizontal-stretch: 1;
                                 spacing: 2px;
                                 Text { text: "F. Máx Entrega Rev."; font-size: 11px; font-weight: 700; color: #64748b; }
@@ -830,12 +831,21 @@ export component RevisionesView inherits Rectangle {
                                 Text { text: rev.fecha_aprobacion_imss == "-- / -- / ----" ? "En estudio" : "Oficio Definitivo"; font-size: 10px; color: #2563eb; }
                             }
 
-                            // 6. F. Máx Aprobación IMSS
-                            VerticalLayout {
+                            // 6. F. Máx Aprobación IMSS (solo mientras el IMSS no apruebe)
+                            if !rev.aprobada_imss : VerticalLayout {
                                 horizontal-stretch: 1;
                                 spacing: 2px;
                                 Text { text: "F. Máx Aprobación IMSS"; font-size: 11px; font-weight: 700; color: #64748b; }
                                 Text { text: rev.fecha_maxima_aprobacion_imss; font-size: 13px; font-weight: 800; color: #b91c1c; }
+                                Text { text: "Término legal"; font-size: 10px; color: #b91c1c; }
+                            }
+
+                            // 6b. Aprobada por IMSS: el plazo vigente es la entrega de la revisión (grid de 5 columnas)
+                            if rev.aprobada_imss : VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                Text { text: "F. Máx Entrega Rev."; font-size: 11px; font-weight: 700; color: #b91c1c; }
+                                Text { text: rev.fecha_maxima_entrega_revision; font-size: 13px; font-weight: 800; color: #b91c1c; }
                                 Text { text: "Término legal"; font-size: 10px; color: #b91c1c; }
                             }
                         }
@@ -1113,21 +1123,28 @@ export component RevisionesView inherits Rectangle {
 
                     Rectangle { height: 1px; background: #e2e8f0; }
 
+                    LeyendaObligatorios { }
+                    FormErrorBanner { }
+
                     // Form Scrollable
                     ScrollView {
-                        content-width: self.width;
+                        content-width: self.visible-width;
                         vertical-stretch: 1;
 
                         VerticalLayout {
+                            // La barra de desplazamiento se dibuja encima del contenido.
+                            padding-right: 12px;
                             alignment: start;
                             spacing: 8px;
 
                             // Campo: Nombre de la Revisión
-                            VerticalLayout {
-                                spacing: 2px;
-                                Text { text: "Nombre del Expediente / Revisión *"; font-size: 10px; font-weight: 700; color: #334155; }
+                            FormField {
+                                label: "Nombre del Expediente / Revisión";
+                                campo: "nombre";
+                                required: true;
                                 input_rev_nombre := LineEdit {
                                     text <=> AppData.rev_form_nombre;
+                                    edited => { AppLogic.limpiar_error_campo("nombre"); }
                                     placeholder-text: "Ej. Revisión Ordinaria Ejercicio Fiscal 2023 - Obra Insurgentes";
                                     accepted => { input_rev_folio.focus(); }
                                 }
@@ -1137,21 +1154,28 @@ export component RevisionesView inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 10px;
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Folio IMSS (Opcional)"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Folio IMSS";
+                                    campo: "folio";
                                     input_rev_folio := LineEdit {
                                         text <=> AppData.rev_form_folio;
-                                        placeholder-text: "Ej. REV-IMSS-2023-0891 (Opcional)";
+                                        edited => { AppLogic.limpiar_error_campo("folio"); }
+                                        placeholder-text: "Ej. REV-IMSS-2023-0891";
                                         accepted => { dp_rev_ent_imss.focus(); }
                                     }
                                 }
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 2;
-                                    spacing: 2px;
-                                    Text { text: "Concepto de Diferencia"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Concepto de Diferencia";
+                                    campo: "concepto";
                                     ComboBox {
                                         model: AppData.conceptos_combo;
                                         current-value <=> AppData.rev_form_concepto_val;
@@ -1163,20 +1187,26 @@ export component RevisionesView inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 10px;
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Estatus de la Revisión"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Estatus de la Revisión";
+                                    campo: "estatus";
                                     ComboBox {
                                         model: AppData.estatus_combo;
                                         current-value <=> AppData.rev_form_estatus_val;
                                     }
                                 }
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Estatus Dictamen IMSS"; font-size: 10px; font-weight: 700; color: #334155; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Estatus Dictamen IMSS";
+                                    campo: "estatus_imss";
                                     ComboBox {
                                         model: AppData.estatus_imss_combo;
                                         current-value <=> AppData.rev_form_estatus_imss_val;
@@ -1193,12 +1223,16 @@ export component RevisionesView inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 10px;
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Fecha Entrega IMSS"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Fecha Entrega IMSS";
+                                    campo: "f_ent_imss";
                                     dp_rev_ent_imss := DatePickerField {
                                         date-val <=> AppData.rev_form_fecha_entrega_imss;
+                                        changed date-val => { AppLogic.limpiar_error_campo("f_ent_imss"); }
                                         placeholder-text: "DD/MM/YYYY (ej. 15/10/2023)";
                                         enabled: true;
                                         date-changed(val) => {
@@ -1210,7 +1244,11 @@ export component RevisionesView inherits Rectangle {
 
                                 VerticalLayout {
                                     horizontal-stretch: 1;
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
                                     spacing: 2px;
+                                    alignment: start;
                                     Text { text: "Fecha Máx Aprobación IMSS (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
                                     DatePickerField {
                                         date-val <=> AppData.rev_form_fecha_max_aprobacion_imss;
@@ -1225,12 +1263,16 @@ export component RevisionesView inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 10px;
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Fecha Aprobación IMSS"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Fecha Aprobación IMSS";
+                                    campo: "f_aprob_imss";
                                     dp_rev_aprob_imss := DatePickerField {
                                         date-val <=> AppData.rev_form_fecha_aprobacion_imss;
+                                        changed date-val => { AppLogic.limpiar_error_campo("f_aprob_imss"); }
                                         placeholder-text: "DD/MM/YYYY (opcional si pendiente)";
                                         enabled: true;
                                         date-changed(val) => {
@@ -1242,7 +1284,11 @@ export component RevisionesView inherits Rectangle {
 
                                 VerticalLayout {
                                     horizontal-stretch: 1;
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
                                     spacing: 2px;
+                                    alignment: start;
                                     Text { text: "Fecha Máx Entrega Revisión (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
                                     DatePickerField {
                                         date-val <=> AppData.rev_form_fecha_max_entrega_rev;
@@ -1257,12 +1303,16 @@ export component RevisionesView inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 10px;
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Fecha Entrega Revisión"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Fecha Entrega Revisión";
+                                    campo: "f_ent_rev";
                                     dp_rev_ent_rev := DatePickerField {
                                         date-val <=> AppData.rev_form_fecha_entrega_rev;
+                                        changed date-val => { AppLogic.limpiar_error_campo("f_ent_rev"); }
                                         placeholder-text: "DD/MM/YYYY (ej. 01/10/2023)";
                                         enabled: true;
                                         date-changed(val) => {
@@ -1274,7 +1324,11 @@ export component RevisionesView inherits Rectangle {
 
                                 VerticalLayout {
                                     horizontal-stretch: 1;
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
                                     spacing: 2px;
+                                    alignment: start;
                                     Text { text: "Fecha Máx Entrega IMSS (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
                                     DatePickerField {
                                         date-val <=> AppData.rev_form_fecha_max_entrega_imss;
@@ -1292,24 +1346,32 @@ export component RevisionesView inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 10px;
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Inicio"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Inicio del periodo";
+                                    campo: "periodo_inicio";
                                     dp_rev_per_ini := DatePickerField {
                                         date-val <=> AppData.rev_form_periodo_inicio;
+                                        changed date-val => { AppLogic.limpiar_error_campo("periodo_inicio"); }
                                         placeholder-text: "DD/MM/YYYY (ej. 01/01/2023)";
                                         enabled: true;
                                         accepted => { dp_rev_per_fin.focus(); }
                                     }
                                 }
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Fin"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Fin del periodo";
+                                    campo: "periodo_fin";
                                     dp_rev_per_fin := DatePickerField {
                                         date-val <=> AppData.rev_form_periodo_fin;
+                                        changed date-val => { AppLogic.limpiar_error_campo("periodo_fin"); }
                                         placeholder-text: "DD/MM/YYYY (ej. 31/12/2023)";
                                         enabled: true;
                                         accepted => { dp_rev_ent_rev.focus(); }
@@ -1360,12 +1422,16 @@ export component RevisionesView inherits Rectangle {
                             if AppData.rev_form_pidio_prorroga : HorizontalLayout {
                                 spacing: 10px;
 
-                                VerticalLayout {
+                                FormField {
                                     horizontal-stretch: 1;
-                                    spacing: 2px;
-                                    Text { text: "Fecha Aprobación Prórroga"; font-size: 10px; font-weight: 700; color: #475569; }
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
+                                    label: "Fecha Aprobación Prórroga";
+                                    campo: "f_aprob_pror";
                                     DatePickerField {
                                         date-val <=> AppData.rev_form_fecha_aprobacion_prorroga;
+                                        changed date-val => { AppLogic.limpiar_error_campo("f_aprob_pror"); }
                                         placeholder-text: "DD/MM/YYYY (ej. 05/11/2023)";
                                         enabled: true;
                                         date-changed(val) => {
@@ -1376,7 +1442,11 @@ export component RevisionesView inherits Rectangle {
 
                                 VerticalLayout {
                                     horizontal-stretch: 1;
+                                    // Columnas proporcionales a horizontal-stretch, no a su contenido.
+                                    preferred-width: 0px;
+                                    min-width: 0px;
                                     spacing: 2px;
+                                    alignment: start;
                                     Text { text: "Fecha Entrega con Prórroga (Auto)"; font-size: 10px; font-weight: 700; color: #475569; }
                                     DatePickerField {
                                         date-val <=> AppData.rev_form_fecha_entrega_con_prorroga;

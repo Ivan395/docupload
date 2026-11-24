@@ -48,6 +48,9 @@ pub struct CedulaMismatchReport {
     pub expected_rp: String,
     pub expected_cliente: String,
     pub items: Vec<CedulaMismatchItem>,
+    /// Discrepancias en datos del patrón (RP, RFC, razón social) de cédulas que SÍ se pueden
+    /// cargar si el usuario lo decide (ver `advertencias_carga`).
+    pub advertencias_patron: Vec<crate::advertencias_carga::AdvertenciaCarga>,
 }
 
 impl CedulaMismatchReport {
@@ -685,6 +688,7 @@ pub fn process_and_audit_cedulas(
         expected_rp: clean_target_rp.clone().unwrap_or_default(),
         expected_cliente: target_client_name.unwrap_or("").to_string(),
         items: Vec::new(),
+        advertencias_patron: Vec::new(),
     };
 
     let mut valid_businesses: Vec<Business> = Vec::new();
@@ -884,8 +888,12 @@ pub fn process_and_audit_cedulas(
                 }
             }
 
-            // Validar si pertenece al cliente auditado y al Registro Patronal de la revisión
+            // Validar si pertenece al cliente auditado y al Registro Patronal de la revisión.
+            // RP / RFC / razón social distintos son ADVERTENCIAS (el usuario decide si carga);
+            // solo el periodo ilegible bloquea la sección.
             let mut mismatch = false;
+            let mut bloqueante = false;
+            let mut advs_seccion: Vec<crate::advertencias_carga::AdvertenciaCarga> = Vec::new();
 
             // 1. Validar Registro Patronal si se especificó para la revisión
             if let Some(ref target_rp) = clean_target_rp {
@@ -897,16 +905,17 @@ pub fn process_and_audit_cedulas(
                         || (clean_t.len() == 10 && clean_b.len() == 11 && clean_b.starts_with(&clean_t));
                     if !clean_b.is_empty() && !clean_t.is_empty() && !is_same_rp {
                         mismatch = true;
-                        file_mismatches.push(CedulaMismatchItem {
-                            filename: file_display_name.clone(),
-                            error_type: "Registro Patronal no coincide".to_string(),
-                            expected_val: format!("RP: {}", clean_t),
-                            found_val: format!("RP: {}", clean_b),
-                            details: format!(
-                                "El Registro Patronal '{}' extraído de esta cédula no coincide con el Registro Patronal '{}' seleccionado para esta revisión.",
+                        advs_seccion.push(crate::advertencias_carga::advertencia_patron(
+                            crate::advertencias_carga::CampoAdvertencia::RegistroPatronal,
+                            &file_display_name,
+                            &clean_b,
+                            &clean_t,
+                            format!(
+                                "El Registro Patronal de esta cédula ({}) no es el de la revisión ({}). Puede ser un error de captura o una cédula de otro registro.",
                                 clean_b, clean_t
                             ),
-                        });
+                            true,
+                        ));
                     }
                 }
             }
@@ -919,16 +928,17 @@ pub fn process_and_audit_cedulas(
                     let is_generic = crate::validation::is_generic_sat_identifier(&clean_b) || crate::validation::is_generic_sat_identifier(&clean_t);
                     if !clean_b.is_empty() && !clean_t.is_empty() && clean_b != clean_t && !is_generic {
                         mismatch = true;
-                        file_mismatches.push(CedulaMismatchItem {
-                            filename: file_display_name.clone(),
-                            error_type: "RFC no coincide".to_string(),
-                            expected_val: format!("RFC: {}", clean_t),
-                            found_val: format!("RFC: {}", clean_b),
-                            details: format!(
-                                "El RFC '{}' extraído de esta cédula no coincide con el RFC '{}' registrado para la empresa en el Catálogo de Clientes.",
+                        advs_seccion.push(crate::advertencias_carga::advertencia_patron(
+                            crate::advertencias_carga::CampoAdvertencia::RfcPatron,
+                            &file_display_name,
+                            &clean_b,
+                            &clean_t,
+                            format!(
+                                "El RFC del patrón en la cédula ({}) no coincide con el registrado para el cliente ({}).",
                                 clean_b, clean_t
                             ),
-                        });
+                            false,
+                        ));
                     }
                 }
             }
@@ -942,17 +952,18 @@ pub fn process_and_audit_cedulas(
                         if !b_name_clean.is_empty() && !t_name_clean.is_empty() {
                             if !b_name_clean.contains(&t_name_clean) && !t_name_clean.contains(&b_name_clean) {
                                 if clean_target_rfc.is_none() && clean_target_rp.is_none() {
-                                    mismatch = true;
-                                    file_mismatches.push(CedulaMismatchItem {
-                                        filename: file_display_name.clone(),
-                                        error_type: "Empresa no coincide".to_string(),
-                                        expected_val: format!("Empresa: {}", target_client_name.unwrap_or("")),
-                                        found_val: format!("Empresa: {}", b_name),
-                                        details: format!(
-                                            "La razón social '{}' extraída de la cédula no coincide con el nombre de la empresa '{}'.",
-                                            b_name, target_client_name.unwrap_or("")
+                                    advs_seccion.push(crate::advertencias_carga::advertencia_patron(
+                                        crate::advertencias_carga::CampoAdvertencia::RazonSocial,
+                                        &file_display_name,
+                                        b_name,
+                                        target_client_name.unwrap_or(""),
+                                        format!(
+                                            "La razón social de la cédula («{}») no coincide con el cliente de la revisión («{}»).",
+                                            b_name,
+                                            target_client_name.unwrap_or("")
                                         ),
-                                    });
+                                        false,
+                                    ));
                                 }
                             }
                         }
@@ -966,7 +977,7 @@ pub fn process_and_audit_cedulas(
                 .filter(|e| crate::db::cedulas::resolve_periodo_cedula(e).is_none())
                 .count();
             if sin_periodo > 0 {
-                mismatch = true;
+                bloqueante = true;
                 file_mismatches.push(CedulaMismatchItem {
                     filename: file_display_name.clone(),
                     error_type: "Periodo no detectado".to_string(),
@@ -976,9 +987,11 @@ pub fn process_and_audit_cedulas(
                 });
             }
 
-            if mismatch {
+            let _ = mismatch;
+            if bloqueante {
                 continue;
             }
+            mismatch_report.advertencias_patron.extend(advs_seccion);
 
             biz.employees = emps;
             valid_businesses.push(biz);
@@ -1079,6 +1092,13 @@ pub fn process_and_audit_cedulas(
         archivos_cliente_invalido_count,
         None, // Omitir generación innecesaria de Excel temporal durante auditoría
     );
+    // Una cédula con varias secciones repite la misma advertencia del patrón: se deja una
+    {
+        let mut vistas = HashSet::new();
+        mismatch_report
+            .advertencias_patron
+            .retain(|a| vistas.insert((a.campo, a.archivos.clone(), a.encontrado.clone())));
+    }
     audit_res.mismatch_report = mismatch_report.clone();
 
     Ok((audit_res, valid_businesses, mismatch_report))

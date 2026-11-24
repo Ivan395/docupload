@@ -1,0 +1,299 @@
+// Posibles empleados duplicados del cliente: el usuario decide fusionarlos (eligiendo cuál se
+// conserva) o marcarlos como personas distintas. La lógica vive en src/duplicados_ui.rs.
+import { ListView } from "std-widgets.slint";
+import { AppData, AppLogic, ParDuplicadoUi } from "models.slint";
+import { ModalOverlay } from "modal_shell.slint";
+import { FormErrorBanner } from "form_field.slint";
+
+component BotonDup inherits Rectangle {
+    in property <string> texto;
+    in property <string> estilo: "neutro"; // neutro | primario | peligro
+    in property <bool> habilitado: true;
+    callback clicked();
+
+    height: 30px;
+    border-radius: 6px;
+    background: !root.habilitado ? #e2e8f0
+        : root.estilo == "primario" ? (toque.has-hover ? #1d4ed8 : #1e3a8a)
+        : root.estilo == "peligro" ? (toque.has-hover ? #b91c1c : #dc2626)
+        : (toque.has-hover ? #f1f5f9 : #ffffff);
+    border-width: root.estilo == "neutro" ? 1px : 0px;
+    border-color: #cbd5e1;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: root.texto;
+            font-size: 11px;
+            font-weight: 700;
+            color: !root.habilitado ? #94a3b8 : (root.estilo == "neutro" ? #334155 : #ffffff);
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    toque := TouchArea {
+        enabled: root.habilitado;
+        mouse-cursor: root.habilitado ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+component FichaEmpleado inherits Rectangle {
+    in property <string> nombre;
+    in property <string> nss;
+    in property <string> rfc;
+    in property <string> curp;
+    in property <int> liq;
+    in property <int> nom;
+    in property <bool> recomendado;
+    in property <bool> habilitado: true;
+    callback conservar();
+
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.recomendado ? #93c5fd : #e2e8f0;
+    background: root.recomendado ? #f8fbff : #ffffff;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 3px;
+        Text { text: root.nombre != "" ? root.nombre : "(sin nombre)"; font-size: 12px; font-weight: 800; color: #0f172a; wrap: word-wrap; }
+        Text { text: "NSS: " + (root.nss != "" ? root.nss : "—"); font-size: 11px; font-family: "Noto Sans Mono"; color: #334155; }
+        Text { text: "RFC: " + (root.rfc != "" ? root.rfc : "—"); font-size: 11px; font-family: "Noto Sans Mono"; color: #334155; }
+        Text { text: "CURP: " + (root.curp != "" ? root.curp : "—"); font-size: 11px; font-family: "Noto Sans Mono"; color: #334155; }
+        Text { text: root.liq + " liquidación(es) · " + root.nom + " nómina(s)"; font-size: 10px; color: #64748b; }
+        HorizontalLayout {
+            padding-top: 4px;
+            alignment: start;
+            spacing: 6px;
+            BotonDup {
+                texto: "Conservar este";
+                estilo: root.recomendado ? "primario" : "neutro";
+                habilitado: root.habilitado;
+                clicked => { root.conservar(); }
+            }
+            if root.recomendado : Text {
+                text: "recomendado (tiene más registros)";
+                font-size: 10px;
+                color: #2563eb;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component DuplicadosModal inherits ModalOverlay {
+    ancho-max: 900px;
+    alto-contenido: 720px;
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 12px;
+            VerticalLayout {
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text {
+                    text: "Posibles empleados duplicados" + (AppData.duplicados_cliente_nombre != "" ? " · " + AppData.duplicados_cliente_nombre : "");
+                    font-size: 17px;
+                    font-weight: 800;
+                    color: #0f172a;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "Al cargar cédulas o nóminas con errores de captura se pudo crear un empleado nuevo para alguien que ya existía. Revisa cada par: si es la misma persona, elige cuál conservar y se unirán sus liquidaciones y nóminas; si no, márcalos como personas distintas.";
+                    font-size: 12px;
+                    color: #475569;
+                    wrap: word-wrap;
+                }
+            }
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 14px;
+                background: cerrar_dup.has-hover ? #fee2e2 : #f1f5f9;
+                Text { text: "✕"; font-size: 12px; font-weight: 800; color: cerrar_dup.has-hover ? #b91c1c : #64748b; horizontal-alignment: center; vertical-alignment: center; }
+                cerrar_dup := TouchArea { mouse-cursor: pointer; clicked => { AppLogic.duplicados_cerrar(); } }
+            }
+        }
+
+        FormErrorBanner { }
+
+        if AppData.duplicados_cargando : Text {
+            text: "Procesando…";
+            font-size: 12px;
+            color: #2563eb;
+        }
+
+        if !AppData.duplicados_cargando && AppData.duplicados_items.length == 0 : Rectangle {
+            border-radius: 8px;
+            background: #f0fdf4;
+            border-width: 1px;
+            border-color: #bbf7d0;
+            HorizontalLayout {
+                padding: 14px;
+                spacing: 8px;
+                Image { source: @image-url("assets/icons/check.svg"); colorize: #15803d; width: 16px; height: 16px; }
+                Text { text: "No hay posibles duplicados pendientes de revisar."; font-size: 12px; font-weight: 700; color: #166534; }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for par[i] in AppData.duplicados_items : VerticalLayout {
+                padding-bottom: 10px;
+                padding-right: 8px;
+
+                Rectangle {
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: #e2e8f0;
+                    background: #ffffff;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Rectangle {
+                                height: 20px;
+                                border-radius: 4px;
+                                background: #fef3c7;
+                                HorizontalLayout {
+                                    padding-left: 7px;
+                                    padding-right: 7px;
+                                    Text { text: par.motivo; font-size: 10px; font-weight: 800; color: #92400e; vertical-alignment: center; }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            FichaEmpleado {
+                                horizontal-stretch: 1;
+                                nombre: par.a_nombre;
+                                nss: par.a_nss;
+                                rfc: par.a_rfc;
+                                curp: par.a_curp;
+                                liq: par.a_liq;
+                                nom: par.a_nom;
+                                recomendado: par.a_liq + par.a_nom >= par.b_liq + par.b_nom;
+                                habilitado: !AppData.duplicados_cargando;
+                                conservar => { AppLogic.duplicados_pedir_fusion(i, true); }
+                            }
+                            FichaEmpleado {
+                                horizontal-stretch: 1;
+                                nombre: par.b_nombre;
+                                nss: par.b_nss;
+                                rfc: par.b_rfc;
+                                curp: par.b_curp;
+                                liq: par.b_liq;
+                                nom: par.b_nom;
+                                recomendado: par.b_liq + par.b_nom > par.a_liq + par.a_nom;
+                                habilitado: !AppData.duplicados_cargando;
+                                conservar => { AppLogic.duplicados_pedir_fusion(i, false); }
+                            }
+                        }
+
+                        if AppData.duplicados_confirmar_idx == i : Rectangle {
+                            border-radius: 8px;
+                            background: #fff7ed;
+                            border-width: 1px;
+                            border-color: #fdba74;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 8px;
+                                Text {
+                                    text: "Se unirá «" + (AppData.duplicados_confirmar_conservar_a ? par.b_nombre : par.a_nombre) + "» en «" + (AppData.duplicados_confirmar_conservar_a ? par.a_nombre : par.b_nombre) + "». Sus liquidaciones y nóminas pasarán al empleado que conservas y su NSS quedará como NSS alterno para que no se vuelva a duplicar. Si hay meses con importes distintos, no se hará ningún cambio y se te dirá por qué.";
+                                    font-size: 11px;
+                                    color: #9a3412;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: end;
+                                    BotonDup { texto: "Cancelar"; clicked => { AppLogic.duplicados_cancelar_fusion(); } }
+                                    BotonDup {
+                                        texto: "Sí, unir empleados";
+                                        estilo: "peligro";
+                                        habilitado: !AppData.duplicados_cargando;
+                                        clicked => { AppLogic.duplicados_confirmar_fusion(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        if AppData.duplicados_confirmar_idx != i : HorizontalLayout {
+                            alignment: end;
+                            BotonDup {
+                                texto: "No son la misma persona";
+                                habilitado: !AppData.duplicados_cargando;
+                                clicked => { AppLogic.duplicados_descartar(i); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            BotonDup { texto: "Cerrar"; clicked => { AppLogic.duplicados_cerrar(); } }
+        }
+    }
+}
+
+// Aviso persistente tras una carga: hay posibles duplicados por revisar
+export component AvisoDuplicados inherits Rectangle {
+    width: 360px;
+    height: aviso_layout.preferred-height;
+    border-radius: 10px;
+    background: #1e293b;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: #00000055;
+
+    aviso_layout := HorizontalLayout {
+        padding: 12px;
+        spacing: 10px;
+        Image { source: @image-url("assets/icons/users.svg"); colorize: #fbbf24; width: 20px; height: 20px; }
+        VerticalLayout {
+            spacing: 6px;
+            horizontal-stretch: 1;
+            Text {
+                text: AppData.duplicados_pendientes + " posible(s) empleado(s) duplicado(s)";
+                font-size: 12px;
+                font-weight: 800;
+                color: #ffffff;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Pueden venir de errores de captura en la última carga. Revísalos para corregirlos.";
+                font-size: 11px;
+                color: #cbd5e1;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: start;
+                spacing: 8px;
+                BotonDup {
+                    texto: "Revisar ahora";
+                    estilo: "primario";
+                    clicked => {
+                        AppData.duplicados_aviso_visible = false;
+                        AppLogic.duplicados_abrir(AppData.duplicados_cliente_id);
+                    }
+                }
+                BotonDup {
+                    texto: "Más tarde";
+                    clicked => { AppData.duplicados_aviso_visible = false; }
+                }
+            }
+        }
+    }
+}

@@ -1,5 +1,6 @@
 import { ScrollView, LineEdit, TextEdit, Button, ComboBox } from "std-widgets.slint";
 import { AppData, AppLogic, RegistroPatronalData } from "models.slint";
+import { FormField, FormErrorBanner, LeyendaObligatorios } from "form_field.slint";
 
 export component RegistrosPatronalesView inherits Rectangle {
     background: #f8fafc;
@@ -594,6 +595,9 @@ export component RegistrosPatronalesView inherits Rectangle {
 
                 Rectangle { height: 1px; background: #e2e8f0; }
 
+                LeyendaObligatorios { }
+                FormErrorBanner { }
+
                 // Formulario Scrollable
                 ScrollView {
                     content-width: self.width;
@@ -605,25 +609,21 @@ export component RegistrosPatronalesView inherits Rectangle {
                         padding-bottom: 8px;
 
                         // 1. Número de Registro Patronal (Obligatorio)
-                        VerticalLayout {
-                            spacing: 4px;
-                            HorizontalLayout {
-                                alignment: space-between;
-                                Text { text: "Número de Registro Patronal (NRP) *"; font-size: 11px; font-weight: 700; color: #0f172a; }
-                                Text { text: "11 Caracteres"; font-size: 10px; font-weight: 600; color: #94a3b8; }
-                            }
+                        FormField {
+                            label: "Número de Registro Patronal (NRP)";
+                            label-size: 11px;
+                            campo: "registro";
+                            required: true;
+                            error-vivo: AppData.rp_form_registro_status == "invalid" ? AppData.rp_form_registro_msg : "";
+                            ayuda: AppData.rp_form_registro_status == "valid" ? AppData.rp_form_registro_msg : "11 caracteres: 1 letra y 10 dígitos";
                             LineEdit {
                                 text <=> AppData.rp_form_registro;
                                 placeholder-text: "Ej. Y5839210104";
-                                edited => { AppLogic.validate_rp_input(); }
+                                edited => {
+                                    AppLogic.limpiar_error_campo("registro");
+                                    AppLogic.validate_rp_input();
+                                }
                                 changed text => { AppLogic.validate_rp_input(); }
-                            }
-                            if AppData.rp_form_registro_msg != "" : Text {
-                                text: AppData.rp_form_registro_msg;
-                                font-size: 10px;
-                                font-weight: 600;
-                                color: AppData.rp_form_registro_status == "valid" ? #16a34a : #dc2626;
-                                wrap: word-wrap;
                             }
                         }
 
@@ -723,13 +723,14 @@ export component RegistrosPatronalesView inherits Rectangle {
                                 // CP y Entidad
                                 HorizontalLayout {
                                     spacing: 10px;
-                                    VerticalLayout {
-                                        spacing: 3px;
+                                    FormField {
                                         horizontal-stretch: 1;
-                                        Text { text: "Código Postal (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                        label: "Código Postal";
+                                        campo: "codigo_postal";
                                         LineEdit {
                                             text <=> AppData.rp_form_codigo_postal;
                                             placeholder-text: "5 dígitos";
+                                            edited => { AppLogic.limpiar_error_campo("codigo_postal"); }
                                         }
                                     }
                                     VerticalLayout {
@@ -777,12 +778,14 @@ export component RegistrosPatronalesView inherits Rectangle {
                                 }
 
                                 // Prima de Riesgo
-                                VerticalLayout {
-                                    spacing: 3px;
-                                    Text { text: "Prima de Riesgo RT (% Anual) (Opcional)"; font-size: 10px; font-weight: 700; color: #475569; }
+                                FormField {
+                                    label: "Prima de Riesgo RT (% Anual)";
+                                    campo: "prima";
+                                    ayuda: "Número entre 0.5 y 15";
                                     LineEdit {
                                         text <=> AppData.rp_form_prima_riesgo;
                                         placeholder-text: "Ej. 5.43550";
+                                        edited => { AppLogic.limpiar_error_campo("prima"); }
                                     }
                                 }
 
@@ -837,7 +840,7 @@ export component RegistrosPatronalesView inherits Rectangle {
                         height: 38px;
                         width: 170px;
                         border-radius: 6px;
-                        background: (AppData.rp_form_registro != "" && AppData.rp_form_registro_status == "valid") ? #1e3a8a : #94a3b8;
+                        background: rp_submit_ta.has-hover ? #1e40af : #1e3a8a;
 
                         HorizontalLayout {
                             alignment: center;
@@ -850,10 +853,10 @@ export component RegistrosPatronalesView inherits Rectangle {
                             }
                         }
 
-                        TouchArea {
-                            mouse-cursor: (AppData.rp_form_registro != "" && AppData.rp_form_registro_status == "valid") ? pointer : default;
+                        // Siempre habilitado: al enviar se marcan los campos con error
+                        rp_submit_ta := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => {
-                                if (AppData.rp_form_registro != "" && AppData.rp_form_registro_status == "valid") {
                                     AppLogic.submit_registro_patronal(
                                         AppData.rp_form_id,
                                         AppData.selected_cliente_id,
@@ -869,7 +872,6 @@ export component RegistrosPatronalesView inherits Rectangle {
                                         AppData.rp_form_clase_val,
                                         AppData.rp_form_fraccion_val
                                     );
-                                }
                             }
                         }
                     }

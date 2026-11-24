@@ -1,0 +1,166 @@
+// Componentes comunes para formularios dentro de modales.
+//
+// FormField: etiqueta con marca de obligatorio (*) u "(opcional)", el control (via @children),
+// marco rojo y mensaje cuando el campo tiene error. El error se busca por `campo` en
+// AppData.form_errors (lo llena src/form_errors.rs al validar el envío) y, si no hay,
+// se usa `error-vivo` (validación en tiempo real del propio formulario).
+//
+// FormErrorBanner: caja roja con la causa general del error (servidor, red o validación).
+// Al crearse limpia los errores del formulario anterior, así que cada modal que la incluye
+// abre siempre sin errores viejos.
+import { AppData, AppLogic } from "models.slint";
+
+export component FormField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> campo;
+    in property <bool> required: false;
+    in property <string> ayuda;
+    in property <string> error-vivo;
+    in property <length> label-size: 10px;
+    // true cuando el formulario ya dibuja su propia etiqueta (solo se usa el marco y el mensaje)
+    in property <bool> sin-etiqueta: false;
+
+    property <string> error-envio: root.campo == "" ? "" : AppLogic.campo_error(AppData.form_errors, root.campo);
+    out property <string> error: root.error-envio != "" ? root.error-envio : root.error-vivo;
+    out property <bool> invalido: root.error != "";
+
+    spacing: 3px;
+    alignment: start;
+
+    if !root.sin-etiqueta : HorizontalLayout {
+        spacing: 4px;
+        alignment: start;
+        Text {
+            text: root.label;
+            font-size: root.label-size;
+            font-weight: 700;
+            color: root.invalido ? #b91c1c : #1e293b;
+            vertical-alignment: center;
+        }
+        if root.required : Text {
+            text: "*";
+            font-size: root.label-size + 1px;
+            font-weight: 800;
+            color: #dc2626;
+            vertical-alignment: center;
+        }
+        if !root.required : Text {
+            text: "(opcional)";
+            font-size: root.label-size - 1px;
+            color: #94a3b8;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
+        border-radius: 7px;
+        border-width: 1.5px;
+        border-color: root.invalido ? #dc2626 : transparent;
+        background: root.invalido ? #fef2f2 : transparent;
+        VerticalLayout {
+            padding: 1.5px;
+            @children
+        }
+    }
+
+    // Sin HorizontalLayout: dentro de uno, un Text con word-wrap reporta la altura de una sola
+    // línea y los mensajes largos se enciman con el campo siguiente. Con ancho explícito Slint
+    // sí calcula la altura real del texto ajustado.
+    if root.invalido : Rectangle {
+        height: txt_error.preferred-height;
+        Image {
+            x: 0;
+            y: 1px;
+            source: @image-url("assets/icons/circle-alert.svg");
+            colorize: #dc2626;
+            width: 12px;
+            height: 12px;
+        }
+        txt_error := Text {
+            x: 16px;
+            y: 0;
+            width: parent.width - 16px;
+            text: root.error;
+            font-size: 10px;
+            font-weight: 600;
+            color: #dc2626;
+            wrap: word-wrap;
+        }
+    }
+
+    if !root.invalido && root.ayuda != "" : Text {
+        text: root.ayuda;
+        font-size: 9px;
+        color: #94a3b8;
+        wrap: word-wrap;
+    }
+}
+
+// Leyenda breve para el encabezado de un formulario.
+export component LeyendaObligatorios inherits HorizontalLayout {
+    spacing: 4px;
+    alignment: start;
+    Text { text: "*"; font-size: 11px; font-weight: 800; color: #dc2626; vertical-alignment: center; }
+    Text { text: "Campo obligatorio. Los demás son opcionales."; font-size: 10px; color: #64748b; vertical-alignment: center; }
+}
+
+export component FormErrorBanner inherits VerticalLayout {
+    init => {
+        AppData.limpiar_errores_formulario();
+    }
+
+    if AppData.form_error_general != "" : Rectangle {
+        background: #fef2f2;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: #fecaca;
+
+        // Posiciones absolutas en vez de HorizontalLayout: ver el comentario del mensaje en
+        // FormField (el texto ajustado en varias líneas reportaría altura de una sola).
+        height: txt_banner_titulo.preferred-height + txt_banner_msg.preferred-height + 2px + 20px;
+
+        Image {
+            x: 10px;
+            y: 10px;
+            source: @image-url("assets/icons/circle-alert.svg");
+            colorize: #dc2626;
+            width: 16px;
+            height: 16px;
+        }
+        txt_banner_titulo := Text {
+            x: 34px;
+            y: 10px;
+            width: parent.width - 34px - 38px;
+            text: AppData.form_error_titulo != "" ? AppData.form_error_titulo : "No se pudo completar la operación";
+            font-size: 12px;
+            font-weight: 800;
+            color: #991b1b;
+            wrap: word-wrap;
+        }
+        txt_banner_msg := Text {
+            x: 34px;
+            y: txt_banner_titulo.y + txt_banner_titulo.preferred-height + 2px;
+            width: parent.width - 34px - 38px;
+            text: AppData.form_error_general;
+            font-size: 11px;
+            color: #7f1d1d;
+            wrap: word-wrap;
+        }
+        Rectangle {
+            x: parent.width - 30px;
+            y: 8px;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: cerrar_banner.has-hover ? #fee2e2 : transparent;
+            Text { text: "✕"; font-size: 10px; color: #b91c1c; horizontal-alignment: center; vertical-alignment: center; }
+            cerrar_banner := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    AppData.form_error_general = "";
+                    AppData.form_error_titulo = "";
+                }
+            }
+        }
+    }
+}
